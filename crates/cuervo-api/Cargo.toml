@@ -1,0 +1,48 @@
+[package]
+name = "cuervo-api"
+description = "Control plane API types and server for Cuervo runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["server"]
+server = [
+    "dep:axum",
+    "dep:axum-extra",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tokio",
+    "dep:futures-util",
+    "dep:cuervo-runtime",
+    "dep:cuervo-core",
+    "dep:cuervo-tools",
+    "dep:tracing",
+]
+
+[dependencies]
+# Always available (types)
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+# Server-only dependencies
+axum = { workspace = true, optional = true }
+axum-extra = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+# Workspace crates (server only)
+cuervo-runtime = { workspace = true, optional = true }
+cuervo-core = { workspace = true, optional = true }
+cuervo-tools = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

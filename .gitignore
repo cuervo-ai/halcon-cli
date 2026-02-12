@@ -1,0 +1,89 @@
+# ── Rust ──────────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock is committed for applications (not libraries)
+# Cargo.lock
+
+# Profiling & benchmarks
+*.profraw
+*.profdata
+profdata/
+benches/criterion/
+
+# Generated docs
+/doc/
+
+# ── Secrets & Environment ────────────────────────────
+.env
+.env.*
+.env.local
+!.env.example
+
+# ── IDE & Editors ────────────────────────────────────
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.iml
+*.swp
+*~
+\#*\#
+.\#*
+.rust-analyzer/
+.session.vim
+.history/
+
+# ── OS Generated ─────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# ── Cuervo Local State ──────────────────────────────
+.cuervo/
+!.cuervo/config.toml.example
+
+# ── Testing & Coverage ──────────────────────────────
+/tests/output/
+/tests/tmp/
+coverage/
+*.gcda
+*.gcno
+tarpaulin-report.html
+lcov.info
+
+# ── Storage ──────────────────────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ── Temp & Build ─────────────────────────────────────
+/tmp/
+/temp/
+dist/
+pkg/
+
+# ── Documentation Build ─────────────────────────────
+/docs/_build/
+/docs/site/
+
+# ── Node (if any tooling) ───────────────────────────
+node_modules/
+
+# ── Logs ─────────────────────────────────────────────
+*.log
+logs/
+
+# ── Internal Reports (dev artifacts) ────────────────
+ROOT_CAUSE_REPORT*.md
+STABILITY_REPORT*.md
+TOOLS_*_REPORT.md
+TOOLS_INVENTORY.md
+
+# ── Claude / AI Assistant ───────────────────────────
+.claude/

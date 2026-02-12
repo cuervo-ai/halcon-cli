@@ -1,0 +1,12 @@
+# Default owners for everything
+* @cuervo-ai/core
+
+# Security-sensitive paths require security team review
+crates/cuervo-security/ @cuervo-ai/security
+crates/cuervo-auth/     @cuervo-ai/security
+crates/cuervo-tools/src/path_security.rs @cuervo-ai/security
+crates/cuervo-tools/src/sandbox.rs       @cuervo-ai/security
+SECURITY.md @cuervo-ai/security
+
+# CI/CD changes
+.github/ @cuervo-ai/core

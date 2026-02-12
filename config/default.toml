@@ -1,0 +1,51 @@
+# Cuervo CLI — Default Configuration
+# Override via: ~/.cuervo/config.toml (global) or .cuervo/config.toml (project)
+# Environment variables: CUERVO_DEFAULT_PROVIDER, CUERVO_DEFAULT_MODEL, etc.
+
+[general]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-5-20250929"
+max_tokens = 8192
+temperature = 0.0
+
+[models.providers.anthropic]
+enabled = true
+api_base = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-4-5-20250929"
+
+[models.providers.ollama]
+enabled = true
+api_base = "http://localhost:11434"
+default_model = "llama3.2"
+
+[models.providers.openai]
+enabled = false
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+default_model = "gpt-4o"
+
+[tools]
+confirm_destructive = true
+timeout_secs = 120
+allowed_directories = []
+blocked_patterns = [
+    "**/.env",
+    "**/.env.*",
+    "**/credentials.json",
+    "**/*.pem",
+    "**/*.key",
+]
+
+[security]
+pii_detection = true
+pii_action = "warn"
+audit_enabled = true
+
+[storage]
+max_sessions = 1000
+max_session_age_days = 90
+
+[logging]
+level = "info"
+format = "pretty"

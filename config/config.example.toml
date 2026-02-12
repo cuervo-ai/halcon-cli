@@ -1,0 +1,71 @@
+# Cuervo CLI - Configuración de Ejemplo
+# Copia este archivo a ~/.cuervo/config.toml o ./.cuervo/config.toml
+
+[general]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-5-20250929"
+max_tokens = 8192
+temperature = 0.0
+
+# Configuración de proveedores
+[models.providers.anthropic]
+enabled = true
+api_base = "https://api.anthropic.com"
+# Configura tu API key con: cuervo auth login anthropic
+# o exporta ANTHROPIC_API_KEY en tu entorno
+
+[models.providers.ollama]
+enabled = true
+api_base = "http://localhost:11434"
+default_model = "llama3.2"
+
+[models.providers.openai]
+enabled = false
+api_base = "https://api.openai.com/v1"
+default_model = "gpt-4o"
+
+[models.providers.gemini]
+enabled = false
+default_model = "gemini-1.5-pro"
+
+[models.providers.deepseek]
+enabled = false
+api_base = "https://api.deepseek.com"
+default_model = "deepseek-chat"
+
+# Configuración de herramientas
+[tools]
+confirm_destructive = true
+timeout_secs = 120
+allowed_directories = []
+blocked_patterns = [
+    "**/.env",
+    "**/.env.*",
+    "**/credentials.json",
+    "**/*.pem",
+    "**/*.key",
+]
+
+# Configuración de seguridad
+[security]
+pii_detection = true
+pii_action = "warn"
+audit_enabled = true
+
+# Configuración de almacenamiento
+[storage]
+max_sessions = 1000
+max_session_age_days = 90
+
+# Configuración de logging
+[logging]
+level = "info"
+format = "pretty"
+
+# Configuración de display
+[display]
+theme = "dark"
+brand_color = "#8B5CF6"
+show_banner = true
+show_usage = true
+stream_output = true

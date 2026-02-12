@@ -1,0 +1,11 @@
+pub mod auth;
+pub mod chat;
+pub mod config;
+pub mod doctor;
+pub mod init;
+pub mod mcp_server;
+pub mod memory;
+pub mod serve;
+pub mod status;
+pub mod tools;
+pub mod trace;

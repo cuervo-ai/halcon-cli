@@ -1,0 +1,27 @@
+[package]
+name = "cuervo-providers"
+description = "Model provider adapters: Anthropic, Ollama, OpenAI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cuervo-core = { workspace = true }
+cuervo-storage = { workspace = true }
+
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

@@ -1,0 +1,63 @@
+[package]
+name = "cuervo-cli"
+description = "AI-powered CLI for software development"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cuervo"
+path = "src/main.rs"
+
+[dependencies]
+cuervo-core = { workspace = true }
+cuervo-providers = { workspace = true }
+cuervo-tools = { workspace = true }
+cuervo-auth = { workspace = true }
+cuervo-storage = { workspace = true }
+cuervo-security = { workspace = true }
+cuervo-context = { workspace = true }
+cuervo-mcp = { workspace = true }
+cuervo-runtime = { workspace = true }
+cuervo-api = { workspace = true, features = ["server"] }
+
+async-trait = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+crossterm = { workspace = true }
+reedline = { workspace = true }
+termimad = { workspace = true }
+syntect = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+lru = { workspace = true }
+momoto-core = { workspace = true, optional = true }
+momoto-metrics = { workspace = true, optional = true }
+momoto-intelligence = { workspace = true, optional = true }
+rand = { workspace = true }
+dirs = "5"
+ratatui = { workspace = true, optional = true }
+tui-textarea = { workspace = true, optional = true }
+
+[features]
+default = ["color-science"]
+color-science = ["momoto-core", "momoto-metrics", "momoto-intelligence"]
+tui = ["ratatui", "tui-textarea"]
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }

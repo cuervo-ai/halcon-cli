@@ -1,0 +1,21 @@
+[package]
+name = "cuervo-core"
+description = "Core domain types, traits, and events for Cuervo CLI. Zero I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+glob = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
