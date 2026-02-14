@@ -1,9 +1,12 @@
-//! Directory tree tool — recursive listing with depth limit.
+//! Directory tree tool — async recursive listing with depth limit.
 //!
 //! Generates a tree-style view of a directory structure, similar to
 //! the Unix `tree` command. Useful for understanding project layout.
+//!
+//! Uses `FsService::read_dir_async()` for non-blocking directory reads.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -12,23 +15,21 @@ use cuervo_core::error::{CuervoError, Result};
 use cuervo_core::traits::Tool;
 use cuervo_core::types::{PermissionLevel, ToolInput, ToolOutput};
 
+use crate::fs_service::FsService;
+
 /// Maximum depth to prevent runaway recursion.
 const MAX_DEPTH: u32 = 10;
 /// Maximum entries to prevent enormous output.
 const MAX_ENTRIES: usize = 2000;
 
 /// Display a directory's contents as a tree.
-pub struct DirectoryTreeTool;
-
-impl DirectoryTreeTool {
-    pub fn new() -> Self {
-        Self
-    }
+pub struct DirectoryTreeTool {
+    fs: Arc<FsService>,
 }
 
-impl Default for DirectoryTreeTool {
-    fn default() -> Self {
-        Self::new()
+impl DirectoryTreeTool {
+    pub fn new(fs: Arc<FsService>) -> Self {
+        Self { fs }
     }
 }
 
@@ -60,7 +61,7 @@ impl Tool for DirectoryTreeTool {
             .min(MAX_DEPTH as u64) as u32;
 
         let root = if Path::new(path_str).is_absolute() {
-            std::path::PathBuf::from(path_str)
+            PathBuf::from(path_str)
         } else {
             let wd = &input.working_directory;
             Path::new(wd).join(path_str)
@@ -81,19 +82,68 @@ impl Tool for DirectoryTreeTool {
         }
 
         let mut output = String::new();
-        let mut count = 0;
+        let mut count = 0usize;
         let mut truncated = false;
 
         output.push_str(&format!("{}/\n", root.display()));
-        build_tree(
-            &root,
-            "",
-            0,
-            max_depth,
-            &mut output,
-            &mut count,
-            &mut truncated,
-        );
+
+        // Iterative stack-based async traversal.
+        // Each entry: (dir_path, prefix, depth).
+        let mut stack: Vec<(PathBuf, String, u32)> = vec![(root.clone(), String::new(), 0)];
+
+        while let Some((dir, prefix, depth)) = stack.pop() {
+            if depth >= max_depth || truncated {
+                continue;
+            }
+
+            let entries = match self.fs.read_dir_async(&dir).await {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            // Filter hidden and noise directories.
+            let entries: Vec<_> = entries
+                .into_iter()
+                .filter(|e| {
+                    !e.name.starts_with('.')
+                        && e.name != "node_modules"
+                        && e.name != "target"
+                        && e.name != "__pycache__"
+                })
+                .collect();
+
+            // Collect child dirs to push onto stack (in reverse order so first is processed first).
+            let mut child_dirs: Vec<(PathBuf, String, u32)> = Vec::new();
+
+            let total = entries.len();
+            for (i, entry) in entries.iter().enumerate() {
+                if count >= MAX_ENTRIES {
+                    truncated = true;
+                    break;
+                }
+
+                let is_last = i == total - 1;
+                let connector = if is_last { "└── " } else { "├── " };
+                let child_prefix = if is_last { "    " } else { "│   " };
+
+                if entry.is_dir {
+                    output.push_str(&format!("{prefix}{connector}{}/\n", entry.name));
+                } else {
+                    output.push_str(&format!("{prefix}{connector}{}\n", entry.name));
+                }
+                count += 1;
+
+                if entry.is_dir {
+                    let new_prefix = format!("{prefix}{child_prefix}");
+                    child_dirs.push((entry.path.clone(), new_prefix, depth + 1));
+                }
+            }
+
+            // Push child dirs in reverse so they're processed in order.
+            for child in child_dirs.into_iter().rev() {
+                stack.push(child);
+            }
+        }
 
         if truncated {
             output.push_str(&format!(
@@ -132,91 +182,17 @@ impl Tool for DirectoryTreeTool {
     }
 }
 
-/// Recursively build a tree string.
-fn build_tree(
-    dir: &Path,
-    prefix: &str,
-    depth: u32,
-    max_depth: u32,
-    output: &mut String,
-    count: &mut usize,
-    truncated: &mut bool,
-) {
-    if depth >= max_depth || *truncated {
-        return;
-    }
-
-    let mut entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
-        Err(_) => return,
-    };
-
-    // Sort: directories first, then alphabetically.
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        match (a_dir, b_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.file_name().cmp(&b.file_name()),
-        }
-    });
-
-    // Skip hidden and common noise directories.
-    entries.retain(|e| {
-        let name = e.file_name();
-        let name_str = name.to_string_lossy();
-        !name_str.starts_with('.')
-            && name_str != "node_modules"
-            && name_str != "target"
-            && name_str != "__pycache__"
-            && name_str != ".git"
-    });
-
-    let total = entries.len();
-    for (i, entry) in entries.iter().enumerate() {
-        if *count >= MAX_ENTRIES {
-            *truncated = true;
-            return;
-        }
-
-        let is_last = i == total - 1;
-        let connector = if is_last { "└── " } else { "├── " };
-        let child_prefix = if is_last { "    " } else { "│   " };
-
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-
-        if is_dir {
-            output.push_str(&format!("{prefix}{connector}{name_str}/\n"));
-        } else {
-            output.push_str(&format!("{prefix}{connector}{name_str}\n"));
-        }
-        *count += 1;
-
-        if is_dir {
-            let new_prefix = format!("{prefix}{child_prefix}");
-            build_tree(
-                &entry.path(),
-                &new_prefix,
-                depth + 1,
-                max_depth,
-                output,
-                count,
-                truncated,
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn test_fs() -> Arc<FsService> {
+        Arc::new(FsService::new(vec![], vec![]))
+    }
+
     #[test]
     fn tool_metadata() {
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         assert_eq!(tool.name(), "directory_tree");
         assert_eq!(tool.permission_level(), PermissionLevel::ReadOnly);
         assert!(!tool.description().is_empty());
@@ -224,7 +200,7 @@ mod tests {
 
     #[test]
     fn input_schema_valid() {
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let schema = tool.input_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["path"].is_object());
@@ -233,7 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_path_argument() {
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let input = ToolInput {
             tool_use_id: "test".into(),
             arguments: json!({}),
@@ -245,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_directory() {
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let input = ToolInput {
             tool_use_id: "test".into(),
             arguments: json!({"path": "/nonexistent_dir_xyz"}),
@@ -258,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn file_not_directory() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let input = ToolInput {
             tool_use_id: "test".into(),
             arguments: json!({"path": tmp.path().to_str().unwrap()}),
@@ -273,12 +249,11 @@ mod tests {
     #[tokio::test]
     async fn list_tmp_directory() {
         let dir = tempfile::tempdir().unwrap();
-        // Create some test files/dirs.
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "content").unwrap();
         std::fs::write(dir.path().join("src").join("main.rs"), "fn main(){}").unwrap();
 
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let input = ToolInput {
             tool_use_id: "test".into(),
             arguments: json!({"path": dir.path().to_str().unwrap(), "depth": 3}),
@@ -303,7 +278,7 @@ mod tests {
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("deep.txt"), "deep").unwrap();
 
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let input = ToolInput {
             tool_use_id: "test".into(),
             arguments: json!({"path": dir.path().to_str().unwrap(), "depth": 1}),
@@ -322,7 +297,7 @@ mod tests {
         std::fs::create_dir(dir.path().join(".hidden")).unwrap();
         std::fs::create_dir(dir.path().join("visible")).unwrap();
 
-        let tool = DirectoryTreeTool::new();
+        let tool = DirectoryTreeTool::new(test_fs());
         let input = ToolInput {
             tool_use_id: "test".into(),
             arguments: json!({"path": dir.path().to_str().unwrap()}),
@@ -334,28 +309,23 @@ mod tests {
         assert!(!result.content.contains(".hidden"));
     }
 
-    #[test]
-    fn tree_connectors() {
-        // Verify the tree drawing characters work.
+    #[tokio::test]
+    async fn tree_connectors() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("aaa.txt"), "").unwrap();
         std::fs::write(dir.path().join("zzz.txt"), "").unwrap();
 
-        let mut output = String::new();
-        let mut count = 0;
-        let mut truncated = false;
-        build_tree(
-            dir.path(),
-            "",
-            0,
-            3,
-            &mut output,
-            &mut count,
-            &mut truncated,
-        );
+        let tool = DirectoryTreeTool::new(test_fs());
+        let input = ToolInput {
+            tool_use_id: "test".into(),
+            arguments: json!({"path": dir.path().to_str().unwrap(), "depth": 3}),
+            working_directory: "/tmp".into(),
+        };
 
-        assert!(output.contains("├──"));
-        assert!(output.contains("└──"));
-        assert_eq!(count, 2);
+        let result = tool.execute(input).await.unwrap();
+        assert!(result.content.contains("├──"));
+        assert!(result.content.contains("└──"));
+        let meta = result.metadata.unwrap();
+        assert_eq!(meta["entries"], 2);
     }
 }

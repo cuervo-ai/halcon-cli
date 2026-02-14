@@ -107,8 +107,8 @@ impl OrchestratorResult {
 /// Orchestrator configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
-    /// Enable the multi-agent orchestrator. Default: false.
-    #[serde(default)]
+    /// Enable the multi-agent orchestrator. Default: true.
+    #[serde(default = "default_enabled_true")]
     pub enabled: bool,
     /// Maximum number of sub-agents running concurrently within a wave.
     #[serde(default = "default_max_concurrent")]
@@ -122,6 +122,13 @@ pub struct OrchestratorConfig {
     /// Enable inter-agent communication channels.
     #[serde(default)]
     pub enable_communication: bool,
+    /// Minimum step confidence to consider for delegation. Default: 0.7.
+    #[serde(default = "default_min_delegation_confidence")]
+    pub min_delegation_confidence: f64,
+}
+
+fn default_enabled_true() -> bool {
+    true
 }
 
 fn default_max_concurrent() -> usize {
@@ -132,14 +139,19 @@ fn default_shared_budget() -> bool {
     true
 }
 
+fn default_min_delegation_confidence() -> f64 {
+    0.7
+}
+
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_concurrent_agents: default_max_concurrent(),
             sub_agent_timeout_secs: 0,
             shared_budget: default_shared_budget(),
             enable_communication: false,
+            min_delegation_confidence: default_min_delegation_confidence(),
         }
     }
 }
@@ -152,7 +164,7 @@ mod tests {
     #[test]
     fn orchestrator_config_defaults() {
         let config = OrchestratorConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.max_concurrent_agents, 3);
         assert_eq!(config.sub_agent_timeout_secs, 0);
         assert!(config.shared_budget);
@@ -166,6 +178,7 @@ mod tests {
             sub_agent_timeout_secs: 120,
             shared_budget: false,
             enable_communication: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: OrchestratorConfig = serde_json::from_str(&json).unwrap();
@@ -177,9 +190,10 @@ mod tests {
 
     #[test]
     fn orchestrator_config_serde_empty_defaults() {
+        // When deserialized from empty JSON, `enabled` uses default_enabled_true() = true.
         let json = "{}";
         let config: OrchestratorConfig = serde_json::from_str(json).unwrap();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.max_concurrent_agents, 3);
         assert_eq!(config.sub_agent_timeout_secs, 0);
         assert!(config.shared_budget);

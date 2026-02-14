@@ -108,6 +108,7 @@ pub async fn run_replay(
 
     let silent_sink = crate::render::sink::SilentSink::new();
     let default_planning_config = cuervo_core::types::PlanningConfig::default();
+    let default_orch_config = cuervo_core::types::OrchestratorConfig::default();
     let ctx = AgentContext {
         provider: &provider,
         session: &mut replay_session,
@@ -139,6 +140,12 @@ pub async fn run_replay(
         registry: None,
         episode_id: None,
         planning_config: &default_planning_config,
+        orchestrator_config: &default_orch_config,
+        tool_selection_enabled: false,
+        task_bridge: None,
+        reasoning_config: None,
+        context_metrics: None,
+        ctrl_rx: None,
     };
 
     let result = agent::run_agent_loop(ctx).await?;

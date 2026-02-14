@@ -336,6 +336,7 @@ pub async fn run_orchestrator(
 
                     let silent_sink = crate::render::sink::SilentSink::new();
                     let default_planning_config = cuervo_core::types::PlanningConfig::default();
+                    let default_orch_config = OrchestratorConfig::default();
                     let ctx = AgentContext {
                         provider: &provider,
                         session: &mut session,
@@ -361,6 +362,12 @@ pub async fn run_orchestrator(
                         registry: None,
                         episode_id: None,
                         planning_config: &default_planning_config,
+                        orchestrator_config: &default_orch_config,
+                        tool_selection_enabled: false,
+                        task_bridge: None,
+                        reasoning_config: None,
+                        context_metrics: None,
+                        ctrl_rx: None,
                     };
 
                     let loop_result = tokio::time::timeout(timeout_dur, agent::run_agent_loop(ctx)).await;

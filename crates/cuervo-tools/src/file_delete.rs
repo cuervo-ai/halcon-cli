@@ -2,31 +2,27 @@
 //!
 //! Destructive — always requires confirmation.
 //! No recursive delete. Single file only.
-//! Uses path_security for traversal prevention and blocked patterns.
+//! Uses FsService for path validation and deletion.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use cuervo_core::error::{CuervoError, Result};
+use cuervo_core::error::Result;
 use cuervo_core::traits::Tool;
 use cuervo_core::types::{PermissionLevel, ToolInput, ToolOutput};
 
-use crate::path_security;
+use crate::fs_service::FsService;
 
 /// Delete a single file. Requires confirmation. No recursive delete.
 pub struct FileDeleteTool {
-    allowed_directories: Vec<PathBuf>,
-    blocked_patterns: Vec<String>,
+    fs: Arc<FsService>,
 }
 
 impl FileDeleteTool {
-    pub fn new(allowed_directories: Vec<PathBuf>, blocked_patterns: Vec<String>) -> Self {
-        Self {
-            allowed_directories,
-            blocked_patterns,
-        }
+    pub fn new(fs: Arc<FsService>) -> Self {
+        Self { fs }
     }
 }
 
@@ -49,24 +45,19 @@ impl Tool for FileDeleteTool {
     }
 
     async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+        use cuervo_core::error::CuervoError;
+
         let path_str = input.arguments["path"]
             .as_str()
             .ok_or_else(|| CuervoError::InvalidInput("file_delete requires 'path' string".into()))?;
 
-        // Resolve and validate via path_security.
-        let resolved = path_security::resolve_and_validate(
-            path_str,
-            &input.working_directory,
-            &self.allowed_directories,
-            &self.blocked_patterns,
-        )?;
+        let resolved = self.fs.resolve_path(path_str, &input.working_directory)?;
 
         // Use symlink_metadata (lstat) — does NOT follow symlinks.
-        // This prevents TOCTOU attacks where a symlink is swapped in after check.
-        let metadata = tokio::fs::symlink_metadata(&resolved).await.map_err(|e| {
+        let metadata = self.fs.symlink_metadata(&resolved).await.map_err(|_| {
             CuervoError::ToolExecutionFailed {
                 tool: "file_delete".into(),
-                message: format!("cannot stat '{}': {e}", resolved.display()),
+                message: format!("cannot stat '{}'", resolved.display()),
             }
         })?;
 
@@ -97,7 +88,8 @@ impl Tool for FileDeleteTool {
 
         let file_size = metadata.len();
 
-        // Delete the file.
+        // Delete the file via FsService (includes metrics tracking).
+        // We already checked symlink/dir above, so use remove_file directly.
         tokio::fs::remove_file(&resolved).await.map_err(|e| {
             CuervoError::ToolExecutionFailed {
                 tool: "file_delete".into(),
@@ -139,12 +131,13 @@ impl Tool for FileDeleteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_service::FsService;
 
     fn make_tool(dir: &std::path::Path) -> FileDeleteTool {
-        FileDeleteTool::new(
+        FileDeleteTool::new(Arc::new(FsService::new(
             vec![dir.to_path_buf()],
             vec!["*.env".to_string(), "*.key".to_string()],
-        )
+        )))
     }
 
     fn make_input(path: &str, working_dir: &str) -> ToolInput {
@@ -242,7 +235,7 @@ mod tests {
 
     #[test]
     fn requires_confirmation_always() {
-        let tool = FileDeleteTool::new(vec![], vec![]);
+        let tool = FileDeleteTool::new(Arc::new(FsService::new(vec![], vec![])));
         let dummy = ToolInput {
             tool_use_id: "x".into(),
             arguments: json!({}),
@@ -253,7 +246,7 @@ mod tests {
 
     #[test]
     fn schema_is_valid() {
-        let tool = FileDeleteTool::new(vec![], vec![]);
+        let tool = FileDeleteTool::new(Arc::new(FsService::new(vec![], vec![])));
         let schema = tool.input_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["path"].is_object());

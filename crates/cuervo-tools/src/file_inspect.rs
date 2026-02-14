@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -5,23 +7,19 @@ use cuervo_core::error::{CuervoError, Result};
 use cuervo_core::traits::Tool;
 use cuervo_core::types::{PermissionLevel, ToolInput, ToolOutput};
 
-use crate::path_security;
+use crate::fs_service::FsService;
 
 /// Inspect any file: detect format, extract text, show metadata.
 ///
 /// Unlike `file_read` (which only handles UTF-8 text), this tool handles
 /// all file types: PDF, CSV, Excel, images, archives, XML, YAML, Markdown, etc.
 pub struct FileInspectTool {
-    allowed_dirs: Vec<std::path::PathBuf>,
-    blocked_patterns: Vec<String>,
+    fs: Arc<FsService>,
 }
 
 impl FileInspectTool {
-    pub fn new(allowed_dirs: Vec<std::path::PathBuf>, blocked_patterns: Vec<String>) -> Self {
-        Self {
-            allowed_dirs,
-            blocked_patterns,
-        }
+    pub fn new(fs: Arc<FsService>) -> Self {
+        Self { fs }
     }
 }
 
@@ -47,12 +45,7 @@ impl Tool for FileInspectTool {
             .as_str()
             .ok_or_else(|| CuervoError::InvalidInput("file_inspect requires 'path' string".into()))?;
 
-        let resolved = path_security::resolve_and_validate(
-            path_str,
-            &input.working_directory,
-            &self.allowed_dirs,
-            &self.blocked_patterns,
-        )?;
+        let resolved = self.fs.resolve_path(path_str, &input.working_directory)?;
 
         let token_budget = input.arguments["token_budget"]
             .as_u64()
@@ -175,10 +168,11 @@ impl Tool for FileInspectTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_service::FsService;
     use tempfile::TempDir;
 
     fn tool() -> FileInspectTool {
-        FileInspectTool::new(vec![], vec![])
+        FileInspectTool::new(Arc::new(FsService::new(vec![], vec![])))
     }
 
     fn make_input(dir: &str, args: serde_json::Value) -> ToolInput {
@@ -259,7 +253,7 @@ mod tests {
         let file = dir.path().join(".env");
         std::fs::write(&file, "SECRET=abc").unwrap();
 
-        let t = FileInspectTool::new(vec![], vec![".env".into()]);
+        let t = FileInspectTool::new(Arc::new(FsService::new(vec![], vec![".env".into()])));
         let input = make_input(dir.path().to_str().unwrap(), json!({ "path": ".env" }));
         let result = t.execute(input).await;
         assert!(result.is_err());

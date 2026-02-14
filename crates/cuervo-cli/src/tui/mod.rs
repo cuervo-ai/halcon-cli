@@ -11,10 +11,16 @@ pub mod events;
 #[cfg(feature = "tui")]
 pub mod app;
 #[cfg(feature = "tui")]
+pub mod constants;
+#[cfg(feature = "tui")]
 pub mod input;
 #[cfg(feature = "tui")]
 pub mod layout;
 #[cfg(feature = "tui")]
 pub mod state;
+#[cfg(feature = "tui")]
+pub mod overlay;
+#[cfg(feature = "tui")]
+pub mod theme_bridge;
 #[cfg(feature = "tui")]
 pub mod widgets;

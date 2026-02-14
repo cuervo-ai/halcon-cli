@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::orchestrator::OrchestratorConfig;
+use super::reasoning::ReasoningConfig;
 
 /// Severity of a configuration issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +301,12 @@ pub struct AppConfig {
     pub orchestrator: OrchestratorConfig,
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
+    #[serde(default)]
+    pub task_framework: TaskFrameworkConfig,
+    #[serde(default)]
+    pub reasoning: ReasoningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,6 +484,10 @@ pub struct ToolsConfig {
     /// Tool retry configuration for transient failures.
     #[serde(default)]
     pub retry: ToolRetryConfig,
+    /// Timeout in seconds for interactive permission prompts.
+    /// 0 = no timeout (blocks indefinitely). Default: 30.
+    #[serde(default = "default_prompt_timeout")]
+    pub prompt_timeout_secs: u64,
 }
 
 /// Configuration for automatic tool retry on transient failures.
@@ -500,6 +511,10 @@ impl Default for ToolRetryConfig {
     }
 }
 
+fn default_prompt_timeout() -> u64 {
+    30
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
@@ -516,6 +531,7 @@ impl Default for ToolsConfig {
             sandbox: SandboxConfig::default(),
             dry_run: false,
             retry: ToolRetryConfig::default(),
+            prompt_timeout_secs: default_prompt_timeout(),
         }
     }
 }
@@ -669,6 +685,9 @@ pub struct McpServerConfig {
     /// Environment variables to set for the process.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Override permission level per tool name: "ReadOnly" or "Destructive".
+    #[serde(default)]
+    pub tool_permissions: HashMap<String, String>,
 }
 
 /// Agent loop configuration: execution limits and model routing.
@@ -710,7 +729,7 @@ fn default_complexity_threshold() -> u32 {
 impl Default for ModelSelectionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             budget_cap_usd: 0.0,
             complexity_token_threshold: default_complexity_threshold(),
             simple_model: None,
@@ -840,7 +859,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             default_ttl_secs: 3600,
             max_entries: 1000,
         }
@@ -911,7 +930,7 @@ pub struct MemoryConfig {
     /// Token budget for memory context (separate from instruction budget).
     pub retrieval_token_budget: usize,
     /// Enable episodic memory (groups entries into episodes with hybrid retrieval).
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub episodic: bool,
     /// Temporal decay half-life in days for relevance scoring.
     #[serde(default = "default_decay_half_life")]
@@ -938,7 +957,7 @@ impl Default for MemoryConfig {
             auto_summarize: true,
             retrieval_top_k: 5,
             retrieval_token_budget: 2000,
-            episodic: false,
+            episodic: true,
             decay_half_life_days: default_decay_half_life(),
             rrf_k: default_rrf_k(),
         }
@@ -1056,7 +1075,7 @@ fn default_max_reflections() -> usize {
 impl Default for ReflexionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_reflections: default_max_reflections(),
             reflect_on_success: false,
         }
@@ -1084,9 +1103,16 @@ pub struct DisplayConfig {
     /// Terminal background color hex for accessibility contrast checks (default "#1a1a1a").
     #[serde(default = "default_terminal_bg")]
     pub terminal_background: String,
+    /// UI mode: "minimal", "standard" (default), or "expert". Controls progressive disclosure.
+    #[serde(default = "default_ui_mode")]
+    pub ui_mode: String,
 }
 
 fn display_default_true() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -1098,6 +1124,10 @@ fn default_terminal_bg() -> String {
     "#1a1a1a".to_string()
 }
 
+fn default_ui_mode() -> String {
+    "standard".to_string()
+}
+
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
@@ -1107,8 +1137,80 @@ impl Default for DisplayConfig {
             compact_width: 0,
             brand_color: None,
             terminal_background: default_terminal_bg(),
+            ui_mode: default_ui_mode(),
         }
     }
+}
+
+/// Structured task framework configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskFrameworkConfig {
+    /// Enable the structured task framework. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Persist tasks to SQLite for cross-session resume. Default: true.
+    #[serde(default = "default_true")]
+    pub persist_tasks: bool,
+    /// Default maximum retries for tasks. Default: 2.
+    #[serde(default = "default_task_max_retries")]
+    pub default_max_retries: u32,
+    /// Default retry base delay in milliseconds. Default: 500.
+    #[serde(default = "default_task_retry_base_ms")]
+    pub default_retry_base_ms: u64,
+    /// Resume incomplete tasks on startup. Default: false.
+    #[serde(default)]
+    pub resume_on_startup: bool,
+}
+
+fn default_task_max_retries() -> u32 {
+    2
+}
+
+fn default_task_retry_base_ms() -> u64 {
+    500
+}
+
+impl Default for TaskFrameworkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            persist_tasks: true,
+            default_max_retries: default_task_max_retries(),
+            default_retry_base_ms: default_task_retry_base_ms(),
+            resume_on_startup: false,
+        }
+    }
+}
+
+/// Context management configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// Enable dynamic tool selection based on task intent. Default: true.
+    #[serde(default = "default_true")]
+    pub dynamic_tool_selection: bool,
+    /// Per-source governance limits.
+    #[serde(default)]
+    pub governance: GovernanceConfig,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            dynamic_tool_selection: true,
+            governance: GovernanceConfig::default(),
+        }
+    }
+}
+
+/// Governance rules for context assembly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GovernanceConfig {
+    /// Default max tokens per context source. 0 = unlimited.
+    #[serde(default)]
+    pub default_max_tokens_per_source: u32,
+    /// Default TTL in seconds for context contributions. 0 = no expiry.
+    #[serde(default)]
+    pub default_ttl_secs: u64,
 }
 
 #[cfg(test)]
@@ -1124,6 +1226,13 @@ mod tests {
         assert_eq!(config.compact_width, 0);
         assert!(config.brand_color.is_none());
         assert_eq!(config.terminal_background, "#1a1a1a");
+        assert_eq!(config.ui_mode, "standard");
+    }
+
+    #[test]
+    fn ui_mode_default_is_standard() {
+        let config = DisplayConfig::default();
+        assert_eq!(config.ui_mode, "standard");
     }
 
     #[test]
@@ -1266,7 +1375,7 @@ mod tests {
     #[test]
     fn memory_config_episodic_defaults() {
         let config = MemoryConfig::default();
-        assert!(!config.episodic);
+        assert!(config.episodic);
         assert!((config.decay_half_life_days - 30.0).abs() < 0.001);
         assert!((config.rrf_k - 60.0).abs() < 0.001);
     }
@@ -1274,7 +1383,7 @@ mod tests {
     #[test]
     fn reflexion_config_defaults() {
         let config = ReflexionConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.max_reflections, 3);
         assert!(!config.reflect_on_success);
     }
@@ -1282,7 +1391,7 @@ mod tests {
     #[test]
     fn orchestrator_config_defaults() {
         let config = super::OrchestratorConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.max_concurrent_agents, 3);
         assert_eq!(config.sub_agent_timeout_secs, 0);
         assert!(config.shared_budget);
@@ -1434,5 +1543,102 @@ mod tests {
         // Default should be 30
         let default_config = PlanningConfig::default();
         assert_eq!(default_config.timeout_secs, 30);
+    }
+
+    #[test]
+    fn context_config_defaults() {
+        let config = ContextConfig::default();
+        assert!(config.dynamic_tool_selection);
+        assert_eq!(config.governance.default_max_tokens_per_source, 0);
+        assert_eq!(config.governance.default_ttl_secs, 0);
+    }
+
+    #[test]
+    fn context_config_serde_roundtrip() {
+        let config = ContextConfig {
+            dynamic_tool_selection: true,
+            governance: GovernanceConfig {
+                default_max_tokens_per_source: 5000,
+                default_ttl_secs: 300,
+            },
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtrip: ContextConfig = serde_json::from_str(&json).unwrap();
+        assert!(roundtrip.dynamic_tool_selection);
+        assert_eq!(roundtrip.governance.default_max_tokens_per_source, 5000);
+        assert_eq!(roundtrip.governance.default_ttl_secs, 300);
+    }
+
+    #[test]
+    fn context_config_absent_defaults_correctly() {
+        // Simulates loading config TOML that has no [context] section.
+        let config = AppConfig::default();
+        assert!(config.context.dynamic_tool_selection);
+        assert_eq!(config.context.governance.default_max_tokens_per_source, 0);
+    }
+
+    #[test]
+    fn task_framework_config_defaults() {
+        let config = TaskFrameworkConfig::default();
+        assert!(config.enabled);
+        assert!(config.persist_tasks);
+        assert_eq!(config.default_max_retries, 2);
+        assert_eq!(config.default_retry_base_ms, 500);
+        assert!(!config.resume_on_startup);
+    }
+
+    #[test]
+    fn task_framework_config_serde_roundtrip() {
+        let config = TaskFrameworkConfig {
+            enabled: true,
+            persist_tasks: false,
+            default_max_retries: 5,
+            default_retry_base_ms: 1000,
+            resume_on_startup: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtrip: TaskFrameworkConfig = serde_json::from_str(&json).unwrap();
+        assert!(roundtrip.enabled);
+        assert!(!roundtrip.persist_tasks);
+        assert_eq!(roundtrip.default_max_retries, 5);
+        assert_eq!(roundtrip.default_retry_base_ms, 1000);
+        assert!(roundtrip.resume_on_startup);
+    }
+
+    #[test]
+    fn task_framework_absent_defaults_correctly() {
+        // Simulates loading config TOML that has no [task_framework] section.
+        let config = AppConfig::default();
+        assert!(config.task_framework.enabled);
+        assert!(config.task_framework.persist_tasks);
+        assert_eq!(config.task_framework.default_max_retries, 2);
+    }
+
+    #[test]
+    fn reasoning_config_defaults_in_app_config() {
+        let config = AppConfig::default();
+        assert!(config.reasoning.enabled);
+        assert!((config.reasoning.success_threshold - 0.6).abs() < f64::EPSILON);
+        assert_eq!(config.reasoning.max_retries, 1);
+        assert!(config.reasoning.learning_enabled);
+    }
+
+    #[test]
+    fn reasoning_config_serde_in_app_config() {
+        let mut config = AppConfig::default();
+        config.reasoning.enabled = true;
+        config.reasoning.success_threshold = 0.75;
+        let json = serde_json::to_string(&config.reasoning).unwrap();
+        let roundtrip: super::super::ReasoningConfig = serde_json::from_str(&json).unwrap();
+        assert!(roundtrip.enabled);
+        assert!((roundtrip.success_threshold - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn reasoning_config_absent_uses_defaults() {
+        // Simulates loading config TOML that has no [reasoning] section.
+        let config = AppConfig::default();
+        assert!(config.reasoning.enabled);
+        assert!((config.reasoning.exploration_factor - 1.4).abs() < f64::EPSILON);
     }
 }

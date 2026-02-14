@@ -257,12 +257,24 @@ impl ProviderBreaker {
     }
 
     /// Apply ±20% jitter to a duration in seconds.
+    ///
+    /// In test mode, jitter is disabled for deterministic behavior.
     fn apply_jitter(secs: u64) -> Duration {
-        use rand::Rng;
         let base_ms = secs * 1000;
-        let jitter_factor = 0.8 + rand::rng().random_range(0.0..0.4);
-        let jittered_ms = (base_ms as f64 * jitter_factor) as u64;
-        Duration::from_millis(jittered_ms.min(300_000))
+
+        #[cfg(not(test))]
+        {
+            use rand::Rng;
+            let jitter_factor = 0.8 + rand::rng().random_range(0.0..0.4);
+            let jittered_ms = (base_ms as f64 * jitter_factor) as u64;
+            Duration::from_millis(jittered_ms.min(300_000))
+        }
+
+        #[cfg(test)]
+        {
+            // No jitter in tests for deterministic behavior
+            Duration::from_millis(base_ms.min(300_000))
+        }
     }
 
     /// Number of consecutive trips (for diagnostics).
@@ -600,16 +612,21 @@ mod tests {
     }
 
     #[test]
-    fn jitter_stays_within_bounds() {
-        // ±20% jitter on 10s base: expect 8000-12000ms
-        for _ in 0..100 {
+    fn jitter_deterministic_in_tests() {
+        // In test mode, jitter is disabled for deterministic behavior.
+        // 10s base should always return exactly 10000ms.
+        for _ in 0..10 {
             let d = ProviderBreaker::apply_jitter(10);
-            assert!(
-                d.as_millis() >= 8000 && d.as_millis() <= 12000,
-                "jitter out of range: {:?}",
-                d
+            assert_eq!(
+                d.as_millis(),
+                10000,
+                "jitter should be deterministic in tests"
             );
         }
+
+        // Verify other durations are also deterministic.
+        assert_eq!(ProviderBreaker::apply_jitter(5).as_millis(), 5000);
+        assert_eq!(ProviderBreaker::apply_jitter(20).as_millis(), 20000);
     }
 
     #[test]

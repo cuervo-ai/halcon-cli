@@ -11,6 +11,35 @@
 
 **Unifica modelos propietarios, open source y locales en un solo CLI extensible**
 
+---
+
+### 🚀 Instalación Rápida
+
+<table>
+<tr>
+<td>
+
+**Linux / macOS**
+```bash
+curl -fsSL https://raw.githubusercontent.com/cuervo-ai/cuervo-cli/main/scripts/install-binary.sh | sh
+```
+
+</td>
+<td>
+
+**Windows**
+```powershell
+iwr -useb https://raw.githubusercontent.com/cuervo-ai/cuervo-cli/main/scripts/install-binary.ps1 | iex
+```
+
+</td>
+</tr>
+</table>
+
+[📖 Guía de Inicio Rápido](QUICKSTART.md) | [📚 Documentación Completa](INSTALL.md) | [🎯 Ejemplos de Uso](#-uso-rápido)
+
+---
+
 </div>
 
 ## 🚀 Visión
@@ -34,36 +63,200 @@ Cuervo CLI es la primera plataforma de IA para desarrollo que unifica modelos pr
 
 ## 📦 Instalación
 
-### Requisitos Previos
-- **Rust 1.80+** (instalar via [rustup](https://rustup.rs/))
-- **SQLite 3.35+** (generalmente incluido en sistemas modernos)
+### 🚀 Instalación Rápida (Un Solo Comando)
 
-### Instalación desde Cargo
+Instala Cuervo CLI en **menos de 10 segundos** con detección automática de tu plataforma:
+
+<table>
+<tr>
+<td width="50%">
+
+**Linux / macOS**
 ```bash
-cargo install --git https://github.com/cuervo-ai/cuervo-cli
+curl -fsSL https://raw.githubusercontent.com/cuervo-ai/cuervo-cli/main/scripts/install-binary.sh | sh
 ```
 
-### Instalación desde Fuentes
+</td>
+<td width="50%">
+
+**Windows (PowerShell)**
+```powershell
+iwr -useb https://raw.githubusercontent.com/cuervo-ai/cuervo-cli/main/scripts/install-binary.ps1 | iex
+```
+
+</td>
+</tr>
+</table>
+
+**¿Qué hace el instalador?**
+- ✅ **Detecta automáticamente** tu sistema operativo y arquitectura (x86_64, ARM64, etc.)
+- ✅ **Descarga el binario** precompilado desde [GitHub Releases](https://github.com/cuervo-ai/cuervo-cli/releases/latest)
+- ✅ **Verifica integridad** con checksums SHA256
+- ✅ **Instala en** `~/.local/bin/cuervo` (Unix) o `%USERPROFILE%\.local\bin\cuervo.exe` (Windows)
+- ✅ **Configura PATH** automáticamente para tu shell (bash, zsh, fish, PowerShell)
+- ✅ **Fallback inteligente** a `cargo install` si no hay binario para tu plataforma
+
+### ✅ Verificar Instalación
+
+Después de instalar, verifica que funcione correctamente:
+
+```bash
+# Verificar versión
+cuervo --version
+# Salida esperada: cuervo 0.1.0 (f8f41dd0, aarch64-apple-darwin)
+
+# Ejecutar diagnósticos
+cuervo doctor
+
+# Mostrar ayuda
+cuervo --help
+```
+
+Si el comando `cuervo` no se encuentra, recarga tu shell:
+```bash
+# Bash
+source ~/.bashrc
+
+# Zsh
+source ~/.zshrc
+
+# Fish
+source ~/.config/fish/config.fish
+```
+
+---
+
+### 📦 Métodos Alternativos de Instalación
+
+<details>
+<summary><b>Método 2: Instalación desde Cargo</b> (Compilación desde fuentes, ~2-5 minutos)</summary>
+
+**Requisitos previos:**
+- Rust 1.80+ ([instalar rustup](https://rustup.rs/))
+- SQLite 3.35+ (generalmente incluido en sistemas modernos)
+
+```bash
+# Instalar desde repositorio Git
+cargo install --git https://github.com/cuervo-ai/cuervo-cli --features tui --locked
+
+# El binario se instalará en ~/.cargo/bin/cuervo
+```
+
+**Ventajas:**
+- Siempre obtienes la última versión
+- Compilado específicamente para tu sistema
+- Incluye optimizaciones locales
+
+**Desventajas:**
+- Requiere tener Rust instalado
+- Toma varios minutos compilar
+- Requiere espacio en disco para dependencias
+
+</details>
+
+<details>
+<summary><b>Método 3: Descarga Manual de Binarios</b></summary>
+
+1. Ve a la página de [Releases](https://github.com/cuervo-ai/cuervo-cli/releases/latest)
+2. Descarga el archivo para tu plataforma:
+   - **Linux x64 (glibc)**: `cuervo-x86_64-unknown-linux-gnu.tar.gz`
+   - **Linux x64 (musl/Alpine)**: `cuervo-x86_64-unknown-linux-musl.tar.gz`
+   - **macOS Intel**: `cuervo-x86_64-apple-darwin.tar.gz`
+   - **macOS Apple Silicon (M1/M2/M3/M4)**: `cuervo-aarch64-apple-darwin.tar.gz`
+   - **Windows x64**: `cuervo-x86_64-pc-windows-msvc.zip`
+3. Descarga también el archivo `.sha256` correspondiente
+4. Verifica el checksum:
+   ```bash
+   # Linux/macOS
+   sha256sum -c cuervo-*.tar.gz.sha256
+
+   # Windows (PowerShell)
+   (Get-FileHash cuervo-*.zip).Hash -eq (Get-Content cuervo-*.zip.sha256).Split()[0]
+   ```
+5. Extrae el archivo:
+   ```bash
+   # Linux/macOS
+   tar xzf cuervo-*.tar.gz
+
+   # Windows
+   Expand-Archive cuervo-*.zip
+   ```
+6. Mueve el binario a una ubicación en tu PATH:
+   ```bash
+   # Linux/macOS
+   mv cuervo ~/.local/bin/
+   chmod +x ~/.local/bin/cuervo
+
+   # Windows
+   move cuervo.exe %USERPROFILE%\.local\bin\
+   ```
+
+</details>
+
+<details>
+<summary><b>Método 4: Compilación desde Fuentes (Desarrollo)</b></summary>
+
+Para desarrollo activo o contribuciones:
+
 ```bash
 # Clonar el repositorio
-git clone https://github.com/cuervo-ai/cuervo-cli
+git clone https://github.com/cuervo-ai/cuervo-cli.git
 cd cuervo-cli
 
-# Compilar en modo release
-cargo build --release
+# Compilar en modo debug (más rápido, sin optimizaciones)
+cargo build --features tui
 
-# El binario estará en ./target/release/cuervo
+# Compilar en modo release (optimizado, más lento)
+cargo build --release --features tui
+
+# El binario estará en:
+# - Debug: ./target/debug/cuervo
+# - Release: ./target/release/cuervo
+
+# Ejecutar sin instalar
+cargo run --features tui -- --help
+
+# Instalar localmente desde el código fuente
+cargo install --path crates/cuervo-cli --features tui
 ```
 
-### Configuración Inicial
+</details>
+
+---
+
+### ⚙️ Configuración Inicial
+
+Después de instalar, configura tus credenciales de API:
+
 ```bash
-# Ejecutar el asistente de configuración
-cuervo setup
+# Método 1: Asistente interactivo (recomendado)
+cuervo init
 
-# O configurar manualmente
-cuervo auth login anthropic  # Para Anthropic Claude
-cuervo auth login ollama     # Para Ollama local
+# Método 2: Configuración manual por proveedor
+cuervo auth login anthropic   # Para Claude (Anthropic)
+cuervo auth login openai      # Para GPT (OpenAI)
+cuervo auth login deepseek    # Para DeepSeek
+cuervo auth login ollama      # Para modelos locales (Ollama)
+
+# Verificar configuración
+cuervo config show
 ```
+
+**Variables de entorno (alternativa):**
+```bash
+# Añadir a ~/.bashrc, ~/.zshrc, o equivalente
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export DEEPSEEK_API_KEY="sk-..."
+```
+
+---
+
+### 📚 Documentación Completa
+
+- **[Guía de Instalación Completa](INSTALL.md)** - Troubleshooting, plataformas soportadas, métodos avanzados
+- **[Guía de Usuario](docs/USER_GUIDE.md)** - Uso completo del CLI
+- **[Guía de Releases](RELEASE.md)** - Para mantenedores y contribuidores
 
 ## 🎯 Uso Rápido
 

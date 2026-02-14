@@ -38,7 +38,7 @@ impl PromptState {
     pub fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let border_color = if focused { Color::Cyan } else { Color::DarkGray };
         let title = if focused {
-            " Prompt (click ► Send to submit) "
+            " Prompt (Ctrl+Enter to send) "
         } else {
             " Prompt "
         };

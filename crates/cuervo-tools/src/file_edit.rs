@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -5,23 +7,19 @@ use cuervo_core::error::{CuervoError, Result};
 use cuervo_core::traits::Tool;
 use cuervo_core::types::{PermissionLevel, ToolInput, ToolOutput};
 
-use crate::path_security;
+use crate::fs_service::{FsService, MAX_WRITE_SIZE};
 
 /// Maximum source file size for edits (10 MB).
-const MAX_EDIT_FILE_SIZE: usize = 10 * 1024 * 1024;
+const MAX_EDIT_FILE_SIZE: usize = MAX_WRITE_SIZE;
 
 /// Edit a file by replacing exact string matches.
 pub struct FileEditTool {
-    allowed_dirs: Vec<std::path::PathBuf>,
-    blocked_patterns: Vec<String>,
+    fs: Arc<FsService>,
 }
 
 impl FileEditTool {
-    pub fn new(allowed_dirs: Vec<std::path::PathBuf>, blocked_patterns: Vec<String>) -> Self {
-        Self {
-            allowed_dirs,
-            blocked_patterns,
-        }
+    pub fn new(fs: Arc<FsService>) -> Self {
+        Self { fs }
     }
 }
 
@@ -56,48 +54,36 @@ impl Tool for FileEditTool {
         }
         let replace_all = input.arguments["replace_all"].as_bool().unwrap_or(false);
 
-        let resolved = path_security::resolve_and_validate(
-            path_str,
-            &input.working_directory,
-            &self.allowed_dirs,
-            &self.blocked_patterns,
-        )?;
+        let resolved = self.fs.resolve_path(path_str, &input.working_directory)?;
 
         // Reject symlinks: prevent editing through symlinks to escape sandbox.
-        match tokio::fs::symlink_metadata(&resolved).await {
-            Ok(meta) if meta.is_symlink() => {
-                return Err(CuervoError::ToolExecutionFailed {
-                    tool: "file_edit".into(),
-                    message: format!(
-                        "refusing to edit through symlink: {}",
-                        resolved.display()
-                    ),
-                });
-            }
-            Ok(meta) => {
-                // Size limit: reject files too large to edit safely in memory.
-                if meta.len() as usize > MAX_EDIT_FILE_SIZE {
-                    return Err(CuervoError::InvalidInput(format!(
-                        "file_edit: file size {} bytes exceeds limit of {} bytes",
-                        meta.len(),
-                        MAX_EDIT_FILE_SIZE
-                    )));
-                }
-            }
-            Err(e) => {
-                return Err(CuervoError::ToolExecutionFailed {
-                    tool: "file_edit".into(),
-                    message: format!("failed to stat {}: {e}", resolved.display()),
-                });
-            }
-        }
-
-        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+        let meta = self.fs.symlink_metadata(&resolved).await.map_err(|_e| {
             CuervoError::ToolExecutionFailed {
                 tool: "file_edit".into(),
-                message: format!("failed to read {}: {e}", resolved.display()),
+                message: format!("failed to stat {}: file not found", resolved.display()),
             }
         })?;
+
+        if meta.is_symlink() {
+            return Err(CuervoError::ToolExecutionFailed {
+                tool: "file_edit".into(),
+                message: format!(
+                    "refusing to edit through symlink: {}",
+                    resolved.display()
+                ),
+            });
+        }
+
+        // Size limit: reject files too large to edit safely in memory.
+        if meta.len() as usize > MAX_EDIT_FILE_SIZE {
+            return Err(CuervoError::InvalidInput(format!(
+                "file_edit: file size {} bytes exceeds limit of {} bytes",
+                meta.len(),
+                MAX_EDIT_FILE_SIZE
+            )));
+        }
+
+        let content = self.fs.read_to_string(&resolved).await?;
 
         let match_count = content.matches(old_string).count();
 
@@ -129,53 +115,7 @@ impl Tool for FileEditTool {
             content.replacen(old_string, new_string, 1)
         };
 
-        // Atomic write: temp file in same directory + fsync + rename.
-        let parent_dir = resolved.parent().unwrap_or(std::path::Path::new("."));
-        let temp_path = parent_dir.join(format!(
-            ".cuervo_tmp_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-
-        tokio::fs::write(&temp_path, &new_content)
-            .await
-            .map_err(|e| {
-                CuervoError::ToolExecutionFailed {
-                    tool: "file_edit".into(),
-                    message: format!("failed to write temp file: {e}"),
-                }
-            })?;
-
-        // Fsync for durability.
-        let temp_for_sync = temp_path.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let f = std::fs::File::open(&temp_for_sync)?;
-            f.sync_all()?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| CuervoError::ToolExecutionFailed {
-            tool: "file_edit".into(),
-            message: format!("fsync task failed: {e}"),
-        })? {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(CuervoError::ToolExecutionFailed {
-                tool: "file_edit".into(),
-                message: format!("failed to fsync: {e}"),
-            });
-        }
-
-        // Atomic rename.
-        if let Err(e) = tokio::fs::rename(&temp_path, &resolved).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(CuervoError::ToolExecutionFailed {
-                tool: "file_edit".into(),
-                message: format!("failed to write {}: {e}", resolved.display()),
-            });
-        }
+        self.fs.atomic_write(&resolved, new_content.as_bytes()).await?;
 
         let replacements = if replace_all { match_count } else { 1 };
         let mut output_text = format!(
@@ -234,10 +174,11 @@ impl Tool for FileEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_service::FsService;
     use tempfile::TempDir;
 
     fn tool() -> FileEditTool {
-        FileEditTool::new(vec![], vec![])
+        FileEditTool::new(Arc::new(FsService::new(vec![], vec![])))
     }
 
     fn make_input(dir: &str, args: serde_json::Value) -> ToolInput {
@@ -358,7 +299,7 @@ mod tests {
         let file = dir.path().join(".env");
         std::fs::write(&file, "SECRET=abc").unwrap();
 
-        let t = FileEditTool::new(vec![], vec![".env".into()]);
+        let t = FileEditTool::new(Arc::new(FsService::new(vec![], vec![".env".into()])));
         let input = make_input(
             dir.path().to_str().unwrap(),
             json!({

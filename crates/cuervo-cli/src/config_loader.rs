@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cuervo_core::types::AppConfig;
+use cuervo_core::types::{AppConfig, McpServerConfig};
 
 /// Load configuration with layered merging:
 /// 1. Built-in defaults (AppConfig::default())
@@ -39,6 +40,9 @@ pub fn load_config(explicit_path: Option<&str>) -> Result<AppConfig, anyhow::Err
 
     // Layer 5: Environment variable overrides
     apply_env_overrides(&mut config);
+
+    // Layer 6: .mcp.json auto-discovery (additive merge, highest priority for MCP servers)
+    load_mcp_json(&mut config);
 
     Ok(config)
 }
@@ -133,6 +137,133 @@ fn apply_env_overrides(config: &mut AppConfig) {
     }
 }
 
+/// Load MCP server configurations from `.mcp.json` files.
+///
+/// Search order (all merged additively, later files override earlier for same server name):
+/// 1. `./.mcp.json` (project root)
+/// 2. `.cuervo/.mcp.json` (project config dir)
+/// 3. `~/.cuervo/.mcp.json` (global user config)
+fn load_mcp_json(config: &mut AppConfig) {
+    let paths = [
+        PathBuf::from(".mcp.json"),
+        PathBuf::from(".cuervo/.mcp.json"),
+        dirs_path().join(".mcp.json"),
+    ];
+
+    for path in &paths {
+        if !path.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to read {}: {e}", path.display());
+                continue;
+            }
+        };
+        match parse_mcp_json(&content) {
+            Ok(servers) => {
+                let count = servers.len();
+                for (name, server_config) in servers {
+                    config.mcp.servers.entry(name).or_insert(server_config);
+                }
+                tracing::debug!("Loaded {count} MCP servers from {}", path.display());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse {}: {e}", path.display());
+            }
+        }
+    }
+}
+
+/// Parse a `.mcp.json` file content into a map of server configurations.
+///
+/// Supports two formats:
+/// 1. Claude/Cursor format: `{"mcpServers": {"name": {"command": "...", ...}}}`
+/// 2. Direct format: `{"name": {"command": "...", ...}}`
+fn parse_mcp_json(content: &str) -> Result<HashMap<String, McpServerConfig>, anyhow::Error> {
+    let root: serde_json::Value = serde_json::from_str(content)?;
+
+    let servers_obj = if let Some(mcp_servers) = root.get("mcpServers") {
+        mcp_servers
+    } else {
+        &root
+    };
+
+    let map = servers_obj
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("expected JSON object"))?;
+
+    let mut result = HashMap::new();
+    for (name, value) in map {
+        let command = value
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("server '{name}' missing 'command' field"))?
+            .to_string();
+
+        let args: Vec<String> = value
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let env: HashMap<String, String> = value
+            .get("env")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), expand_env_value(s))))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let tool_permissions: HashMap<String, String> = value
+            .get("tool_permissions")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        result.insert(
+            name.clone(),
+            McpServerConfig {
+                command,
+                args,
+                env,
+                tool_permissions,
+            },
+        );
+    }
+
+    Ok(result)
+}
+
+/// Expand `${VAR}` references in a string with environment variable values.
+///
+/// Unset variables are replaced with an empty string.
+fn expand_env_value(val: &str) -> String {
+    let mut result = val.to_string();
+    // Find all ${...} patterns and replace.
+    while let Some(start) = result.find("${") {
+        if let Some(end) = result[start..].find('}') {
+            let var_name = &result[start + 2..start + end];
+            let replacement = std::env::var(var_name).unwrap_or_default();
+            result = format!("{}{}{}", &result[..start], replacement, &result[start + end + 1..]);
+        } else {
+            break; // Malformed pattern, stop.
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +308,94 @@ mod tests {
         apply_env_overrides(&mut config);
         assert_eq!(config.general.default_provider, "ollama");
         std::env::remove_var("CUERVO_DEFAULT_PROVIDER");
+    }
+
+    // --- .mcp.json tests ---
+
+    #[test]
+    fn parse_mcp_json_mcpservers_format() {
+        let json = r#"{
+            "mcpServers": {
+                "github": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-github"],
+                    "env": { "TOKEN": "abc123" }
+                }
+            }
+        }"#;
+        let servers = parse_mcp_json(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        let github = &servers["github"];
+        assert_eq!(github.command, "npx");
+        assert_eq!(github.args, vec!["-y", "@modelcontextprotocol/server-github"]);
+        assert_eq!(github.env.get("TOKEN").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn parse_mcp_json_direct_format() {
+        let json = r#"{
+            "filesystem": {
+                "command": "mcp-server-filesystem",
+                "args": ["--root", "/tmp"]
+            }
+        }"#;
+        let servers = parse_mcp_json(json).unwrap();
+        assert_eq!(servers.len(), 1);
+        let fs = &servers["filesystem"];
+        assert_eq!(fs.command, "mcp-server-filesystem");
+        assert_eq!(fs.args, vec!["--root", "/tmp"]);
+    }
+
+    #[test]
+    fn parse_mcp_json_merge_preserves_existing() {
+        let mut config = AppConfig::default();
+        config.mcp.servers.insert(
+            "existing".to_string(),
+            McpServerConfig {
+                command: "existing-cmd".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                tool_permissions: HashMap::new(),
+            },
+        );
+
+        // Simulate merge: entry() with or_insert preserves existing.
+        let new_servers = parse_mcp_json(r#"{"new_server": {"command": "new-cmd"}}"#).unwrap();
+        for (name, server_config) in new_servers {
+            config.mcp.servers.entry(name).or_insert(server_config);
+        }
+
+        assert_eq!(config.mcp.servers.len(), 2);
+        assert_eq!(config.mcp.servers["existing"].command, "existing-cmd");
+        assert_eq!(config.mcp.servers["new_server"].command, "new-cmd");
+    }
+
+    #[test]
+    fn expand_env_value_replaces_variables() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CUERVO_TEST_TOKEN", "secret123");
+        let result = expand_env_value("Bearer ${CUERVO_TEST_TOKEN}");
+        assert_eq!(result, "Bearer secret123");
+        std::env::remove_var("CUERVO_TEST_TOKEN");
+    }
+
+    #[test]
+    fn expand_env_value_missing_var_empty() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CUERVO_NONEXISTENT_VAR_42");
+        let result = expand_env_value("prefix_${CUERVO_NONEXISTENT_VAR_42}_suffix");
+        assert_eq!(result, "prefix__suffix");
+    }
+
+    #[test]
+    fn load_mcp_json_nonexistent_paths_noop() {
+        let mut config = AppConfig::default();
+        let before = config.mcp.servers.len();
+        // load_mcp_json tries paths that don't exist in the test cwd — should be a no-op.
+        load_mcp_json(&mut config);
+        // May or may not find files depending on test environment.
+        // At minimum, it should not error.
+        assert!(config.mcp.servers.len() >= before);
     }
 
     #[test]

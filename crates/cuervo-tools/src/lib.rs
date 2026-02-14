@@ -11,6 +11,7 @@ pub mod file_edit;
 pub mod file_inspect;
 pub mod file_read;
 pub mod file_write;
+pub mod fs_service;
 pub mod fuzzy_find;
 pub mod git;
 pub mod glob_tool;
@@ -44,35 +45,23 @@ pub fn full_registry(
     config: &ToolsConfig,
     process_registry: Option<Arc<background::ProcessRegistry>>,
 ) -> ToolRegistry {
+    let fs = Arc::new(fs_service::FsService::new(
+        config.allowed_directories.clone(),
+        config.blocked_patterns.clone(),
+    ));
+
     let mut reg = ToolRegistry::new();
 
-    reg.register(Arc::new(file_read::FileReadTool::new(
-        config.allowed_directories.clone(),
-        config.blocked_patterns.clone(),
-    )));
-    reg.register(Arc::new(file_write::FileWriteTool::new(
-        config.allowed_directories.clone(),
-        config.blocked_patterns.clone(),
-    )));
-    reg.register(Arc::new(file_edit::FileEditTool::new(
-        config.allowed_directories.clone(),
-        config.blocked_patterns.clone(),
-    )));
+    reg.register(Arc::new(file_read::FileReadTool::new(fs.clone())));
+    reg.register(Arc::new(file_write::FileWriteTool::new(fs.clone())));
+    reg.register(Arc::new(file_edit::FileEditTool::new(fs.clone())));
     reg.register(Arc::new(bash::BashTool::new(config.timeout_secs, config.sandbox.clone())));
     reg.register(Arc::new(glob_tool::GlobTool::new()));
     reg.register(Arc::new(grep::GrepTool::new()));
     reg.register(Arc::new(web_fetch::WebFetchTool::new()));
-    reg.register(Arc::new(directory_tree::DirectoryTreeTool::new()));
-    reg.register(Arc::new(file_inspect::FileInspectTool::new(
-        config.allowed_directories.clone(),
-        config.blocked_patterns.clone(),
-    )));
-
-    // File delete.
-    reg.register(Arc::new(file_delete::FileDeleteTool::new(
-        config.allowed_directories.clone(),
-        config.blocked_patterns.clone(),
-    )));
+    reg.register(Arc::new(directory_tree::DirectoryTreeTool::new(fs.clone())));
+    reg.register(Arc::new(file_inspect::FileInspectTool::new(fs.clone())));
+    reg.register(Arc::new(file_delete::FileDeleteTool::new(fs.clone())));
 
     // Task tracking, fuzzy find, symbol search, web search, and http request.
     reg.register(Arc::new(task_track::TaskTrackTool::new()));
@@ -107,33 +96,22 @@ mod contract_tests {
 
     fn all_tools() -> Vec<Arc<dyn Tool>> {
         let config = ToolsConfig::default();
+        let fs = Arc::new(fs_service::FsService::new(
+            config.allowed_directories.clone(),
+            config.blocked_patterns.clone(),
+        ));
         let proc_reg = Arc::new(background::ProcessRegistry::new(5));
         vec![
-            Arc::new(file_read::FileReadTool::new(
-                config.allowed_directories.clone(),
-                config.blocked_patterns.clone(),
-            )),
-            Arc::new(file_write::FileWriteTool::new(
-                config.allowed_directories.clone(),
-                config.blocked_patterns.clone(),
-            )),
-            Arc::new(file_edit::FileEditTool::new(
-                config.allowed_directories.clone(),
-                config.blocked_patterns.clone(),
-            )),
+            Arc::new(file_read::FileReadTool::new(fs.clone())),
+            Arc::new(file_write::FileWriteTool::new(fs.clone())),
+            Arc::new(file_edit::FileEditTool::new(fs.clone())),
             Arc::new(bash::BashTool::new(config.timeout_secs, config.sandbox.clone())),
             Arc::new(glob_tool::GlobTool::new()),
             Arc::new(grep::GrepTool::new()),
             Arc::new(web_fetch::WebFetchTool::new()),
-            Arc::new(directory_tree::DirectoryTreeTool::new()),
-            Arc::new(file_inspect::FileInspectTool::new(
-                config.allowed_directories.clone(),
-                config.blocked_patterns.clone(),
-            )),
-            Arc::new(file_delete::FileDeleteTool::new(
-                config.allowed_directories.clone(),
-                config.blocked_patterns.clone(),
-            )),
+            Arc::new(directory_tree::DirectoryTreeTool::new(fs.clone())),
+            Arc::new(file_inspect::FileInspectTool::new(fs.clone())),
+            Arc::new(file_delete::FileDeleteTool::new(fs.clone())),
             Arc::new(task_track::TaskTrackTool::new()),
             Arc::new(fuzzy_find::FuzzyFindTool::new()),
             Arc::new(symbol_search::SymbolSearchTool::new()),

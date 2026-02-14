@@ -1,17 +1,15 @@
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures::StreamExt;
 use reedline::{
     EditCommand, FileBackedHistory, KeyCode, KeyModifiers, Reedline, ReedlineEvent, Signal,
 };
 
 use cuervo_core::traits::{ContextQuery, ContextSource, ModelProvider, Planner};
 use cuervo_core::types::{
-    AppConfig, ChatMessage, DomainEvent, EventPayload, MessageContent, ModelChunk, ModelRequest,
-    Role, Session, StopReason,
+    AppConfig, ChatMessage, DomainEvent, EventPayload, MessageContent, ModelRequest,
+    Role, Session,
 };
 use cuervo_core::EventSender;
 use cuervo_providers::ProviderRegistry;
@@ -27,24 +25,38 @@ use response_cache::ResponseCache;
 pub mod accumulator;
 pub mod agent;
 pub mod agent_comm;
+pub mod agent_types;
+pub mod agent_utils;
+pub mod artifact_store;
+pub mod authorization;
 pub mod backpressure;
 pub mod circuit_breaker;
 pub mod commands;
 pub mod compaction;
 pub mod console;
+pub mod context_governance;
+pub mod context_manager;
+pub mod context_metrics;
+pub mod delegation;
 pub mod episodic_source;
+pub mod execution_tracker;
 pub mod executor;
+pub mod failure_tracker;
 pub mod health;
 pub mod idempotency;
 pub mod hybrid_retriever;
+pub mod loop_guard;
+pub mod mcp_manager;
 pub mod memory_consolidator;
 pub mod memory_source;
 pub mod model_selector;
 pub mod optimizer;
 pub mod orchestrator;
 pub mod permissions;
+pub mod reasoning_engine;
 pub mod planner;
 pub mod planning_source;
+pub mod provenance_tracker;
 mod prompt;
 pub mod reflection_source;
 pub mod reflexion;
@@ -55,7 +67,16 @@ pub mod resilience;
 pub mod response_cache;
 pub mod router;
 pub mod speculative;
+pub mod strategy_selector;
+pub mod task_analyzer;
+pub mod task_backlog;
+pub mod task_evaluator;
+pub mod task_bridge;
+pub mod task_scheduler;
+pub mod tool_selector;
 pub mod tool_speculation;
+
+mod slash_commands;
 
 #[cfg(test)]
 mod stress_tests;
@@ -64,29 +85,42 @@ use prompt::CuervoPrompt;
 
 /// Interactive REPL for cuervo.
 pub struct Repl {
-    editor: Reedline,
-    prompt: CuervoPrompt,
-    config: AppConfig,
-    provider: String,
-    model: String,
-    session: Session,
-    db: Option<Arc<Database>>,
-    async_db: Option<AsyncDatabase>,
-    registry: ProviderRegistry,
-    tool_registry: ToolRegistry,
-    permissions: PermissionChecker,
-    event_tx: EventSender,
-    context_sources: Vec<Box<dyn ContextSource>>,
-    response_cache: Option<ResponseCache>,
-    resilience: ResilienceManager,
-    reflector: Option<reflexion::Reflector>,
-    no_banner: bool,
+    pub(crate) editor: Reedline,
+    pub(crate) prompt: CuervoPrompt,
+    pub(crate) config: AppConfig,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) session: Session,
+    pub(crate) db: Option<Arc<Database>>,
+    pub(crate) async_db: Option<AsyncDatabase>,
+    pub(crate) registry: ProviderRegistry,
+    pub(crate) tool_registry: ToolRegistry,
+    pub(crate) permissions: PermissionChecker,
+    pub(crate) event_tx: EventSender,
+    pub(crate) context_sources: Vec<Box<dyn ContextSource>>,
+    pub(crate) response_cache: Option<ResponseCache>,
+    pub(crate) resilience: ResilienceManager,
+    pub(crate) reflector: Option<reflexion::Reflector>,
+    pub(crate) no_banner: bool,
     /// When true, the user explicitly set `--model` on the CLI, so model selection is bypassed.
-    explicit_model: bool,
+    pub(crate) explicit_model: bool,
     /// Temporary dry-run mode override for the next handle_message call.
-    dry_run_override: Option<cuervo_core::types::DryRunMode>,
+    pub(crate) dry_run_override: Option<cuervo_core::types::DryRunMode>,
     /// Trace step cursor for /step forward/back navigation.
-    trace_cursor: Option<(uuid::Uuid, Vec<cuervo_storage::TraceStep>, usize)>,
+    pub(crate) trace_cursor: Option<(uuid::Uuid, Vec<cuervo_storage::TraceStep>, usize)>,
+    /// Adaptive reasoning engine (enabled by default).
+    pub(crate) reasoning_engine: Option<reasoning_engine::ReasoningEngine>,
+    /// Cached execution timeline JSON from the last agent loop (for --timeline flag).
+    pub(crate) last_timeline: Option<String>,
+    /// Shared context metrics for agent loop observability (Phase 42).
+    pub(crate) context_metrics: std::sync::Arc<context_metrics::ContextMetrics>,
+    /// Context governance for per-source token limits (Phase 42).
+    pub(crate) context_governance: context_governance::ContextGovernance,
+    /// Expert mode: show full agent feedback (model selection, caching, etc.).
+    pub(crate) expert_mode: bool,
+    /// Control channel receiver from TUI (Phase 43). None in classic REPL mode.
+    #[cfg(feature = "tui")]
+    pub(crate) ctrl_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::tui::events::ControlEvent>>,
 }
 
 impl Repl {
@@ -136,9 +170,10 @@ impl Repl {
         let session =
             resume_session.unwrap_or_else(|| Session::new(model.clone(), provider.clone(), cwd));
 
-        let permissions = PermissionChecker::with_tbac(
+        let permissions = PermissionChecker::with_config(
             config.tools.confirm_destructive,
             config.security.tbac_enabled,
+            config.tools.prompt_timeout_secs,
         );
 
         // Build async database wrapper (for async call sites).
@@ -218,6 +253,22 @@ impl Repl {
             resilience.register_provider(name);
         }
 
+        // Initialize reasoning engine if enabled.
+        let reasoning_engine = if config.reasoning.enabled {
+            let mut engine = reasoning_engine::ReasoningEngine::new(&config.reasoning);
+            // Load experience from DB for cross-session learning.
+            if let Some(ref adb) = async_db {
+                // Use sync inner() since we're in a sync constructor.
+                if let Ok(rows) = adb.inner().load_all_experience() {
+                    let records = reasoning_engine::rows_to_records(rows);
+                    engine.load_experience(records);
+                }
+            }
+            Some(engine)
+        } else {
+            None
+        };
+
         Ok(Self {
             editor,
             prompt,
@@ -239,6 +290,22 @@ impl Repl {
             explicit_model,
             dry_run_override: None,
             trace_cursor: None,
+            reasoning_engine,
+            last_timeline: None,
+            context_metrics: std::sync::Arc::new(context_metrics::ContextMetrics::default()),
+            context_governance: {
+                let gov_config = &config.context.governance;
+                if gov_config.default_max_tokens_per_source > 0 {
+                    context_governance::ContextGovernance::with_default_max_tokens(
+                        gov_config.default_max_tokens_per_source,
+                    )
+                } else {
+                    context_governance::ContextGovernance::new(std::collections::HashMap::new())
+                }
+            },
+            expert_mode: false,
+            #[cfg(feature = "tui")]
+            ctrl_rx: None,
         })
     }
 
@@ -452,7 +519,7 @@ impl Repl {
         }));
 
         // Create channels: UiEvents (agent → TUI) and prompts (TUI → agent).
-        let (ui_tx, ui_rx) = tokio_mpsc::unbounded_channel::<UiEvent>();
+        let (ui_tx, ui_rx) = tokio_mpsc::channel::<UiEvent>(1024);
         let (prompt_tx, mut prompt_rx) = tokio_mpsc::unbounded_channel::<String>();
 
         let tui_sink = TuiSink::new(ui_tx.clone());
@@ -482,9 +549,31 @@ impl Repl {
             None
         };
 
+        // Control channel: TUI → agent (pause/step/cancel).
+        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.ctrl_rx = Some(ctrl_rx);
+
+        // Permission approval channel: TUI → PermissionChecker (approve/reject).
+        // Dedicated channel ensures permission decisions reach the executor even
+        // while the agent loop is blocked on tool execution.
+        let (perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        self.permissions.set_tui_channel(perm_rx);
+
+        // Determine initial UI mode from expert_mode flag.
+        let initial_mode = if self.expert_mode {
+            crate::tui::state::UiMode::Expert
+        } else {
+            // Map config string to UiMode.
+            match self.config.display.ui_mode.as_str() {
+                "minimal" => crate::tui::state::UiMode::Minimal,
+                "expert" => crate::tui::state::UiMode::Expert,
+                _ => crate::tui::state::UiMode::Standard,
+            }
+        };
+
         // Spawn TUI render loop in a separate task.
         let tui_handle = tokio::spawn(async move {
-            let mut app = TuiApp::new(ui_rx, prompt_tx);
+            let mut app = TuiApp::with_mode(ui_rx, prompt_tx, ctrl_tx, perm_tx, initial_mode);
             app.push_banner(
                 &banner_version,
                 &banner_provider,
@@ -657,170 +746,7 @@ impl Repl {
         input: &str,
         tui_sink: &crate::render::sink::TuiSink,
     ) -> Result<()> {
-        use crate::render::sink::RenderSink;
-        // Record user message in session.
-        self.session.add_message(ChatMessage {
-            role: Role::User,
-            content: MessageContent::Text(input.to_string()),
-        });
-
-        // Assemble context from all sources (instructions + memory).
-        let working_dir = self
-            .config
-            .general
-            .working_directory
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
-
-        let context_query = ContextQuery {
-            working_directory: working_dir.clone(),
-            user_message: Some(input.to_string()),
-            token_budget: self.config.general.max_tokens as usize,
-        };
-
-        let chunks =
-            cuervo_context::assemble_context(&self.context_sources, &context_query).await;
-
-        let system_prompt = if chunks.is_empty() {
-            None
-        } else {
-            Some(cuervo_context::chunks_to_system_prompt(&chunks))
-        };
-
-        // Build the model request from session history.
-        let tool_defs = self.tool_registry.tool_definitions();
-        let request = ModelRequest {
-            model: self.model.clone(),
-            messages: self.session.messages.clone(),
-            tools: tool_defs,
-            max_tokens: Some(self.config.general.max_tokens),
-            temperature: Some(self.config.general.temperature),
-            system: system_prompt,
-            stream: true,
-        };
-
-        // Look up the active provider.
-        let provider: Option<Arc<dyn ModelProvider>> = self.registry.get(&self.provider).cloned();
-
-        match provider {
-            Some(p) => {
-                // Build fallback providers from routing config.
-                let fallback_providers: Vec<(String, Arc<dyn ModelProvider>)> = self
-                    .config
-                    .agent
-                    .routing
-                    .fallback_models
-                    .iter()
-                    .filter_map(|name| {
-                        self.registry
-                            .get(name)
-                            .cloned()
-                            .map(|p| (name.clone(), p))
-                    })
-                    .collect();
-
-                let compactor = compaction::ContextCompactor::new(
-                    self.config.agent.compaction.clone(),
-                );
-                let guardrails: &[Box<dyn cuervo_security::Guardrail>] =
-                    if self.config.security.guardrails.enabled
-                        && self.config.security.guardrails.builtins
-                    {
-                        cuervo_security::builtin_guardrails()
-                    } else {
-                        &[]
-                    };
-
-                let llm_planner = if self.config.planning.adaptive {
-                    Some(planner::LlmPlanner::new(
-                        Arc::clone(&p),
-                        self.model.clone(),
-                    ).with_max_replans(self.config.planning.max_replans))
-                } else {
-                    None
-                };
-
-                // Skip model selection when user explicitly set --model on the CLI.
-                let selector = if self.config.agent.model_selection.enabled && !self.explicit_model {
-                    Some(model_selector::ModelSelector::new(
-                        self.config.agent.model_selection.clone(),
-                        &self.registry,
-                    ).with_provider_scope(p.name()))
-                } else {
-                    None
-                };
-
-                let ctx = agent::AgentContext {
-                    provider: &p,
-                    session: &mut self.session,
-                    request: &request,
-                    tool_registry: &self.tool_registry,
-                    permissions: &mut self.permissions,
-                    working_dir: &working_dir,
-                    event_tx: &self.event_tx,
-                    trace_db: self.async_db.as_ref(),
-                    limits: &self.config.agent.limits,
-                    response_cache: self.response_cache.as_ref(),
-                    resilience: &mut self.resilience,
-                    fallback_providers: &fallback_providers,
-                    routing_config: &self.config.agent.routing,
-                    compactor: Some(&compactor),
-                    planner: llm_planner.as_ref().map(|p| p as &dyn Planner),
-                    guardrails,
-                    reflector: self.reflector.as_ref(),
-                    render_sink: tui_sink,
-                    replay_tool_executor: None,
-                    phase14: cuervo_core::types::Phase14Context {
-                        dry_run_mode: self.dry_run_override.take().unwrap_or_default(),
-                        ..Default::default()
-                    },
-                    model_selector: selector.as_ref(),
-                    registry: Some(&self.registry),
-                    episode_id: None,
-                    planning_config: &self.config.planning,
-                };
-                let result = agent::run_agent_loop(ctx).await?;
-
-                // Send per-round result info to TUI via render_sink.
-                if result.rounds > 0 {
-                    use crate::render::sink::RenderSink;
-                    tui_sink.info(&format!(
-                        "  [completed: {} round{}, {}+{} tokens, {}]",
-                        result.rounds,
-                        if result.rounds == 1 { "" } else { "s" },
-                        result.input_tokens,
-                        result.output_tokens,
-                        match result.stop_condition {
-                            agent::StopCondition::EndTurn => "end_turn",
-                            agent::StopCondition::MaxRounds => "max_rounds",
-                            agent::StopCondition::TokenBudget => "token_budget",
-                            agent::StopCondition::DurationBudget => "duration_budget",
-                            agent::StopCondition::Interrupted => "interrupted",
-                            agent::StopCondition::ProviderError => "provider_error",
-                        },
-                    ));
-                }
-
-                // Auto-consolidate reflections after each agent interaction.
-                if let Some(ref adb) = self.async_db {
-                    memory_consolidator::maybe_consolidate(adb).await;
-                }
-            }
-            None => {
-                tui_sink.error(
-                    &format!("provider '{}' not configured", self.provider),
-                    Some("Set API key or check config"),
-                );
-            }
-        }
-
-        Ok(())
+        self.handle_message_with_sink(input, tui_sink).await
     }
 
     /// Print a brief session summary on exit.
@@ -919,12 +845,29 @@ impl Repl {
 
     /// Handle a /dry-run command: routes through the agent loop with DestructiveOnly mode.
     async fn handle_message_dry_run(&mut self, input: &str) -> Result<()> {
-        eprintln!("[dry-run] Destructive tools will be skipped.");
+        use crate::render::sink::RenderSink;
+        let sink = crate::render::sink::ClassicSink::with_expert(self.expert_mode);
+        sink.info("[dry-run] Destructive tools will be skipped.");
         self.dry_run_override = Some(cuervo_core::types::DryRunMode::DestructiveOnly);
         self.handle_message(input).await
     }
 
     async fn handle_message(&mut self, input: &str) -> Result<()> {
+        let classic_sink = crate::render::sink::ClassicSink::with_expert(self.expert_mode);
+        self.handle_message_with_sink(input, &classic_sink).await?;
+        println!();
+        Ok(())
+    }
+
+    /// Unified message handler — runs the full agent loop with any RenderSink.
+    ///
+    /// Both classic REPL and TUI modes delegate here. The sink parameter
+    /// abstracts away the rendering backend.
+    async fn handle_message_with_sink(
+        &mut self,
+        input: &str,
+        sink: &dyn crate::render::sink::RenderSink,
+    ) -> Result<()> {
         // Record user message in session.
         self.session.add_message(ChatMessage {
             role: Role::User,
@@ -951,8 +894,19 @@ impl Repl {
             token_budget: self.config.general.max_tokens as usize,
         };
 
-        let chunks =
+        let raw_chunks =
             cuervo_context::assemble_context(&self.context_sources, &context_query).await;
+
+        // Apply governance (per-source token limits + provenance tracking).
+        let (chunks, _provenance) = self.context_governance.apply(raw_chunks);
+        // Record governance truncations in metrics.
+        let truncations = _provenance
+            .iter()
+            .filter(|p| p.token_count > 0)
+            .count();
+        if truncations > 0 {
+            self.context_metrics.record_source_invocations(truncations as u64);
+        }
 
         let system_prompt = if chunks.is_empty() {
             None
@@ -975,6 +929,27 @@ impl Repl {
         // Look up the active provider.
         let provider: Option<Arc<dyn ModelProvider>> = self.registry.get(&self.provider).cloned();
 
+        // Pre-loop reasoning: analyze query and select strategy.
+        let _strategy_plan = if let Some(engine) = &mut self.reasoning_engine {
+            engine.reset_retries();
+            let plan = engine.pre_loop(input);
+            sink.info(&format!(
+                "  [reasoning] strategy: {:?}, planner: {}",
+                plan.kind, if plan.use_planner { "yes" } else { "no" },
+            ));
+            // Phase 43D: Emit reasoning info for TUI panel.
+            if let Some(record) = engine.history().last() {
+                sink.reasoning_update(
+                    &format!("{:?}", record.strategy),
+                    &format!("{:?}", record.analysis.task_type),
+                    &format!("{:?}", record.analysis.complexity),
+                );
+            }
+            Some(plan)
+        } else {
+            None
+        };
+
         match provider {
             Some(p) => {
                 // Build fallback providers from routing config.
@@ -995,7 +970,6 @@ impl Repl {
                 let compactor = compaction::ContextCompactor::new(
                     self.config.agent.compaction.clone(),
                 );
-                // Build guardrails (lazy-compiled, zero-alloc reference).
                 let guardrails: &[Box<dyn cuervo_security::Guardrail>] =
                     if self.config.security.guardrails.enabled
                         && self.config.security.guardrails.builtins
@@ -1005,7 +979,6 @@ impl Repl {
                         &[]
                     };
 
-                // Build adaptive planner if enabled.
                 let llm_planner = if self.config.planning.adaptive {
                     Some(planner::LlmPlanner::new(
                         Arc::clone(&p),
@@ -1015,7 +988,6 @@ impl Repl {
                     None
                 };
 
-                // Build model selector if enabled (scoped to active provider).
                 // Skip model selection when user explicitly set --model on the CLI.
                 let selector = if self.config.agent.model_selection.enabled && !self.explicit_model {
                     Some(model_selector::ModelSelector::new(
@@ -1026,7 +998,13 @@ impl Repl {
                     None
                 };
 
-                let classic_sink = crate::render::sink::ClassicSink::new();
+                // Create task bridge when structured task framework is enabled.
+                let mut task_bridge_inst = if self.config.task_framework.enabled {
+                    Some(task_bridge::TaskBridge::new(&self.config.task_framework))
+                } else {
+                    None
+                };
+
                 let ctx = agent::AgentContext {
                     provider: &p,
                     session: &mut self.session,
@@ -1042,10 +1020,10 @@ impl Repl {
                     fallback_providers: &fallback_providers,
                     routing_config: &self.config.agent.routing,
                     compactor: Some(&compactor),
-                    planner: llm_planner.as_ref().map(|p| p as &dyn cuervo_core::traits::Planner),
+                    planner: llm_planner.as_ref().map(|p| p as &dyn Planner),
                     guardrails,
                     reflector: self.reflector.as_ref(),
-                    render_sink: &classic_sink,
+                    render_sink: sink,
                     replay_tool_executor: None,
                     phase14: cuervo_core::types::Phase14Context {
                         dry_run_mode: self.dry_run_override.take().unwrap_or_default(),
@@ -1053,12 +1031,58 @@ impl Repl {
                     },
                     model_selector: selector.as_ref(),
                     registry: Some(&self.registry),
-                    episode_id: None,
+                    episode_id: Some(uuid::Uuid::new_v4()),
                     planning_config: &self.config.planning,
+                    orchestrator_config: &self.config.orchestrator,
+                    tool_selection_enabled: self.config.context.dynamic_tool_selection,
+                    task_bridge: task_bridge_inst.as_mut(),
+                    reasoning_config: self.reasoning_engine.as_ref().map(|e| e.config()),
+                    context_metrics: Some(&self.context_metrics),
+                    // Phase 43: pass control channel receiver from TUI (if present).
+                    #[cfg(feature = "tui")]
+                    ctrl_rx: self.ctrl_rx.take(),
+                    #[cfg(not(feature = "tui"))]
+                    ctrl_rx: None,
                 };
-                let result = agent::run_agent_loop(ctx).await?;
+                let mut result = agent::run_agent_loop(ctx).await?;
 
-                // Response footer: show per-message metrics.
+                // Phase 43: restore control channel receiver for reuse across TUI messages.
+                #[cfg(feature = "tui")]
+                {
+                    self.ctrl_rx = result.ctrl_rx.take();
+                }
+
+                // Cache timeline for --timeline exit hook.
+                self.last_timeline = result.timeline_json.clone();
+
+                // Post-loop reasoning: evaluate result and persist experience.
+                if let Some(engine) = &mut self.reasoning_engine {
+                    let eval = engine.post_loop(&result);
+                    sink.reasoning_status(
+                        &engine.history().last().map(|r| format!("{:?}", r.analysis.task_type)).unwrap_or_default(),
+                        &engine.history().last().map(|r| format!("{:?}", r.analysis.complexity)).unwrap_or_default(),
+                        &engine.history().last().map(|r| format!("{:?}", r.strategy)).unwrap_or_default(),
+                        eval.score,
+                        eval.success,
+                    );
+                    // Persist experience to DB.
+                    if self.config.reasoning.learning_enabled {
+                        if let Some(ref adb) = self.async_db {
+                            for record in engine.experience() {
+                                let _ = adb.inner().save_experience(
+                                    &format!("{:?}", record.task_type),
+                                    &format!("{:?}", record.strategy),
+                                    record.avg_score,
+                                    record.uses,
+                                    record.last_score,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Display result summary via sink.
                 let total_tokens = result.input_tokens + result.output_tokens;
                 if total_tokens > 0 || result.latency_ms > 0 {
                     let cost_str = if result.cost_usd > 0.0 {
@@ -1067,45 +1091,45 @@ impl Repl {
                         String::new()
                     };
                     let rounds_str = if result.rounds > 0 {
-                        format!(" | {} tool {}", result.rounds, if result.rounds == 1 { "round" } else { "rounds" })
+                        format!(
+                            " | {} tool {}",
+                            result.rounds,
+                            if result.rounds == 1 { "round" } else { "rounds" },
+                        )
                     } else {
                         String::new()
                     };
-                    eprintln!(
-                        "\n  [{} tokens | {:.1}s{}{}]",
+                    sink.info(&format!(
+                        "  [{} tokens | {:.1}s{}{}]",
                         total_tokens,
                         result.latency_ms as f64 / 1000.0,
                         cost_str,
                         rounds_str,
-                    );
+                    ));
                 }
 
                 // Auto-consolidate reflections after each agent interaction.
                 if let Some(ref adb) = self.async_db {
+                    sink.consolidation_status("consolidating reflections...");
                     memory_consolidator::maybe_consolidate(adb).await;
                 }
             }
             None => {
-                // No provider available — show placeholder.
-                let placeholder = format!(
-                    "**[provider '{}' not configured]** — Set API key or check config.\n\n> {input}\n",
-                    self.provider
+                sink.error(
+                    &format!("provider '{}' not configured", self.provider),
+                    Some("Set API key or check config"),
                 );
-                let mut renderer = crate::render::stream::StreamRenderer::new();
-                renderer.push(&ModelChunk::TextDelta(placeholder))?;
-                renderer.push(&ModelChunk::Done(StopReason::EndTurn))?;
-
-                let response_text = renderer.full_text().to_string();
-                if !response_text.is_empty() {
-                    self.session.add_message(ChatMessage {
-                        role: Role::Assistant,
-                        content: MessageContent::Text(response_text),
-                    });
-                }
+                // Add placeholder to session so it's visible in session history.
+                self.session.add_message(ChatMessage {
+                    role: Role::Assistant,
+                    content: MessageContent::Text(format!(
+                        "[provider '{}' not configured] — Set API key or check config.",
+                        self.provider,
+                    )),
+                });
             }
         }
 
-        println!();
         Ok(())
     }
 
@@ -1218,1254 +1242,16 @@ impl Repl {
         }
     }
 
-    fn list_sessions(&self) {
-        let Some(db) = &self.db else {
-            println!("(No database configured)");
-            return;
-        };
-        match db.list_sessions(10) {
-            Ok(sessions) if sessions.is_empty() => {
-                println!("No saved sessions.");
-            }
-            Ok(sessions) => {
-                println!("Recent sessions:");
-                for s in &sessions {
-                    let id_short = &s.id.to_string()[..8];
-                    let title = s.title.as_deref().unwrap_or("(untitled)");
-                    let msgs = s.messages.len();
-                    let date = s.updated_at.format("%Y-%m-%d %H:%M");
-                    println!("  {id_short}  {title:<30} {msgs} msgs  {date}");
-                }
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(
-                    &format!("failed to list sessions — {e}"),
-                    None,
-                );
-            }
-        }
-    }
-
-    fn show_session(&self) {
-        let id_short = &self.session.id.to_string()[..8];
-        println!("Session:  {id_short}");
-        println!("Model:    {}/{}", self.provider, self.model);
-        println!("Messages: {}", self.session.messages.len());
-        println!(
-            "Tokens:   {} in / {} out",
-            self.session.total_usage.input_tokens, self.session.total_usage.output_tokens,
-        );
-        println!("Tools:    {} invocations", self.session.tool_invocations);
-        println!("Rounds:   {}", self.session.agent_rounds);
-        println!("Latency:  {}ms total", self.session.total_latency_ms);
-        if self.session.estimated_cost_usd > 0.0 {
-            println!("Cost:     ${:.6}", self.session.estimated_cost_usd);
-        }
-        println!(
-            "Started:  {}",
-            self.session.created_at.format("%Y-%m-%d %H:%M:%S")
-        );
-    }
-
-    fn show_trace_info(&self) {
-        let id_short = &self.session.id.to_string()[..8];
-        println!("--- Trace Context ---");
-        println!("Session:    {id_short}");
-        println!("Messages:   {}", self.session.messages.len());
-        println!("Rounds:     {}", self.session.agent_rounds);
-        if let Some(ref fp) = self.session.execution_fingerprint {
-            println!("Fingerprint: {}", &fp[..16.min(fp.len())]);
-        } else {
-            println!("Fingerprint: (none)");
-        }
-    }
-
-    fn show_state_info(&self) {
-        let id_short = &self.session.id.to_string()[..8];
-        println!("--- Agent State ---");
-        println!("Session:   {id_short}");
-        println!("Rounds:    {}", self.session.agent_rounds);
-        println!("Tools:     {} invocations", self.session.tool_invocations);
-        let state = if self.session.messages.is_empty() {
-            "Idle"
-        } else {
-            "Complete"
-        };
-        println!("State:     {state}");
-    }
-
-    async fn run_test(&self, kind: &commands::TestKind) {
-        use commands::TestKind;
-        match kind {
-            TestKind::Status => {
-                println!("--- cuervo diagnostics ---");
-                println!("Version:  {}", env!("CARGO_PKG_VERSION"));
-                println!("Provider: {}", self.provider);
-                println!("Model:    {}", self.model);
-                println!(
-                    "Database: {}",
-                    if self.db.is_some() {
-                        "connected"
-                    } else {
-                        "not configured"
-                    }
-                );
-                println!("Session:  {}", &self.session.id.to_string()[..8]);
-                println!("Messages: {}", self.session.messages.len());
-
-                // Check registered providers.
-                let providers = self.registry.list();
-                println!("Registered providers: {}", providers.join(", "));
-
-                // Check if current provider is available.
-                match self.registry.get(&self.provider) {
-                    Some(p) => {
-                        let available = p.is_available().await;
-                        println!(
-                            "Provider '{}': {}",
-                            self.provider,
-                            if available {
-                                "available"
-                            } else {
-                                "not available (missing API key?)"
-                            }
-                        );
-                    }
-                    None => {
-                        println!("Provider '{}': not registered", self.provider);
-                    }
-                }
-                println!("--- end diagnostics ---");
-            }
-            TestKind::Provider(name) => {
-                print!("Testing provider '{name}'... ");
-                match self.registry.get(name) {
-                    None => {
-                        println!("NOT FOUND");
-                        println!("  Provider '{name}' is not registered.");
-                        let available = self.registry.list();
-                        println!("  Available: {}", available.join(", "));
-                    }
-                    Some(p) => {
-                        // 1. Availability check.
-                        let available = p.is_available().await;
-                        if !available {
-                            println!("NOT AVAILABLE");
-                            println!(
-                                "  Provider is registered but not reachable (missing API key?)."
-                            );
-                            return;
-                        }
-
-                        // 2. Send a tiny probe request.
-                        let probe = ModelRequest {
-                            model: if name == "echo" {
-                                "echo".to_string()
-                            } else {
-                                self.model.clone()
-                            },
-                            messages: vec![ChatMessage {
-                                role: Role::User,
-                                content: MessageContent::Text("Say OK".to_string()),
-                            }],
-                            tools: vec![],
-                            max_tokens: Some(16),
-                            temperature: Some(0.0),
-                            system: None,
-                            stream: true,
-                        };
-
-                        let start = std::time::Instant::now();
-                        match p.invoke(&probe).await {
-                            Ok(mut stream) => {
-                                let mut text = String::new();
-                                let mut tokens = 0u32;
-                                while let Some(chunk) = stream.next().await {
-                                    match chunk {
-                                        Ok(ModelChunk::TextDelta(t)) => text.push_str(&t),
-                                        Ok(ModelChunk::Usage(u)) => {
-                                            tokens += u.input_tokens + u.output_tokens;
-                                        }
-                                        Ok(ModelChunk::Done(_)) => break,
-                                        Ok(ModelChunk::Error(e)) => {
-                                            println!("ERROR");
-                                            println!("  Stream error: {e}");
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            println!("ERROR");
-                                            println!("  {e}");
-                                            return;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                let elapsed = start.elapsed();
-                                println!("OK ({:.0}ms)", elapsed.as_millis());
-                                let preview: String = text.chars().take(60).collect();
-                                println!("  Response: {preview}");
-                                println!("  Tokens: {tokens}");
-                                println!("  Latency: {:.0}ms", elapsed.as_millis());
-                            }
-                            Err(e) => {
-                                let elapsed = start.elapsed();
-                                println!("FAILED ({:.0}ms)", elapsed.as_millis());
-                                println!("  Error: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn run_orchestrate(&mut self, instruction: &str) {
-        if !self.config.orchestrator.enabled {
-            crate::render::feedback::user_error(
-                "orchestrator is disabled",
-                Some("Set [orchestrator] enabled = true in config.toml"),
-            );
-            return;
-        }
-
-        let provider = match self.registry.get(&self.provider).cloned() {
-            Some(p) => p,
-            None => {
-                crate::render::feedback::user_error(
-                    &format!("provider '{}' not available", self.provider),
-                    Some("Configure a provider before using /orchestrate"),
-                );
-                return;
-            }
-        };
-
-        // Create a single SubAgentTask from the instruction.
-        // (When a planner is available, it would decompose into multiple tasks.)
-        use cuervo_core::types::{AgentType, SubAgentTask};
-        use std::collections::HashSet;
-
-        let tasks = vec![SubAgentTask {
-            task_id: uuid::Uuid::new_v4(),
-            instruction: instruction.to_string(),
-            agent_type: AgentType::Chat,
-            model: None,
-            provider: None,
-            allowed_tools: HashSet::new(),
-            limits_override: None,
-            depends_on: vec![],
-            priority: 0,
-        }];
-
-        let orchestrator_id = uuid::Uuid::new_v4();
-        let working_dir = self
-            .config
-            .general
-            .working_directory
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
-
-        let fallback_providers: Vec<(String, Arc<dyn cuervo_core::traits::ModelProvider>)> = self
-            .config
-            .agent
-            .routing
-            .fallback_models
-            .iter()
-            .filter_map(|name| {
-                self.registry.get(name).cloned().map(|p| (name.clone(), p))
-            })
-            .collect();
-
-        let guardrails: &[Box<dyn cuervo_security::Guardrail>] =
-            if self.config.security.guardrails.enabled && self.config.security.guardrails.builtins {
-                cuervo_security::builtin_guardrails()
-            } else {
-                &[]
-            };
-
-        eprintln!("Orchestrating: {}", instruction);
-        let start = std::time::Instant::now();
-
-        match orchestrator::run_orchestrator(
-            orchestrator_id,
-            tasks,
-            &provider,
-            &self.tool_registry,
-            &self.event_tx,
-            &self.config.agent.limits,
-            &self.config.orchestrator,
-            &self.config.agent.routing,
-            self.async_db.as_ref(),
-            self.response_cache.as_ref(),
-            &fallback_providers,
-            &self.model,
-            &working_dir,
-            None,
-            guardrails,
-            self.config.tools.confirm_destructive,
-            self.config.security.tbac_enabled,
-        )
-        .await
-        {
-            Ok(result) => {
-                let elapsed = start.elapsed();
-                eprintln!(
-                    "\nOrchestration complete: {}/{} tasks succeeded | {:.1}s | ${:.4}",
-                    result.success_count,
-                    result.total_count,
-                    elapsed.as_secs_f64(),
-                    result.total_cost_usd,
-                );
-                // Print per-task summaries.
-                for sub in &result.sub_results {
-                    let status = if sub.success { "OK" } else { "FAIL" };
-                    let preview: String = sub.output_text.chars().take(80).collect();
-                    eprintln!(
-                        "  [{}] {} ({} rounds, {}ms) {}",
-                        status,
-                        &sub.task_id.to_string()[..8],
-                        sub.rounds,
-                        sub.latency_ms,
-                        if preview.is_empty() {
-                            sub.error.as_deref().unwrap_or("").to_string()
-                        } else {
-                            preview
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(
-                    &format!("orchestration failed — {e}"),
-                    None,
-                );
-            }
-        }
-    }
-
-    // --- Phase 19: Agent Operating Console handlers ---
-
-    async fn handle_live_status(&self) {
-        let session_short = &self.session.id.to_string()[..8];
-        let tokens = self.session.total_usage.input_tokens as u64
-            + self.session.total_usage.output_tokens as u64;
-
-        let diagnostics: Vec<(String, String, usize)> = self
-            .resilience
-            .diagnostics()
-            .iter()
-            .map(|d| {
-                let state = format!("{:?}", d.breaker_state).to_lowercase();
-                (d.provider.clone(), state, d.failure_count)
-            })
-            .collect();
-
-        let models: Vec<String> = self.registry.list().iter().map(|s| s.to_string()).collect();
-
-        let mut out = std::io::stderr().lock();
-        let info = console::StatusInfo {
-            session_id: session_short,
-            rounds: self.session.agent_rounds,
-            tokens,
-            cost: self.session.estimated_cost_usd,
-            provider: &self.provider,
-            model: &self.model,
-            provider_diagnostics: &diagnostics,
-            registered_models: &models,
-        };
-        console::render_status(&info, &mut out);
-    }
-
-    async fn handle_metrics(&self) {
-        let mut out = std::io::stderr().lock();
-
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let sys = match db.system_metrics() {
-            Ok(s) => s,
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to load metrics: {e}"), None);
-                return;
-            }
-        };
-
-        let cache = db.cache_stats().ok();
-        let memory = db.memory_stats().ok();
-
-        console::render_metrics(&sys, cache.as_ref(), memory.as_ref(), &mut out);
-    }
-
-    async fn handle_logs(&self, filter: Option<&str>) {
-        let mut out = std::io::stderr().lock();
-
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let steps = match db.load_trace_steps(self.session.id) {
-            Ok(s) => s,
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to load logs: {e}"), None);
-                return;
-            }
-        };
-
-        console::render_logs(&steps, filter, &mut out);
-    }
-
-    async fn handle_inspect(&self, target: &commands::InspectTarget) {
-        let mut out = std::io::stderr().lock();
-
-        match target {
-            commands::InspectTarget::Runtime => {
-                console::inspect_runtime(&mut out);
-            }
-            commands::InspectTarget::Memory => {
-                let (stats, episodes) = if let Some(db) = &self.db {
-                    let ms = db.memory_stats().ok();
-                    let ep = db.count_episodes().unwrap_or(0);
-                    (ms, ep)
-                } else {
-                    (None, 0)
-                };
-                console::inspect_memory(stats.as_ref(), episodes, &mut out);
-            }
-            commands::InspectTarget::Db => {
-                let info = self.db.as_ref().and_then(|db| {
-                    let conn = db.conn().ok()?;
-                    let mut pairs = Vec::new();
-                    for pragma in &["page_count", "page_size", "journal_mode"] {
-                        let val = conn
-                            .query_row(&format!("PRAGMA {pragma}"), [], |row| {
-                                // Try integer first (page_count, page_size), then string (journal_mode).
-                                row.get::<_, i64>(0)
-                                    .map(|v| v.to_string())
-                                    .or_else(|_| row.get::<_, String>(0))
-                            })
-                            .unwrap_or_else(|_| "unknown".into());
-                        pairs.push((pragma.to_string(), val));
-                    }
-                    Some(pairs)
-                });
-                console::inspect_db(info.as_deref(), &mut out);
-            }
-            commands::InspectTarget::Traces => {
-                let traces = if let Some(db) = &self.db {
-                    let sessions = db.list_sessions(10).unwrap_or_default();
-                    sessions
-                        .iter()
-                        .filter_map(|s| {
-                            let steps = db.load_trace_steps(s.id).ok()?;
-                            let id_short = s.id.to_string()[..8].to_string();
-                            let date = s.updated_at.format("%Y-%m-%d %H:%M").to_string();
-                            Some((id_short, steps.len(), date))
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
-                console::inspect_traces(&traces, &mut out);
-            }
-        }
-    }
-
-    async fn handle_trace_browse(&self, session_id_str: Option<&str>) {
-        let mut out = std::io::stderr().lock();
-
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let session_id = if let Some(id_str) = session_id_str {
-            match uuid::Uuid::parse_str(id_str) {
-                Ok(id) => id,
-                Err(_) => {
-                    // Try prefix match against recent sessions.
-                    let sessions = db.list_sessions(50).unwrap_or_default();
-                    match sessions.iter().find(|s| s.id.to_string().starts_with(id_str)) {
-                        Some(s) => s.id,
-                        None => {
-                            crate::render::feedback::user_error(
-                                &format!("session not found: {id_str}"),
-                                Some("Use /session list to see available sessions"),
-                            );
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            self.session.id
-        };
-
-        let steps = match db.load_trace_steps(session_id) {
-            Ok(s) => s,
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to load trace: {e}"), None);
-                return;
-            }
-        };
-
-        console::browse_trace(&steps, &mut out);
-    }
-
-    async fn handle_plan(&mut self, goal: &str) {
-        let provider = match self.registry.get(&self.provider).cloned() {
-            Some(p) => p,
-            None => {
-                crate::render::feedback::user_error(
-                    &format!("provider '{}' not available", self.provider),
-                    None,
-                );
-                return;
-            }
-        };
-
-        let planner = planner::LlmPlanner::new(provider, self.model.clone())
-            .with_max_replans(self.config.planning.max_replans);
-
-        let tool_defs = self.tool_registry.tool_definitions();
-        eprintln!("Planning: {goal}");
-
-        match planner.plan(goal, &tool_defs).await {
-            Ok(Some(plan)) => {
-                let plan_id_str = plan.plan_id.to_string()[..8].to_string();
-                let steps: Vec<(String, Option<String>, f64)> = plan
-                    .steps
-                    .iter()
-                    .map(|s| (s.description.clone(), s.tool_name.clone(), s.confidence))
-                    .collect();
-
-                let mut out = std::io::stderr().lock();
-                console::render_plan(&plan_id_str, &plan.goal, &steps, &mut out);
-
-                // Save plan to DB.
-                if let Some(ref adb) = self.async_db {
-                    if let Err(e) = adb.save_plan_steps(&self.session.id, &plan).await {
-                        crate::render::feedback::user_warning(
-                            &format!("failed to save plan: {e}"),
-                            None,
-                        );
-                    } else {
-                        let _ = writeln!(out, "\n    Plan saved. Run with: /run {plan_id_str}");
-                    }
-                }
-            }
-            Ok(None) => {
-                crate::render::feedback::user_warning("planner returned no plan", None);
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("planning failed: {e}"), None);
-            }
-        }
-    }
-
-    async fn handle_run_plan(&mut self, plan_id_str: &str) {
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        // Load plan steps from DB.
-        let plan_steps = match db.load_plan_steps(plan_id_str) {
-            Ok(steps) if steps.is_empty() => {
-                crate::render::feedback::user_error(
-                    &format!("no plan found with id: {plan_id_str}"),
-                    Some("Use /plan <goal> to create a plan first"),
-                );
-                return;
-            }
-            Ok(steps) => steps,
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to load plan: {e}"), None);
-                return;
-            }
-        };
-
-        // Build sub-agent tasks from plan steps.
-        use cuervo_core::types::{AgentType, SubAgentTask};
-        use std::collections::HashSet;
-
-        let tasks: Vec<SubAgentTask> = plan_steps
-            .iter()
-            .map(|step| SubAgentTask {
-                task_id: uuid::Uuid::new_v4(),
-                instruction: step.description.clone(),
-                agent_type: AgentType::Chat,
-                model: None,
-                provider: None,
-                allowed_tools: HashSet::new(),
-                limits_override: None,
-                depends_on: vec![],
-                priority: step.step_index,
-            })
-            .collect();
-
-        // Run via orchestrator (reuse existing orchestrator wiring).
-        eprintln!("Executing plan {plan_id_str} ({} steps)", tasks.len());
-        self.run_orchestrate(&format!("Execute plan steps for: {}", plan_steps.first().map(|s| s.goal.as_str()).unwrap_or("unknown")))
-            .await;
-    }
-
-    async fn handle_resume(&mut self, session_id_str: &str) {
-        let session_id = match uuid::Uuid::parse_str(session_id_str) {
-            Ok(id) => id,
-            Err(_) => {
-                // Try prefix match.
-                if let Some(db) = &self.db {
-                    let sessions = db.list_sessions(50).unwrap_or_default();
-                    match sessions.iter().find(|s| s.id.to_string().starts_with(session_id_str)) {
-                        Some(s) => s.id,
-                        None => {
-                            crate::render::feedback::user_error(
-                                &format!("session not found: {session_id_str}"),
-                                None,
-                            );
-                            return;
-                        }
-                    }
-                } else {
-                    crate::render::feedback::user_error("no database configured", None);
-                    return;
-                }
-            }
-        };
-
-        let Some(ref adb) = self.async_db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        // Load latest checkpoint.
-        match adb.load_latest_checkpoint(session_id).await {
-            Ok(Some(checkpoint)) => {
-                // Deserialize messages from checkpoint.
-                match serde_json::from_str::<Vec<ChatMessage>>(&checkpoint.messages_json) {
-                    Ok(messages) => {
-                        self.session.messages = messages;
-                        self.session.agent_rounds = checkpoint.round;
-                        eprintln!(
-                            "Resumed session {} from round {} ({} messages)",
-                            &session_id.to_string()[..8],
-                            checkpoint.round,
-                            self.session.messages.len(),
-                        );
-                    }
-                    Err(e) => {
-                        crate::render::feedback::user_error(
-                            &format!("failed to deserialize checkpoint: {e}"),
-                            None,
-                        );
-                    }
-                }
-            }
-            Ok(None) => {
-                // No checkpoint, try loading session directly.
-                match adb.load_session(session_id).await {
-                    Ok(Some(session)) => {
-                        self.session = session;
-                        eprintln!(
-                            "Resumed session {} ({} messages, no checkpoint)",
-                            &session_id.to_string()[..8],
-                            self.session.messages.len(),
-                        );
-                    }
-                    Ok(None) => {
-                        crate::render::feedback::user_error(
-                            &format!("session not found: {}", &session_id.to_string()[..8]),
-                            None,
-                        );
-                    }
-                    Err(e) => {
-                        crate::render::feedback::user_error(
-                            &format!("failed to load session: {e}"),
-                            None,
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(
-                    &format!("failed to load checkpoint: {e}"),
-                    None,
-                );
-            }
-        }
-    }
-
-    async fn handle_cancel(&self, task_id_str: &str) {
-        let Some(ref adb) = self.async_db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        match adb
-            .update_agent_task_status(task_id_str, "cancelled", 0, 0, 0.0, 0, 0, Some("Cancelled by user"), None)
-            .await
-        {
-            Ok(()) => {
-                eprintln!("Task {task_id_str} cancelled.");
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to cancel task: {e}"), None);
-            }
-        }
-    }
-
-    async fn handle_replay(&self, session_id_str: &str) {
-        let session_id = match uuid::Uuid::parse_str(session_id_str) {
-            Ok(id) => id,
-            Err(_) => {
-                // Try prefix match.
-                if let Some(db) = &self.db {
-                    let sessions = db.list_sessions(50).unwrap_or_default();
-                    match sessions.iter().find(|s| s.id.to_string().starts_with(session_id_str)) {
-                        Some(s) => s.id,
-                        None => {
-                            crate::render::feedback::user_error(
-                                &format!("session not found: {session_id_str}"),
-                                None,
-                            );
-                            return;
-                        }
-                    }
-                } else {
-                    crate::render::feedback::user_error("no database configured", None);
-                    return;
-                }
-            }
-        };
-
-        let Some(ref adb) = self.async_db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        eprintln!("Replaying session {}...", &session_id.to_string()[..8]);
-
-        match replay_runner::run_replay(
-            session_id,
-            adb,
-            &self.tool_registry,
-            &self.event_tx,
-            true,
-        )
-        .await
-        {
-            Ok(result) => {
-                let mut out = std::io::stderr().lock();
-                let replay_info = console::ReplayInfo {
-                    original_id: &result.original_session_id.to_string()[..8],
-                    replay_id: &result.replay_session_id.to_string()[..8],
-                    original_fp: result.original_fingerprint.as_deref(),
-                    replay_fp: &result.replay_fingerprint,
-                    fp_match: result.fingerprint_match,
-                    rounds: result.rounds,
-                    steps: result.steps_replayed,
-                };
-                console::render_replay_result(&replay_info, &mut out);
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("replay failed: {e}"), None);
-            }
-        }
-    }
-
-    async fn handle_step(&mut self, direction: &commands::StepDirection) {
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        // Load trace if no cursor exists.
-        if self.trace_cursor.is_none() {
-            let steps = match db.load_trace_steps(self.session.id) {
-                Ok(s) if s.is_empty() => {
-                    crate::render::feedback::user_warning(
-                        "no trace steps for current session",
-                        Some("Run a message first to generate trace data"),
-                    );
-                    return;
-                }
-                Ok(s) => s,
-                Err(e) => {
-                    crate::render::feedback::user_error(
-                        &format!("failed to load trace: {e}"),
-                        None,
-                    );
-                    return;
-                }
-            };
-            self.trace_cursor = Some((self.session.id, steps, 0));
-        }
-
-        let (_, ref steps, ref mut index) = self.trace_cursor.as_mut().unwrap();
-
-        match direction {
-            commands::StepDirection::Forward => {
-                if *index < steps.len().saturating_sub(1) {
-                    *index += 1;
-                }
-            }
-            commands::StepDirection::Back => {
-                *index = index.saturating_sub(1);
-            }
-        }
-
-        let idx = *index;
-        let total = steps.len();
-        let step = &steps[idx];
-
-        let mut out = std::io::stderr().lock();
-        console::render_trace_step(step, idx, total, &mut out);
-    }
-
-    async fn handle_snapshot(&self) {
-        let Some(ref adb) = self.async_db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let messages_json = match serde_json::to_string(&self.session.messages) {
-            Ok(j) => j,
-            Err(e) => {
-                crate::render::feedback::user_error(
-                    &format!("failed to serialize session: {e}"),
-                    None,
-                );
-                return;
-            }
-        };
-
-        let usage_json = serde_json::to_string(&self.session.total_usage).unwrap_or_default();
-        let fingerprint = self
-            .session
-            .execution_fingerprint
-            .clone()
-            .unwrap_or_else(|| "manual_snapshot".to_string());
-
-        let checkpoint = cuervo_storage::SessionCheckpoint {
-            session_id: self.session.id,
-            round: self.session.agent_rounds,
-            step_index: 0,
-            messages_json,
-            usage_json,
-            fingerprint,
-            created_at: chrono::Utc::now(),
-            agent_state: None,
-        };
-
-        match adb.save_checkpoint(&checkpoint).await {
-            Ok(()) => {
-                eprintln!(
-                    "Snapshot saved at round {} for session {}",
-                    self.session.agent_rounds,
-                    &self.session.id.to_string()[..8],
-                );
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(
-                    &format!("failed to save snapshot: {e}"),
-                    None,
-                );
-            }
-        }
-    }
-
-    async fn handle_diff(&self, id_a: &str, id_b: &str) {
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let sessions = db.list_sessions(100).unwrap_or_default();
-
-        let resolve_id = |prefix: &str| -> Option<uuid::Uuid> {
-            uuid::Uuid::parse_str(prefix).ok().or_else(|| {
-                sessions.iter().find(|s| s.id.to_string().starts_with(prefix)).map(|s| s.id)
-            })
-        };
-
-        let (sa_id, sb_id) = match (resolve_id(id_a), resolve_id(id_b)) {
-            (Some(a), Some(b)) => (a, b),
-            (None, _) => {
-                crate::render::feedback::user_error(&format!("session not found: {id_a}"), None);
-                return;
-            }
-            (_, None) => {
-                crate::render::feedback::user_error(&format!("session not found: {id_b}"), None);
-                return;
-            }
-        };
-
-        let sa = match db.load_session(sa_id) {
-            Ok(Some(s)) => s,
-            _ => {
-                crate::render::feedback::user_error(&format!("failed to load session: {id_a}"), None);
-                return;
-            }
-        };
-        let sb = match db.load_session(sb_id) {
-            Ok(Some(s)) => s,
-            _ => {
-                crate::render::feedback::user_error(&format!("failed to load session: {id_b}"), None);
-                return;
-            }
-        };
-
-        let kv_a = session_to_kv(&sa);
-        let kv_b = session_to_kv(&sb);
-
-        let mut out = std::io::stderr().lock();
-        console::diff_sessions(&kv_a, &kv_b, &mut out);
-    }
-
-    async fn handle_research(&mut self, query: &str) {
-        if !self.config.orchestrator.enabled {
-            crate::render::feedback::user_error(
-                "orchestrator is disabled (required for /research)",
-                Some("Set [orchestrator] enabled = true in config.toml"),
-            );
-            return;
-        }
-
-        let provider = match self.registry.get(&self.provider).cloned() {
-            Some(p) => p,
-            None => {
-                crate::render::feedback::user_error(
-                    &format!("provider '{}' not available", self.provider),
-                    None,
-                );
-                return;
-            }
-        };
-
-        let decomposed = console::decompose_research(query);
-
-        use cuervo_core::types::{AgentType, SubAgentTask};
-        use std::collections::HashSet;
-
-        let tasks: Vec<SubAgentTask> = decomposed
-            .iter()
-            .map(|(instruction, _)| SubAgentTask {
-                task_id: uuid::Uuid::new_v4(),
-                instruction: instruction.clone(),
-                agent_type: AgentType::Chat,
-                model: None,
-                provider: None,
-                allowed_tools: HashSet::new(),
-                limits_override: None,
-                depends_on: vec![],
-                priority: 0,
-            })
-            .collect();
-
-        let orchestrator_id = uuid::Uuid::new_v4();
-        let working_dir = self
-            .config
-            .general
-            .working_directory
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
-
-        let fallback_providers: Vec<(String, Arc<dyn cuervo_core::traits::ModelProvider>)> = self
-            .config
-            .agent
-            .routing
-            .fallback_models
-            .iter()
-            .filter_map(|name| {
-                self.registry.get(name).cloned().map(|p| (name.clone(), p))
-            })
-            .collect();
-
-        let guardrails: &[Box<dyn cuervo_security::Guardrail>] =
-            if self.config.security.guardrails.enabled && self.config.security.guardrails.builtins {
-                cuervo_security::builtin_guardrails()
-            } else {
-                &[]
-            };
-
-        eprintln!("Researching: {query}");
-
-        match orchestrator::run_orchestrator(
-            orchestrator_id,
-            tasks,
-            &provider,
-            &self.tool_registry,
-            &self.event_tx,
-            &self.config.agent.limits,
-            &self.config.orchestrator,
-            &self.config.agent.routing,
-            self.async_db.as_ref(),
-            self.response_cache.as_ref(),
-            &fallback_providers,
-            &self.model,
-            &working_dir,
-            None,
-            guardrails,
-            self.config.tools.confirm_destructive,
-            self.config.security.tbac_enabled,
-        )
-        .await
-        {
-            Ok(result) => {
-                let agent_results: Vec<(String, String, bool)> = result
-                    .sub_results
-                    .iter()
-                    .zip(decomposed.iter())
-                    .map(|(sub, (label, _))| {
-                        (label.clone(), sub.output_text.clone(), sub.success)
-                    })
-                    .collect();
-
-                let mut out = std::io::stderr().lock();
-                console::render_research_report(
-                    query,
-                    &agent_results,
-                    result.total_input_tokens + result.total_output_tokens,
-                    result.total_cost_usd,
-                    &mut out,
-                );
-            }
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("research failed: {e}"), None);
-            }
-        }
-    }
-
-    async fn handle_benchmark(&self, workload: &str) {
-        let mut out = std::io::stderr().lock();
-
-        match workload {
-            "inference" => {
-                // Run 3 probe invocations and measure latency.
-                let provider = match self.registry.get(&self.provider).cloned() {
-                    Some(p) => p,
-                    None => {
-                        crate::render::feedback::user_error("no provider available", None);
-                        return;
-                    }
-                };
-
-                let probe = ModelRequest {
-                    model: self.model.clone(),
-                    messages: vec![ChatMessage {
-                        role: Role::User,
-                        content: MessageContent::Text("Say OK".to_string()),
-                    }],
-                    tools: vec![],
-                    max_tokens: Some(16),
-                    temperature: Some(0.0),
-                    system: None,
-                    stream: true,
-                };
-
-                let mut latencies = Vec::new();
-                for _ in 0..3 {
-                    let start = std::time::Instant::now();
-                    if let Ok(mut stream) = provider.invoke(&probe).await {
-                        while let Some(chunk) = stream.next().await {
-                            match chunk {
-                                Ok(ModelChunk::Done(_)) => break,
-                                Err(_) => break,
-                                _ => {}
-                            }
-                        }
-                    }
-                    latencies.push(start.elapsed().as_millis() as u64);
-                }
-
-                latencies.sort();
-                let p50 = latencies.get(1).copied().unwrap_or(0);
-                let p95 = latencies.last().copied().unwrap_or(0);
-                let avg = if latencies.is_empty() {
-                    0
-                } else {
-                    latencies.iter().sum::<u64>() / latencies.len() as u64
-                };
-
-                let results = vec![
-                    ("Provider".into(), self.provider.clone()),
-                    ("Model".into(), self.model.clone()),
-                    ("Samples".into(), latencies.len().to_string()),
-                    ("Avg latency".into(), format!("{avg}ms")),
-                    ("P50 latency".into(), format!("{p50}ms")),
-                    ("P95 latency".into(), format!("{p95}ms")),
-                ];
-                console::render_benchmark("inference", &results, &mut out);
-            }
-            "cache" => {
-                let Some(db) = &self.db else {
-                    crate::render::feedback::user_warning("no database configured", None);
-                    return;
-                };
-                let stats = db.cache_stats().unwrap_or(cuervo_storage::CacheStats {
-                    total_entries: 0,
-                    total_hits: 0,
-                    oldest_entry: None,
-                    newest_entry: None,
-                });
-                let hit_rate = if stats.total_entries > 0 {
-                    format!("{:.1}%", stats.total_hits as f64 / stats.total_entries as f64 * 100.0)
-                } else {
-                    "N/A".into()
-                };
-                let results = vec![
-                    ("Entries".into(), stats.total_entries.to_string()),
-                    ("Total hits".into(), stats.total_hits.to_string()),
-                    ("Hit rate".into(), hit_rate),
-                ];
-                console::render_benchmark("cache", &results, &mut out);
-            }
-            "tools" | "full" => {
-                let Some(db) = &self.db else {
-                    crate::render::feedback::user_warning("no database configured", None);
-                    return;
-                };
-                let tool_stats = db.top_tool_stats(10).unwrap_or_default();
-                let results: Vec<(String, String)> = tool_stats
-                    .iter()
-                    .map(|ts| {
-                        (
-                            ts.tool_name.clone(),
-                            format!(
-                                "{} exec, {:.0}ms avg, {:.0}% success",
-                                ts.total_executions,
-                                ts.avg_duration_ms,
-                                ts.success_rate * 100.0,
-                            ),
-                        )
-                    })
-                    .collect();
-                console::render_benchmark(workload, &results, &mut out);
-            }
-            _ => {
-                crate::render::feedback::user_error(
-                    &format!("unknown workload: {workload}"),
-                    Some("Available: inference, tools, cache, full"),
-                );
-            }
-        }
-    }
-
-    async fn handle_optimize(&self) {
-        let mut out = std::io::stderr().lock();
-
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let sys = match db.system_metrics() {
-            Ok(s) => s,
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to load metrics: {e}"), None);
-                return;
-            }
-        };
-
-        let mut recommendations = Vec::new();
-
-        for m in &sys.models {
-            if m.p95_latency_ms > 2000 {
-                recommendations.push((
-                    format!("{}/{}: P95 latency {}ms", m.provider, m.model, m.p95_latency_ms),
-                    "Consider a faster model or increase timeout".to_string(),
-                ));
-            }
-            if m.success_rate < 0.9 && m.total_invocations > 5 {
-                recommendations.push((
-                    format!(
-                        "{}/{}: success rate {:.0}%",
-                        m.provider, m.model,
-                        m.success_rate * 100.0
-                    ),
-                    "Check API key, rate limits, or switch provider".to_string(),
-                ));
-            }
-        }
-
-        let cache = db.cache_stats().ok();
-        if let Some(cs) = &cache {
-            if cs.total_entries > 0 && cs.total_hits == 0 {
-                recommendations.push((
-                    "Cache: 0 hits".to_string(),
-                    "Cache is populated but never hit — check cache key generation".to_string(),
-                ));
-            }
-        }
-
-        console::render_optimize(&recommendations, &mut out);
-    }
-
-    async fn handle_analyze(&self) {
-        let mut out = std::io::stderr().lock();
-
-        let Some(db) = &self.db else {
-            crate::render::feedback::user_warning("no database configured", None);
-            return;
-        };
-
-        let sys = match db.system_metrics() {
-            Ok(s) => s,
-            Err(e) => {
-                crate::render::feedback::user_error(&format!("failed to load metrics: {e}"), None);
-                return;
-            }
-        };
-
-        // Model rankings by cost (descending).
-        let mut model_rankings: Vec<(String, u64, f64, f64)> = sys
-            .models
-            .iter()
-            .map(|m| {
-                (
-                    format!("{}/{}", m.provider, m.model),
-                    m.total_invocations,
-                    m.total_cost_usd,
-                    m.avg_latency_ms,
-                )
-            })
-            .collect();
-        model_rankings.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Tool rankings by usage with bottleneck detection.
-        let tool_stats = db.top_tool_stats(20).unwrap_or_default();
-        let tool_rankings: Vec<(String, u64, f64, bool)> = tool_stats
-            .iter()
-            .map(|ts| {
-                let is_bottleneck = ts.avg_duration_ms > 5000.0;
-                (
-                    ts.tool_name.clone(),
-                    ts.total_executions,
-                    ts.avg_duration_ms,
-                    is_bottleneck,
-                )
-            })
-            .collect();
-
-        console::render_analyze(&model_rankings, &tool_rankings, &mut out);
-    }
 
     fn history_path() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".cuervo").join("history.txt"))
+    }
+
+    /// Return the last execution timeline as JSON, if a plan was generated.
+    ///
+    /// Used by `--timeline` flag. Returns None if no plan was executed in this session.
+    pub fn last_timeline_json(&self) -> Option<String> {
+        self.last_timeline.clone()
     }
 
     /// Expose session ID for testing.
@@ -2479,34 +1265,6 @@ impl Repl {
     pub fn message_count(&self) -> usize {
         self.session.messages.len()
     }
-}
-
-/// Convert a Session to key-value pairs for diffing.
-fn session_to_kv(session: &Session) -> Vec<(String, String)> {
-    vec![
-        ("Session".into(), session.id.to_string()[..8].to_string()),
-        ("Model".into(), format!("{}/{}", session.provider, session.model)),
-        ("Messages".into(), session.messages.len().to_string()),
-        ("Rounds".into(), session.agent_rounds.to_string()),
-        ("Tools".into(), session.tool_invocations.to_string()),
-        (
-            "Tokens".into(),
-            format!(
-                "{}/{}",
-                session.total_usage.input_tokens, session.total_usage.output_tokens
-            ),
-        ),
-        ("Cost".into(), format!("${:.4}", session.estimated_cost_usd)),
-        ("Latency".into(), format!("{}ms", session.total_latency_ms)),
-        (
-            "Fingerprint".into(),
-            session
-                .execution_fingerprint
-                .as_deref()
-                .unwrap_or("(none)")
-                .to_string(),
-        ),
-    ]
 }
 
 #[cfg(test)]
@@ -2797,18 +1555,21 @@ mod tests {
         )
         .unwrap();
 
-        // Should have 4 context sources: instructions + repo_map + planning + memory.
-        assert_eq!(repl.context_sources.len(), 4);
+        // Should have 5 context sources: instructions + repo_map + planning + episodic_memory + reflections.
+        // (episodic=true and reflexion.enabled=true by default)
+        assert_eq!(repl.context_sources.len(), 5);
         assert_eq!(repl.context_sources[0].name(), "instructions");
         assert_eq!(repl.context_sources[1].name(), "repo_map");
         assert_eq!(repl.context_sources[2].name(), "planning");
-        assert_eq!(repl.context_sources[3].name(), "memory");
+        assert_eq!(repl.context_sources[3].name(), "episodic_memory");
+        assert_eq!(repl.context_sources[4].name(), "reflections");
     }
 
     #[test]
     fn context_sources_no_memory_when_disabled() {
         let mut config = test_config();
         config.memory.enabled = false;
+        config.reflexion.enabled = false;
         let db = test_db();
 
         let repl = Repl::new(
@@ -2825,7 +1586,7 @@ mod tests {
         )
         .unwrap();
 
-        // Should have 3 context sources: instructions + repo_map + planning (no memory).
+        // Should have 3 context sources: instructions + repo_map + planning (no memory, no reflections).
         assert_eq!(repl.context_sources.len(), 3);
         assert_eq!(repl.context_sources[0].name(), "instructions");
         assert_eq!(repl.context_sources[1].name(), "repo_map");
@@ -2850,7 +1611,7 @@ mod tests {
         )
         .unwrap();
 
-        // No DB => no memory source. Still has instructions + repo_map + planning.
+        // No DB => no memory or reflections source. Still has instructions + repo_map + planning.
         assert_eq!(repl.context_sources.len(), 3);
         assert_eq!(repl.context_sources[0].name(), "instructions");
         assert_eq!(repl.context_sources[1].name(), "repo_map");
@@ -2862,6 +1623,7 @@ mod tests {
         let mut config = test_config();
         config.planning.enabled = false;
         config.memory.enabled = false;
+        config.reflexion.enabled = false;
 
         let repl = Repl::new(
             &config,
@@ -2877,7 +1639,7 @@ mod tests {
         )
         .unwrap();
 
-        // Instructions + repo_map when both planning and memory disabled.
+        // Instructions + repo_map when planning, memory, and reflexion disabled.
         assert_eq!(repl.context_sources.len(), 2);
         assert_eq!(repl.context_sources[0].name(), "instructions");
         assert_eq!(repl.context_sources[1].name(), "repo_map");

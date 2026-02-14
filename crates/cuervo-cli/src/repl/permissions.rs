@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-
 use cuervo_core::types::{AuthzDecision, PermissionDecision, PermissionLevel, TaskContext, ToolInput};
+
+use super::authorization::AuthorizationMiddleware;
 
 /// Checks tool permissions and prompts the user for confirmation when needed.
 ///
@@ -8,30 +8,50 @@ use cuervo_core::types::{AuthzDecision, PermissionDecision, PermissionLevel, Tas
 /// when `tbac_enabled` is true and a task context is active,
 /// `check_tbac()` gates tool access to the context's allowlist
 /// and parameter constraints.
+///
+/// Internally delegates permission decisions to [`AuthorizationMiddleware`]
+/// which evaluates a policy chain (NonInteractive → PermissionLevel → SessionMemory)
+/// and falls back to an interactive prompt with configurable timeout.
+///
+/// In TUI mode, a dedicated approval channel replaces the stdin interactive
+/// prompt. Call [`set_tui_channel`] to wire the TUI permission response path.
 pub struct PermissionChecker {
-    /// Tools that have been permanently allowed for this session.
-    always_allowed: HashSet<String>,
-    /// Whether to prompt for destructive tools.
-    confirm_destructive: bool,
+    /// Authorization middleware with policy chain and session state.
+    middleware: AuthorizationMiddleware,
     /// Active task context stack (innermost = most restrictive).
     task_contexts: Vec<TaskContext>,
     /// Whether TBAC is enabled.
     tbac_enabled: bool,
+    /// TUI permission approval channel. When set, `authorize()` waits on this
+    /// channel instead of falling through to the middleware's stdin prompt.
+    /// The TUI sends `true` for approve, `false` for reject.
+    #[cfg(feature = "tui")]
+    tui_approve_rx: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<bool>>>>,
 }
 
 impl PermissionChecker {
-    #[allow(dead_code)] // Used by tests in permissions.rs + agent.rs.
+    #[allow(dead_code)] // Used by tests in permissions.rs + agent.rs + executor.rs.
     pub fn new(confirm_destructive: bool) -> Self {
-        Self::with_tbac(confirm_destructive, false)
+        Self::with_config(confirm_destructive, false, 30)
     }
 
-    /// Create a new PermissionChecker with TBAC support.
+    /// Create a new PermissionChecker with TBAC support (legacy constructor).
     pub fn with_tbac(confirm_destructive: bool, tbac_enabled: bool) -> Self {
+        Self::with_config(confirm_destructive, tbac_enabled, 30)
+    }
+
+    /// Create a new PermissionChecker with full configuration.
+    pub fn with_config(
+        confirm_destructive: bool,
+        tbac_enabled: bool,
+        prompt_timeout_secs: u64,
+    ) -> Self {
         Self {
-            always_allowed: HashSet::new(),
-            confirm_destructive,
+            middleware: AuthorizationMiddleware::new(confirm_destructive, prompt_timeout_secs),
             task_contexts: Vec::new(),
             tbac_enabled,
+            #[cfg(feature = "tui")]
+            tui_approve_rx: None,
         }
     }
 
@@ -40,7 +60,17 @@ impl PermissionChecker {
     /// When there is no TTY for user input, tools that would normally require
     /// confirmation are auto-approved instead of hanging on stdin.
     pub fn set_non_interactive(&mut self) {
-        self.confirm_destructive = false;
+        self.middleware.set_non_interactive();
+    }
+
+    /// Set the TUI permission approval channel.
+    ///
+    /// When this channel is set, `authorize()` waits for the TUI user's
+    /// Y/N decision instead of falling through to the middleware's stdin
+    /// prompt. This is essential in TUI mode where stdin is in raw mode.
+    #[cfg(feature = "tui")]
+    pub fn set_tui_channel(&mut self, rx: tokio::sync::mpsc::UnboundedReceiver<bool>) {
+        self.tui_approve_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(rx)));
     }
 
     /// Push a new task context (enters a scoped authorization).
@@ -96,6 +126,52 @@ impl PermissionChecker {
         }
     }
 
+    /// Async authorization: evaluates TBAC first, then delegates to the middleware
+    /// policy chain. Falls back to interactive prompt with timeout.
+    ///
+    /// In TUI mode (when `set_tui_channel()` has been called), if the tool
+    /// requires an interactive prompt, the method waits on the TUI approval
+    /// channel instead of spawning a stdin reader. This ensures the TUI's
+    /// permission overlay is the sole decision source.
+    pub async fn authorize(
+        &mut self,
+        tool_name: &str,
+        perm_level: PermissionLevel,
+        input: &ToolInput,
+    ) -> PermissionDecision {
+        // TUI mode: intercept before middleware's stdin prompt.
+        #[cfg(feature = "tui")]
+        if let Some(ref tui_rx) = self.tui_approve_rx {
+            if self.needs_prompt(tool_name, perm_level) {
+                let mut rx = tui_rx.lock().await;
+                // Drain any stale approvals from previous permission requests.
+                while rx.try_recv().is_ok() {}
+                // Wait for fresh TUI user decision with 60s timeout (fail-safe: deny).
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    rx.recv(),
+                ).await {
+                    Ok(Some(true)) => return PermissionDecision::Allowed,
+                    Ok(Some(false)) => return PermissionDecision::Denied,
+                    Ok(None) => {
+                        // Channel closed — TUI exited.
+                        tracing::warn!(tool = %tool_name, "TUI permission channel closed — denying");
+                        return PermissionDecision::Denied;
+                    }
+                    Err(_timeout) => {
+                        tracing::info!(
+                            tool = %tool_name,
+                            "TUI permission prompt timed out (60s) — denying (fail-safe)"
+                        );
+                        return PermissionDecision::Denied;
+                    }
+                }
+            }
+        }
+
+        self.middleware.authorize(tool_name, perm_level, input).await
+    }
+
     /// Check if a tool execution should be allowed (convenience for sync callers/tests).
     ///
     /// - ReadOnly tools: always allowed.
@@ -128,76 +204,28 @@ impl PermissionChecker {
 
     /// Returns true if this tool+level combination requires a user prompt.
     pub fn needs_prompt(&self, tool_name: &str, permission_level: PermissionLevel) -> bool {
-        if permission_level < PermissionLevel::Destructive {
-            return false;
-        }
-        if !self.confirm_destructive {
-            return false;
-        }
-        if self.always_allowed.contains(tool_name) {
-            return false;
-        }
-        true
+        self.middleware.needs_prompt(tool_name, permission_level)
     }
 
     /// Decide without prompting (for auto-allowed tools).
-    pub fn auto_decide(&self, tool_name: &str, permission_level: PermissionLevel) -> PermissionDecision {
-        if permission_level < PermissionLevel::Destructive || !self.confirm_destructive {
-            PermissionDecision::Allowed
-        } else if self.always_allowed.contains(tool_name) {
-            PermissionDecision::AllowedAlways
-        } else {
-            // Shouldn't be called when prompt is needed, but deny as safe default.
-            PermissionDecision::Denied
-        }
+    pub fn auto_decide(
+        &self,
+        tool_name: &str,
+        permission_level: PermissionLevel,
+    ) -> PermissionDecision {
+        self.middleware.auto_decide(tool_name, permission_level)
     }
 
     /// Format the permission prompt string.
+    #[cfg(test)]
     pub fn format_prompt(tool_name: &str, input: &ToolInput) -> String {
-        let summary = summarize_input(tool_name, input);
-        format!(
-            "\nAllow {tool_name} [{summary}]? [y]es [n]o [a]lways: "
-        )
+        AuthorizationMiddleware::format_prompt(tool_name, input)
     }
 
     /// Apply a user answer and update internal state.
+    #[cfg(test)]
     pub fn apply_answer(&mut self, tool_name: &str, answer: &str) -> PermissionDecision {
-        match answer {
-            "y" | "yes" => PermissionDecision::Allowed,
-            "a" | "always" => {
-                self.always_allowed.insert(tool_name.to_string());
-                PermissionDecision::AllowedAlways
-            }
-            _ => PermissionDecision::Denied,
-        }
-    }
-}
-
-/// Generate a brief summary of the tool input for the permission prompt.
-fn summarize_input(tool_name: &str, input: &ToolInput) -> String {
-    match tool_name {
-        "bash" => input.arguments["command"]
-            .as_str()
-            .map(|c| {
-                if c.len() > 60 {
-                    format!("{}...", &c[..57])
-                } else {
-                    c.to_string()
-                }
-            })
-            .unwrap_or_else(|| "(unknown command)".into()),
-        "file_write" | "file_edit" | "file_read" => input.arguments["path"]
-            .as_str()
-            .unwrap_or("(unknown path)")
-            .to_string(),
-        _ => {
-            let s = serde_json::to_string(&input.arguments).unwrap_or_default();
-            if s.len() > 60 {
-                format!("{}...", &s[..57])
-            } else {
-                s
-            }
-        }
+        self.middleware.apply_answer(tool_name, answer)
     }
 }
 
@@ -298,7 +326,11 @@ mod tests {
         let prompt = String::from_utf8(writer).unwrap();
         assert!(prompt.contains("Allow bash"));
         assert!(prompt.contains("rm -rf"));
-        assert!(prompt.contains("[y]es [n]o [a]lways"));
+        // Updated: now includes [d]eny always
+        assert!(prompt.contains("[y]es"));
+        assert!(prompt.contains("[n]o"));
+        assert!(prompt.contains("[a]lways"));
+        assert!(prompt.contains("[d]eny always"));
     }
 
     #[test]
@@ -376,18 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn summarize_bash_command() {
-        let input = dummy_input(serde_json::json!({ "command": "echo hello" }));
-        assert_eq!(summarize_input("bash", &input), "echo hello");
-    }
-
-    #[test]
-    fn summarize_file_path() {
-        let input = dummy_input(serde_json::json!({ "path": "src/main.rs" }));
-        assert_eq!(summarize_input("file_read", &input), "src/main.rs");
-    }
-
-    #[test]
     fn needs_prompt_returns_correct() {
         let checker = PermissionChecker::new(true);
         // ReadOnly — no prompt.
@@ -414,13 +434,62 @@ mod tests {
         );
     }
 
+    // --- New: deny-always tests ---
+
     #[test]
-    fn summarize_truncates_long_command() {
-        let long_cmd = "a".repeat(100);
-        let input = dummy_input(serde_json::json!({ "command": long_cmd }));
-        let summary = summarize_input("bash", &input);
-        assert!(summary.len() <= 63);
-        assert!(summary.ends_with("..."));
+    fn apply_answer_deny_always() {
+        let mut checker = PermissionChecker::new(true);
+        let result = checker.apply_answer("bash", "d");
+        assert_eq!(result, PermissionDecision::Denied);
+
+        // After "deny always", needs_prompt should return false (SessionMemoryPolicy handles it).
+        assert!(!checker.needs_prompt("bash", PermissionLevel::Destructive));
+        // And auto_decide should return Denied.
+        assert_eq!(
+            checker.auto_decide("bash", PermissionLevel::Destructive),
+            PermissionDecision::Denied
+        );
+    }
+
+    #[test]
+    fn destructive_user_says_deny_always() {
+        let mut checker = PermissionChecker::new(true);
+        let input = dummy_input(serde_json::json!({ "command": "rm -rf /" }));
+
+        // First call — user says "d" (deny always)
+        let mut reader = io::Cursor::new(b"d\n");
+        let mut writer = Vec::new();
+        let result = checker
+            .check(
+                "bash",
+                PermissionLevel::Destructive,
+                &input,
+                &mut reader,
+                &mut writer,
+            )
+            .unwrap();
+        assert_eq!(result, PermissionDecision::Denied);
+
+        // Second call — should not prompt (auto-denied).
+        let mut reader2 = io::Cursor::new(b"");
+        let mut writer2 = Vec::new();
+        let result2 = checker
+            .check(
+                "bash",
+                PermissionLevel::Destructive,
+                &input,
+                &mut reader2,
+                &mut writer2,
+            )
+            .unwrap();
+        assert_eq!(result2, PermissionDecision::Denied);
+        assert!(writer2.is_empty());
+    }
+
+    #[test]
+    fn with_config_prompt_timeout() {
+        let checker = PermissionChecker::with_config(true, false, 60);
+        assert!(checker.needs_prompt("bash", PermissionLevel::Destructive));
     }
 
     // --- TBAC tests ---

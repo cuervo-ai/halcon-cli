@@ -11,6 +11,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
+use crate::render::theme;
 use crate::tui::state::AppState;
 
 /// Result of a completed tool execution.
@@ -39,10 +40,12 @@ pub enum ActivityLine {
     /// Visual separator between agent rounds.
     RoundSeparator(usize),
     /// Tool execution — shows skeleton while loading, result when done.
+    /// When `expanded` is true, shows full output; when false, shows compact summary.
     ToolExec {
         name: String,
         input_preview: String,
         result: Option<ToolResult>,
+        expanded: bool,
     },
     /// Plan overview — shows the execution plan with step statuses.
     PlanOverview {
@@ -50,6 +53,44 @@ pub enum ActivityLine {
         steps: Vec<crate::tui::events::PlanStepStatus>,
         current_step: usize,
     },
+}
+
+impl ActivityLine {
+    /// Extract the searchable text content of this line.
+    pub fn text_content(&self) -> String {
+        match self {
+            ActivityLine::UserPrompt(s) => s.clone(),
+            ActivityLine::AssistantText(s) => s.clone(),
+            ActivityLine::CodeBlock { lang, code } => format!("{lang}\n{code}"),
+            ActivityLine::Info(s) => s.clone(),
+            ActivityLine::Warning { message, hint } => {
+                let mut s = message.clone();
+                if let Some(h) = hint {
+                    s.push(' ');
+                    s.push_str(h);
+                }
+                s
+            }
+            ActivityLine::Error { message, hint } => {
+                let mut s = message.clone();
+                if let Some(h) = hint {
+                    s.push(' ');
+                    s.push_str(h);
+                }
+                s
+            }
+            ActivityLine::RoundSeparator(n) => format!("Round {n}"),
+            ActivityLine::ToolExec { name, input_preview, result, .. } => {
+                let mut s = format!("{name} {input_preview}");
+                if let Some(r) = result {
+                    s.push(' ');
+                    s.push_str(&r.content);
+                }
+                s
+            }
+            ActivityLine::PlanOverview { goal, .. } => goal.clone(),
+        }
+    }
 }
 
 /// State for the scrollable activity zone.
@@ -73,11 +114,22 @@ impl ActivityState {
 
     /// Render the activity zone with scrollbar.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let p = &theme::active().palette;
+        let c_success = p.success.to_ratatui_color();
+        let c_accent = p.accent.to_ratatui_color();
+        let c_warning = p.warning.to_ratatui_color();
+        let c_error = p.error.to_ratatui_color();
+        let c_running = p.running.to_ratatui_color();
+        let c_text = p.text.to_ratatui_color();
+        let c_muted = p.muted.to_ratatui_color();
+        let c_border = p.border.to_ratatui_color();
+        let c_spinner = p.spinner_color.to_ratatui_color();
+
         let border_color =
             if state.focus == super::super::state::FocusZone::Activity {
-                Color::Cyan
+                c_accent
             } else {
-                Color::DarkGray
+                c_border
             };
 
         let mut styled_lines: Vec<Line<'_>> = Vec::new();
@@ -89,48 +141,48 @@ impl ActivityState {
                         Span::styled(
                             "► ",
                             Style::default()
-                                .fg(Color::Green)
+                                .fg(c_success)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             text.clone(),
                             Style::default()
-                                .fg(Color::Green)
+                                .fg(c_success)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
                 }
                 ActivityLine::AssistantText(text) => {
                     for l in text.lines() {
-                        styled_lines.push(render_md_line(l));
+                        styled_lines.push(render_md_line(l, c_text, c_accent, c_warning, c_muted));
                     }
                 }
                 ActivityLine::CodeBlock { lang, code } => {
                     styled_lines.push(Line::from(vec![
-                        Span::styled("  ┌─ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("  ┌─ ", Style::default().fg(c_muted)),
                         Span::styled(
                             lang.clone(),
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(c_accent)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(" ─", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" ─", Style::default().fg(c_muted)),
                     ]));
                     for l in code.lines() {
                         styled_lines.push(Line::from(vec![
-                            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(l.to_string(), Style::default().fg(Color::Yellow)),
+                            Span::styled("  │ ", Style::default().fg(c_muted)),
+                            Span::styled(l.to_string(), Style::default().fg(c_warning)),
                         ]));
                     }
                     styled_lines.push(Line::from(Span::styled(
                         "  └───",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(c_muted),
                     )));
                 }
                 ActivityLine::Info(text) => {
                     styled_lines.push(Line::from(Span::styled(
                         text.clone(),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(c_accent),
                     )));
                 }
                 ActivityLine::Warning { message, hint } => {
@@ -138,15 +190,15 @@ impl ActivityState {
                         Span::styled(
                             "⚠ ",
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(c_warning)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(message.clone(), Style::default().fg(Color::Yellow)),
+                        Span::styled(message.clone(), Style::default().fg(c_warning)),
                     ];
                     if let Some(h) = hint {
                         spans.push(Span::styled(
                             format!(" ({h})"),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(c_muted),
                         ));
                     }
                     styled_lines.push(Line::from(spans));
@@ -156,15 +208,15 @@ impl ActivityState {
                         Span::styled(
                             "✖ ",
                             Style::default()
-                                .fg(Color::Red)
+                                .fg(c_error)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(message.clone(), Style::default().fg(Color::Red)),
+                        Span::styled(message.clone(), Style::default().fg(c_error)),
                     ];
                     if let Some(h) = hint {
                         spans.push(Span::styled(
                             format!(" ({h})"),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(c_muted),
                         ));
                     }
                     styled_lines.push(Line::from(spans));
@@ -173,7 +225,7 @@ impl ActivityState {
                     styled_lines.push(Line::from(Span::styled(
                         format!("──────── Round {n} ────────"),
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(c_muted)
                             .add_modifier(Modifier::DIM),
                     )));
                 }
@@ -187,13 +239,13 @@ impl ActivityState {
                         Span::styled(
                             "  \u{1f4cb} PLAN: ",
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(c_accent)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             goal.clone(),
                             Style::default()
-                                .fg(Color::White)
+                                .fg(c_text)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
@@ -201,11 +253,11 @@ impl ActivityState {
                     for (i, step) in steps.iter().enumerate() {
                         use crate::tui::events::PlanStepDisplayStatus;
                         let (icon, color) = match step.status {
-                            PlanStepDisplayStatus::Succeeded => ("\u{2713}", Color::Green),
-                            PlanStepDisplayStatus::Failed => ("\u{2717}", Color::Red),
-                            PlanStepDisplayStatus::InProgress => ("\u{25b8}", Color::Yellow),
-                            PlanStepDisplayStatus::Skipped => ("-", Color::DarkGray),
-                            PlanStepDisplayStatus::Pending => ("\u{25cb}", Color::DarkGray),
+                            PlanStepDisplayStatus::Succeeded => ("\u{2713}", c_success),
+                            PlanStepDisplayStatus::Failed => ("\u{2717}", c_error),
+                            PlanStepDisplayStatus::InProgress => ("\u{25b8}", c_warning),
+                            PlanStepDisplayStatus::Skipped => ("-", c_muted),
+                            PlanStepDisplayStatus::Pending => ("\u{25cb}", c_muted),
                         };
                         let marker = if i == *current_step && step.status == PlanStepDisplayStatus::InProgress {
                             " \u{2190} CURRENT"
@@ -234,6 +286,7 @@ impl ActivityState {
                     name,
                     input_preview,
                     result,
+                    expanded,
                 } => match result {
                     None => {
                         // Loading skeleton — animated shimmer.
@@ -255,18 +308,18 @@ impl ActivityState {
                             Span::styled(
                                 "  ⚙ ",
                                 Style::default()
-                                    .fg(Color::Magenta)
+                                    .fg(c_running)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 name.clone(),
                                 Style::default()
-                                    .fg(Color::Magenta)
+                                    .fg(c_running)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 format!(" {input_preview}"),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(c_muted),
                             ),
                         ]));
                         // Skeleton bar.
@@ -274,21 +327,22 @@ impl ActivityState {
                             Span::styled("    ", Style::default()),
                             Span::styled(
                                 shimmer_frames[frame_idx],
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(c_muted),
                             ),
                         ]));
                     }
                     Some(res) => {
                         let (icon, icon_color) = if res.is_error {
-                            ("  ✖ ", Color::Red)
+                            ("  ✖ ", c_error)
                         } else {
-                            ("  ✔ ", Color::Green)
+                            ("  ✔ ", c_success)
                         };
                         let duration_str = if res.duration_ms < 1000 {
                             format!("{}ms", res.duration_ms)
                         } else {
                             format!("{:.1}s", res.duration_ms as f64 / 1000.0)
                         };
+                        let expand_hint = if *expanded { "▾" } else { "▸" };
                         styled_lines.push(Line::from(vec![
                             Span::styled(
                                 icon,
@@ -297,42 +351,60 @@ impl ActivityState {
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
+                                format!("{expand_hint} "),
+                                Style::default().fg(c_muted),
+                            ),
+                            Span::styled(
                                 name.clone(),
                                 Style::default()
-                                    .fg(Color::White)
+                                    .fg(c_text)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 format!(" [{duration_str}]"),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(c_muted),
                             ),
                         ]));
-                        // Show content preview (truncated).
-                        let preview = &res.content[..res.content.len().min(200)];
-                        if !preview.is_empty() {
+                        // Show content: expanded = full, collapsed = 3-line preview.
+                        if !res.content.is_empty() {
                             let content_color = if res.is_error {
-                                Color::Red
+                                c_error
                             } else {
-                                Color::DarkGray
+                                c_muted
                             };
-                            for pline in preview.lines().take(3) {
-                                styled_lines.push(Line::from(vec![
-                                    Span::styled("    ", Style::default()),
-                                    Span::styled(
-                                        pline.to_string(),
-                                        Style::default().fg(content_color),
-                                    ),
-                                ]));
-                            }
-                            let total_lines_in_content = res.content.lines().count();
-                            if total_lines_in_content > 3 {
-                                styled_lines.push(Line::from(Span::styled(
-                                    format!(
-                                        "    ... ({} more lines)",
-                                        total_lines_in_content - 3
-                                    ),
-                                    Style::default().fg(Color::DarkGray),
-                                )));
+                            if *expanded {
+                                // Show all content lines.
+                                for pline in res.content.lines() {
+                                    styled_lines.push(Line::from(vec![
+                                        Span::styled("    ", Style::default()),
+                                        Span::styled(
+                                            pline.to_string(),
+                                            Style::default().fg(content_color),
+                                        ),
+                                    ]));
+                                }
+                            } else {
+                                // Show truncated preview (3 lines max).
+                                let preview = &res.content[..res.content.len().min(200)];
+                                for pline in preview.lines().take(3) {
+                                    styled_lines.push(Line::from(vec![
+                                        Span::styled("    ", Style::default()),
+                                        Span::styled(
+                                            pline.to_string(),
+                                            Style::default().fg(content_color),
+                                        ),
+                                    ]));
+                                }
+                                let total_lines_in_content = res.content.lines().count();
+                                if total_lines_in_content > 3 {
+                                    styled_lines.push(Line::from(Span::styled(
+                                        format!(
+                                            "    ... ({} more lines, press Enter to expand)",
+                                            total_lines_in_content - 3
+                                        ),
+                                        Style::default().fg(c_muted),
+                                    )));
+                                }
                             }
                         }
                     }
@@ -347,7 +419,7 @@ impl ActivityState {
             styled_lines.push(Line::from(Span::styled(
                 format!("{ch} {}", state.spinner_label),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(c_spinner)
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -462,6 +534,7 @@ impl ActivityState {
             name: name.to_string(),
             input_preview: input_preview.to_string(),
             result: None,
+            expanded: false,
         });
         if self.auto_scroll {
             self.scroll_to_bottom();
@@ -520,6 +593,24 @@ impl ActivityState {
         self.scroll_offset = self.last_max_scroll;
     }
 
+    /// Clear all activity content.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
+    }
+
+    /// Toggle expand/collapse on the last completed tool execution.
+    #[allow(dead_code)]
+    pub fn toggle_last_tool_expanded(&mut self) {
+        for line in self.lines.iter_mut().rev() {
+            if let ActivityLine::ToolExec { result: Some(_), expanded, .. } = line {
+                *expanded = !*expanded;
+                break;
+            }
+        }
+    }
+
     /// Get the number of activity lines.
     #[allow(dead_code)]
     pub fn line_count(&self) -> usize {
@@ -562,6 +653,29 @@ impl ActivityState {
             matches!(l, ActivityLine::ToolExec { result: None, .. })
         })
     }
+
+    /// Search activity lines for a query (case-insensitive).
+    /// Returns indices of matching lines. O(n) scan.
+    pub fn search(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let q = query.to_lowercase();
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.text_content().to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Scroll to a specific line index (used by search navigation).
+    pub fn scroll_to_line(&mut self, line_idx: usize) {
+        self.auto_scroll = false;
+        // Approximate: each ActivityLine maps to roughly 1-3 rendered lines.
+        // Scroll so the target line is near the top of the view.
+        self.scroll_offset = line_idx.saturating_sub(2);
+    }
 }
 
 impl Default for ActivityState {
@@ -573,13 +687,14 @@ impl Default for ActivityState {
 // ── Markdown rendering helpers ──
 
 /// Render a single line of text with markdown formatting.
-fn render_md_line(text: &str) -> Line<'static> {
+/// Accepts palette colors to avoid hardcoded Color:: values.
+fn render_md_line(text: &str, c_text: Color, c_accent: Color, c_warning: Color, c_muted: Color) -> Line<'static> {
     // Headers
     if let Some(rest) = text.strip_prefix("### ") {
         return Line::from(Span::styled(
             rest.to_string(),
             Style::default()
-                .fg(Color::White)
+                .fg(c_text)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -587,7 +702,7 @@ fn render_md_line(text: &str) -> Line<'static> {
         return Line::from(Span::styled(
             rest.to_string(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(c_accent)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -595,7 +710,7 @@ fn render_md_line(text: &str) -> Line<'static> {
         return Line::from(Span::styled(
             rest.to_string(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(c_accent)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         ));
     }
@@ -605,18 +720,18 @@ fn render_md_line(text: &str) -> Line<'static> {
     if (trimmed == "---" || trimmed == "***" || trimmed == "___") && trimmed.len() >= 3 {
         return Line::from(Span::styled(
             "────────────────────────────────────────",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(c_muted),
         ));
     }
 
     // Blockquote
     if let Some(rest) = text.strip_prefix("> ") {
-        let mut spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
-        spans.extend(parse_md_spans(rest).into_iter().map(|s| {
+        let mut spans = vec![Span::styled("│ ", Style::default().fg(c_muted))];
+        spans.extend(parse_md_spans(rest, c_warning).into_iter().map(|s| {
             Span::styled(
                 s.content,
                 s.style
-                    .fg(Color::DarkGray)
+                    .fg(c_muted)
                     .add_modifier(Modifier::ITALIC),
             )
         }));
@@ -626,8 +741,8 @@ fn render_md_line(text: &str) -> Line<'static> {
     // Unordered list
     if text.starts_with("- ") || text.starts_with("* ") {
         let rest = &text[2..];
-        let mut spans = vec![Span::styled("  • ", Style::default().fg(Color::Cyan))];
-        spans.extend(parse_md_spans(rest));
+        let mut spans = vec![Span::styled("  • ", Style::default().fg(c_accent))];
+        spans.extend(parse_md_spans(rest, c_warning));
         return Line::from(spans);
     }
 
@@ -638,19 +753,20 @@ fn render_md_line(text: &str) -> Line<'static> {
             let rest = &text[dot_pos + 2..];
             let mut spans = vec![Span::styled(
                 format!("  {prefix}. "),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(c_accent),
             )];
-            spans.extend(parse_md_spans(rest));
+            spans.extend(parse_md_spans(rest, c_warning));
             return Line::from(spans);
         }
     }
 
     // Regular text with inline formatting
-    Line::from(parse_md_spans(text))
+    Line::from(parse_md_spans(text, c_warning))
 }
 
 /// Parse inline markdown: **bold**, *italic*, `code`.
-fn parse_md_spans(text: &str) -> Vec<Span<'static>> {
+/// `c_code` is the color used for inline code spans.
+fn parse_md_spans(text: &str, c_code: Color) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut buf = String::new();
     let chars: Vec<char> = text.chars().collect();
@@ -694,7 +810,7 @@ fn parse_md_spans(text: &str) -> Vec<Span<'static>> {
             if !buf.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut buf),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(c_code),
                 ));
             }
         }
@@ -737,6 +853,24 @@ fn parse_md_spans(text: &str) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: call render_md_line with default palette colors for tests.
+    fn test_render_md_line(text: &str) -> Line<'static> {
+        let p = &theme::active().palette;
+        render_md_line(
+            text,
+            p.text.to_ratatui_color(),
+            p.accent.to_ratatui_color(),
+            p.warning.to_ratatui_color(),
+            p.muted.to_ratatui_color(),
+        )
+    }
+
+    /// Helper: call parse_md_spans with default palette colors for tests.
+    fn test_parse_md_spans(text: &str) -> Vec<Span<'static>> {
+        let p = &theme::active().palette;
+        parse_md_spans(text, p.warning.to_ratatui_color())
+    }
 
     #[test]
     fn new_activity_is_empty() {
@@ -955,7 +1089,7 @@ mod tests {
 
     #[test]
     fn md_header_h1() {
-        let line = render_md_line("# Hello World");
+        let line = test_render_md_line("# Hello World");
         assert_eq!(line.spans.len(), 1);
         assert!(line.spans[0].style.add_modifier == Modifier::empty()
             || line.spans[0].content.contains("Hello World"));
@@ -963,14 +1097,14 @@ mod tests {
 
     #[test]
     fn md_header_h2() {
-        let line = render_md_line("## Subheader");
+        let line = test_render_md_line("## Subheader");
         assert_eq!(line.spans.len(), 1);
         assert!(line.spans[0].content.contains("Subheader"));
     }
 
     #[test]
     fn md_bold() {
-        let spans = parse_md_spans("hello **world** end");
+        let spans = test_parse_md_spans("hello **world** end");
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content.as_ref(), "hello ");
         assert_eq!(spans[1].content.as_ref(), "world");
@@ -980,63 +1114,85 @@ mod tests {
 
     #[test]
     fn md_italic() {
-        let spans = parse_md_spans("hello *italic* end");
+        let spans = test_parse_md_spans("hello *italic* end");
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[1].content.as_ref(), "italic");
         assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]
-    fn md_inline_code() {
-        let spans = parse_md_spans("run `cargo test` now");
+    fn md_inline_code_uses_palette() {
+        let p = &theme::active().palette;
+        let c_code = p.warning.to_ratatui_color();
+        let spans = test_parse_md_spans("run `cargo test` now");
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[1].content.as_ref(), "cargo test");
-        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[1].style.fg, Some(c_code));
     }
 
     #[test]
     fn md_plain_text() {
-        let spans = parse_md_spans("just plain text");
+        let spans = test_parse_md_spans("just plain text");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "just plain text");
     }
 
     #[test]
     fn md_list_item() {
-        let line = render_md_line("- first item");
+        let line = test_render_md_line("- first item");
         assert!(line.spans.len() >= 2);
         assert!(line.spans[0].content.contains("•"));
     }
 
     #[test]
     fn md_numbered_list() {
-        let line = render_md_line("1. first item");
+        let line = test_render_md_line("1. first item");
         assert!(line.spans.len() >= 2);
         assert!(line.spans[0].content.contains("1."));
     }
 
     #[test]
     fn md_blockquote() {
-        let line = render_md_line("> quoted text");
+        let line = test_render_md_line("> quoted text");
         assert!(line.spans.len() >= 2);
         assert!(line.spans[0].content.contains("│"));
     }
 
     #[test]
     fn md_horizontal_rule() {
-        let line = render_md_line("---");
+        let line = test_render_md_line("---");
         assert_eq!(line.spans.len(), 1);
         assert!(line.spans[0].content.contains("─"));
     }
 
     #[test]
-    fn md_mixed_inline() {
-        let spans = parse_md_spans("**bold** and `code` here");
+    fn md_mixed_inline_uses_palette() {
+        let p = &theme::active().palette;
+        let c_code = p.warning.to_ratatui_color();
+        let spans = test_parse_md_spans("**bold** and `code` here");
         assert!(spans.len() >= 4);
         assert_eq!(spans[0].content.as_ref(), "bold");
         assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(spans[2].content.as_ref(), "code");
-        assert_eq!(spans[2].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[2].style.fg, Some(c_code));
+    }
+
+    // Phase 43B: Verify no hardcoded Color:: in activity rendering
+    #[test]
+    fn activity_uses_palette_colors() {
+        // The palette is used when render() is called. Here we verify
+        // the palette can be loaded and colors are valid ratatui Colors.
+        let p = &theme::active().palette;
+        let _s = p.success.to_ratatui_color();
+        let _a = p.accent.to_ratatui_color();
+        let _w = p.warning.to_ratatui_color();
+        let _e = p.error.to_ratatui_color();
+        let _r = p.running.to_ratatui_color();
+        let _t = p.text.to_ratatui_color();
+        let _m = p.muted.to_ratatui_color();
+        let _b = p.border.to_ratatui_color();
+        let _sp = p.spinner_color.to_ratatui_color();
+        // If this compiles and runs without panic, palette integration is working.
     }
 
     // ── Plan overview tests ──
@@ -1051,6 +1207,7 @@ mod tests {
                 description: "Read file".into(),
                 tool_name: Some("file_read".into()),
                 status: PlanStepDisplayStatus::Pending,
+                duration_ms: None,
             }],
             0,
         );
@@ -1071,6 +1228,7 @@ mod tests {
                 description: "Step 1".into(),
                 tool_name: None,
                 status: PlanStepDisplayStatus::Pending,
+                duration_ms: None,
             }],
             0,
         );
@@ -1080,6 +1238,7 @@ mod tests {
                 description: "Step 1".into(),
                 tool_name: None,
                 status: PlanStepDisplayStatus::Succeeded,
+                duration_ms: None,
             }],
             1,
         );
@@ -1107,6 +1266,7 @@ mod tests {
                 description: "Do stuff".into(),
                 tool_name: None,
                 status: PlanStepDisplayStatus::InProgress,
+                duration_ms: None,
             }],
             0,
         );

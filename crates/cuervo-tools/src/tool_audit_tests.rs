@@ -26,6 +26,7 @@ mod audit {
     use crate::file_inspect::FileInspectTool;
     use crate::file_read::FileReadTool;
     use crate::file_write::FileWriteTool;
+    use crate::fs_service::FsService;
     use crate::fuzzy_find::FuzzyFindTool;
     use crate::glob_tool::GlobTool;
     use crate::grep::GrepTool;
@@ -35,6 +36,18 @@ mod audit {
     use crate::web_fetch::WebFetchTool;
     use crate::web_search::WebSearchTool;
     use crate::git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool};
+
+    fn test_fs() -> Arc<FsService> {
+        Arc::new(FsService::new(vec![], vec![]))
+    }
+
+    fn test_fs_with_allowed(dirs: Vec<std::path::PathBuf>) -> Arc<FsService> {
+        Arc::new(FsService::new(dirs, vec![]))
+    }
+
+    fn test_fs_with_blocked(blocked: Vec<String>) -> Arc<FsService> {
+        Arc::new(FsService::new(vec![], blocked))
+    }
 
     // ===== Helpers =====
 
@@ -70,7 +83,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileReadTool {
-            FileReadTool::new(vec![], vec![])
+            FileReadTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -194,7 +207,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileWriteTool {
-            FileWriteTool::new(vec![], vec![])
+            FileWriteTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -286,7 +299,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileEditTool {
-            FileEditTool::new(vec![], vec![])
+            FileEditTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -391,7 +404,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileDeleteTool {
-            FileDeleteTool::new(vec![], vec![])
+            FileDeleteTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -714,7 +727,7 @@ mod audit {
         use super::*;
 
         fn tool() -> DirectoryTreeTool {
-            DirectoryTreeTool::new()
+            DirectoryTreeTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -1320,7 +1333,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileInspectTool {
-            FileInspectTool::new(vec![], vec![])
+            FileInspectTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -1602,7 +1615,7 @@ mod audit {
             let unique_id = "propagation-test-xyz-123";
 
             // file_read
-            let tool = FileReadTool::new(vec![], vec![]);
+            let tool = FileReadTool::new(test_fs());
             let out = tool.execute(tmp_input(unique_id, json!({"path": f.to_str().unwrap()}), &dir)).await.unwrap();
             assert_eq!(out.tool_use_id, unique_id);
 
@@ -1617,7 +1630,7 @@ mod audit {
             assert_eq!(out.tool_use_id, unique_id);
 
             // directory_tree
-            let tool = DirectoryTreeTool::new();
+            let tool = DirectoryTreeTool::new(test_fs());
             let out = tool.execute(tmp_input(unique_id, json!({"path": dir.path().to_str().unwrap()}), &dir)).await.unwrap();
             assert_eq!(out.tool_use_id, unique_id);
 
@@ -1665,7 +1678,7 @@ mod audit {
         #[tokio::test]
         async fn ten_parallel_file_reads_no_leakage() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = Arc::new(FileReadTool::new(vec![], vec![]));
+            let tool = Arc::new(FileReadTool::new(test_fs()));
 
             // Create 10 unique files.
             for i in 0..10 {
@@ -1743,10 +1756,10 @@ mod audit {
             let wd = dir.path().to_str().unwrap().to_string();
             let path = dir.path().join("mixed.txt");
 
-            let file_read = Arc::new(FileReadTool::new(vec![], vec![]));
+            let file_read = Arc::new(FileReadTool::new(test_fs()));
             let grep = Arc::new(GrepTool::new());
             let glob = Arc::new(GlobTool::new());
-            let tree = Arc::new(DirectoryTreeTool::new());
+            let tree = Arc::new(DirectoryTreeTool::new(test_fs()));
 
             let fr = {
                 let t = file_read.clone();
@@ -1858,7 +1871,7 @@ mod audit {
         #[tokio::test]
         async fn concurrent_writes_to_different_files() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = Arc::new(FileWriteTool::new(vec![], vec![]));
+            let tool = Arc::new(FileWriteTool::new(test_fs()));
 
             let mut handles = vec![];
             for i in 0..10 {
@@ -1942,7 +1955,7 @@ mod audit {
             let dir = tempfile::TempDir::new().unwrap();
             std::fs::write(dir.path().join("f.txt"), "x").unwrap();
 
-            let tool = Arc::new(FileReadTool::new(vec![], vec![]));
+            let tool = Arc::new(FileReadTool::new(test_fs()));
             let path = dir.path().join("f.txt");
 
             let mut handles = vec![];
@@ -1992,7 +2005,7 @@ mod audit {
             let f = dir.path().join("stress.txt");
             std::fs::write(&f, "stress test data\n".repeat(10)).unwrap();
 
-            let tool = Arc::new(FileReadTool::new(vec![], vec![]));
+            let tool = Arc::new(FileReadTool::new(test_fs()));
             let mut handles = vec![];
 
             for i in 0..200 {
@@ -2036,7 +2049,7 @@ mod audit {
 
             let grep = Arc::new(GrepTool::new());
             let glob = Arc::new(GlobTool::new());
-            let tree = Arc::new(DirectoryTreeTool::new());
+            let tree = Arc::new(DirectoryTreeTool::new(test_fs()));
 
             let mut handles = vec![];
             for i in 0..100 {
@@ -2092,7 +2105,7 @@ mod audit {
             let valid_file = dir.path().join("valid.txt");
             std::fs::write(&valid_file, "valid_content").unwrap();
 
-            let tool = Arc::new(FileReadTool::new(vec![], vec![]));
+            let tool = Arc::new(FileReadTool::new(test_fs()));
             let mut handles = vec![];
 
             for i in 0..50 {
@@ -2166,7 +2179,7 @@ mod audit {
             let f = dir.path().join("det.txt");
             std::fs::write(&f, "deterministic_content").unwrap();
 
-            let tool = FileReadTool::new(vec![], vec![]);
+            let tool = FileReadTool::new(test_fs());
             let mut outputs = vec![];
 
             for i in 0..50 {
@@ -2193,7 +2206,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileReadTool {
-            FileReadTool::new(vec![], vec![])
+            FileReadTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -2271,7 +2284,7 @@ mod audit {
         use super::*;
 
         fn tool() -> FileEditTool {
-            FileEditTool::new(vec![], vec![])
+            FileEditTool::new(test_fs())
         }
 
         #[tokio::test]
@@ -2662,7 +2675,7 @@ mod audit {
         async fn file_write_atomic_no_partial_on_disk() {
             // Verify the write is atomic: file should contain complete content or not exist.
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let content = "A".repeat(100_000); // 100KB
 
             let out = tool.execute(tmp_input(
@@ -2682,7 +2695,7 @@ mod audit {
         async fn file_write_no_temp_file_left_behind() {
             // After a successful write, no .cuervo_tmp_ files should remain.
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             tool.execute(tmp_input(
                 "aw2",
@@ -2706,7 +2719,7 @@ mod audit {
             let file = dir.path().join("overwrite.txt");
             std::fs::write(&file, "original content that must not be corrupted").unwrap();
 
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             tool.execute(tmp_input(
                 "aw3",
                 json!({"path": "overwrite.txt", "content": "new content"}),
@@ -2722,7 +2735,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_rejects_oversized_content() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let huge = "X".repeat(11 * 1024 * 1024); // 11 MB > 10 MB limit
 
             let result = tool.execute(tmp_input(
@@ -2741,7 +2754,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_accepts_just_under_limit() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let content = "X".repeat(10 * 1024 * 1024); // exactly 10 MB
 
             let out = tool.execute(tmp_input(
@@ -2764,7 +2777,7 @@ mod audit {
             let link_path = dir.path().join("link.txt");
             std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
 
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "sym1",
                 json!({"path": "link.txt", "content": "malicious"}),
@@ -2783,7 +2796,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_allows_non_symlink() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             // Write to a regular file (no symlink).
             let out = tool.execute(tmp_input(
@@ -2802,7 +2815,7 @@ mod audit {
             let file = dir.path().join("edit_atomic.txt");
             std::fs::write(&file, "hello world\ngoodbye world\n").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let out = tool.execute(tmp_input(
                 "ea1",
                 json!({
@@ -2824,7 +2837,7 @@ mod audit {
             let file = dir.path().join("edit_clean.txt");
             std::fs::write(&file, "aaa bbb ccc").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             tool.execute(tmp_input(
                 "ea2",
                 json!({
@@ -2853,7 +2866,7 @@ mod audit {
             let huge = "X".repeat(11 * 1024 * 1024);
             std::fs::write(&file, &huge).unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "esz1",
                 json!({
@@ -2880,7 +2893,7 @@ mod audit {
             let link = dir.path().join("link_edit.txt");
             std::os::unix::fs::symlink(&real, &link).unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "esym1",
                 json!({
@@ -2901,7 +2914,7 @@ mod audit {
 
         #[test]
         fn file_edit_is_destructive() {
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             assert_eq!(
                 tool.permission_level(),
                 PermissionLevel::Destructive,
@@ -2911,13 +2924,13 @@ mod audit {
 
         #[test]
         fn file_write_is_destructive() {
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             assert_eq!(tool.permission_level(), PermissionLevel::Destructive);
         }
 
         #[test]
         fn file_delete_is_destructive() {
-            let tool = FileDeleteTool::new(vec![], vec![]);
+            let tool = FileDeleteTool::new(test_fs());
             assert_eq!(tool.permission_level(), PermissionLevel::Destructive);
         }
 
@@ -2933,7 +2946,7 @@ mod audit {
             let link = dir.path().join("link_to_precious.txt");
             std::os::unix::fs::symlink(&real, &link).unwrap();
 
-            let tool = FileDeleteTool::new(vec![dir.path().to_path_buf()], vec![]);
+            let tool = FileDeleteTool::new(test_fs_with_allowed(vec![dir.path().to_path_buf()]));
             let out = tool.execute(tmp_input(
                 "dsym1",
                 json!({"path": "link_to_precious.txt"}),
@@ -2953,7 +2966,7 @@ mod audit {
         async fn concurrent_writes_to_different_files_no_corruption() {
             // 50 concurrent writes to different files — no data loss.
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = std::sync::Arc::new(FileWriteTool::new(vec![], vec![]));
+            let tool = std::sync::Arc::new(FileWriteTool::new(test_fs()));
             let wd = dir.path().to_str().unwrap().to_string();
 
             let mut handles = Vec::new();
@@ -2991,7 +3004,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_unicode_content_preserved() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let unicode = "Hello 你好 مرحبا こんにちは 🦀🔥💯 Ñ ü ö ä";
 
             let out = tool.execute(tmp_input(
@@ -3011,7 +3024,7 @@ mod audit {
             let file = dir.path().join("uni_edit.txt");
             std::fs::write(&file, "Hello 你好 world").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let out = tool.execute(tmp_input(
                 "uni2",
                 json!({
@@ -3032,7 +3045,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_empty_content_creates_empty_file() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             let out = tool.execute(tmp_input(
                 "empty1",
@@ -3052,7 +3065,7 @@ mod audit {
             let file = dir.path().join("vanish.txt");
             std::fs::write(&file, "goodbye").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let out = tool.execute(tmp_input(
                 "empty2",
                 json!({
@@ -3073,7 +3086,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_rejects_path_traversal() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             let result = tool.execute(tmp_input(
                 "pt1",
@@ -3086,7 +3099,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_rejects_absolute_path_outside_workspace() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             let result = tool.execute(tmp_input(
                 "pt2",
@@ -3099,7 +3112,7 @@ mod audit {
         #[tokio::test]
         async fn file_edit_rejects_path_traversal() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
 
             let result = tool.execute(tmp_input(
                 "pt3",
@@ -3118,12 +3131,12 @@ mod audit {
         #[tokio::test]
         async fn file_write_blocks_sensitive_patterns() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![
+            let tool = FileWriteTool::new(test_fs_with_blocked(vec![
                 ".env".into(),
                 "*.pem".into(),
                 "*.key".into(),
                 "credentials.json".into(),
-            ]);
+            ]));
 
             for name in &[".env", "server.pem", "api.key", "credentials.json"] {
                 let result = tool.execute(tmp_input(
@@ -3152,7 +3165,7 @@ mod audit {
             std::fs::write(subdir.join("existing.txt"), "old").unwrap();
             std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "perm1",
                 json!({"path": "readonly_dir/existing.txt", "content": "blocked"}),
@@ -3181,7 +3194,7 @@ mod audit {
             std::fs::write(subdir.join("target.txt"), "original").unwrap();
             std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "perm2",
                 json!({
@@ -3204,7 +3217,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_deterministic_repeated_calls() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             for i in 0..10 {
                 let out = tool.execute(tmp_input(
@@ -3226,7 +3239,7 @@ mod audit {
             let file = dir.path().join("det_edit.txt");
             std::fs::write(&file, "aaa bbb ccc").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
 
             // First edit: succeeds.
             let out = tool.execute(tmp_input(
@@ -3259,7 +3272,7 @@ mod audit {
         #[tokio::test]
         async fn stress_100_sequential_writes() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             for i in 0..100 {
                 let content = format!("write_{i}_{}", "X".repeat(500));
@@ -3284,7 +3297,7 @@ mod audit {
             let file = dir.path().join("stress_edit.txt");
             std::fs::write(&file, "counter=0").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             for i in 0..50 {
                 let out = tool.execute(tmp_input(
                     &format!("se-{i}"),
@@ -3307,7 +3320,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_preserves_line_endings() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             // Unix line endings.
             let unix_content = "line1\nline2\nline3\n";
@@ -3335,7 +3348,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_creates_deep_nested_dirs() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             let out = tool.execute(tmp_input(
                 "deep1",
@@ -3355,7 +3368,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_handles_null_bytes_in_content() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             // Content with null bytes (valid UTF-8 but unusual).
             let content = "before\0middle\0after";
@@ -3375,7 +3388,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_missing_path_arg() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "miss1",
                 json!({"content": "no path"}),
@@ -3387,7 +3400,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_missing_content_arg() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "miss2",
                 json!({"path": "test.txt"}),
@@ -3399,7 +3412,7 @@ mod audit {
         #[tokio::test]
         async fn file_edit_nonexistent_file() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let result = tool.execute(tmp_input(
                 "nexist1",
                 json!({
@@ -3417,7 +3430,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_metadata_contains_bytes_and_path() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             let out = tool.execute(tmp_input(
                 "meta1",
@@ -3437,7 +3450,7 @@ mod audit {
             let file = dir.path().join("meta_edit.txt");
             std::fs::write(&file, "aaa bbb ccc").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let out = tool.execute(tmp_input(
                 "meta2",
                 json!({
@@ -3458,7 +3471,7 @@ mod audit {
         #[tokio::test]
         async fn file_write_propagates_tool_use_id() {
             let dir = tempfile::TempDir::new().unwrap();
-            let tool = FileWriteTool::new(vec![], vec![]);
+            let tool = FileWriteTool::new(test_fs());
 
             let out = tool.execute(tmp_input(
                 "unique-id-42",
@@ -3474,7 +3487,7 @@ mod audit {
             let file = dir.path().join("id_edit.txt");
             std::fs::write(&file, "old").unwrap();
 
-            let tool = FileEditTool::new(vec![], vec![]);
+            let tool = FileEditTool::new(test_fs());
             let out = tool.execute(tmp_input(
                 "edit-id-99",
                 json!({
@@ -3493,7 +3506,7 @@ mod audit {
             let file = dir.path().join("del_id.txt");
             std::fs::write(&file, "bye").unwrap();
 
-            let tool = FileDeleteTool::new(vec![dir.path().to_path_buf()], vec![]);
+            let tool = FileDeleteTool::new(test_fs_with_allowed(vec![dir.path().to_path_buf()]));
             let out = tool.execute(tmp_input(
                 "del-id-77",
                 json!({"path": "del_id.txt"}),

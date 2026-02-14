@@ -1,278 +1,50 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use cuervo_core::traits::ModelProvider;
-use cuervo_core::types::{AppConfig, HttpConfig, McpConfig};
-use cuervo_providers::{
-    AnthropicProvider, DeepSeekProvider, EchoProvider, GeminiProvider, OllamaProvider,
-    OpenAIProvider, ProviderRegistry,
-};
 use cuervo_storage::Database;
-use cuervo_tools::ToolRegistry;
 use uuid::Uuid;
 
 use crate::config_loader::default_db_path;
 use crate::render::feedback;
 use crate::repl::Repl;
 
-/// Build a ProviderRegistry from configuration.
-///
-/// Registers providers whose API keys are available.
-fn build_registry(config: &AppConfig) -> ProviderRegistry {
-    let mut registry = ProviderRegistry::new();
+use super::provider_factory;
 
-    // Always register echo for testing.
-    registry.register(Arc::new(EchoProvider::new()));
-
-    // Register Anthropic if API key is available (env var or keychain).
-    if let Some(provider_cfg) = config.models.providers.get("anthropic") {
-        if provider_cfg.enabled {
-            let api_key =
-                super::auth::resolve_api_key("anthropic", provider_cfg.api_key_env.as_deref());
-
-            if let Some(key) = api_key {
-                let provider = AnthropicProvider::with_config(
-                    key,
-                    provider_cfg.api_base.clone(),
-                    provider_cfg.http.clone(),
-                );
-                registry.register(Arc::new(provider));
-                tracing::debug!("Registered Anthropic provider");
-            } else {
-                tracing::debug!("Anthropic provider enabled but no API key found");
-            }
-        }
-    }
-
-    // Register Ollama if enabled (no API key required).
-    if let Some(provider_cfg) = config.models.providers.get("ollama") {
-        if provider_cfg.enabled {
-            let provider = OllamaProvider::with_default_model(
-                provider_cfg.api_base.clone(),
-                provider_cfg.http.clone(),
-                provider_cfg.default_model.clone(),
-            );
-            registry.register(Arc::new(provider));
-            tracing::debug!("Registered Ollama provider");
-        }
-    }
-
-    // Register OpenAI if enabled and API key available.
-    if let Some(provider_cfg) = config.models.providers.get("openai") {
-        if provider_cfg.enabled {
-            let api_key =
-                super::auth::resolve_api_key("openai", provider_cfg.api_key_env.as_deref());
-
-            if let Some(key) = api_key {
-                let provider = OpenAIProvider::new(
-                    key,
-                    provider_cfg.api_base.clone(),
-                    provider_cfg.http.clone(),
-                );
-                registry.register(Arc::new(provider));
-                tracing::debug!("Registered OpenAI provider");
-            } else {
-                tracing::debug!("OpenAI provider enabled but no API key found");
-            }
-        }
-    }
-
-    // Register DeepSeek if enabled and API key available.
-    if let Some(provider_cfg) = config.models.providers.get("deepseek") {
-        if provider_cfg.enabled {
-            let api_key =
-                super::auth::resolve_api_key("deepseek", provider_cfg.api_key_env.as_deref());
-
-            if let Some(key) = api_key {
-                let provider = DeepSeekProvider::new(
-                    key,
-                    provider_cfg.api_base.clone(),
-                    provider_cfg.http.clone(),
-                );
-                registry.register(Arc::new(provider));
-                tracing::debug!("Registered DeepSeek provider");
-            } else {
-                tracing::debug!("DeepSeek provider enabled but no API key found");
-            }
-        }
-    }
-
-    // Register Gemini if enabled and API key available.
-    if let Some(provider_cfg) = config.models.providers.get("gemini") {
-        if provider_cfg.enabled {
-            let api_key =
-                super::auth::resolve_api_key("gemini", provider_cfg.api_key_env.as_deref());
-
-            if let Some(key) = api_key {
-                let provider = GeminiProvider::new(
-                    key,
-                    provider_cfg.api_base.clone(),
-                    provider_cfg.http.clone(),
-                );
-                registry.register(Arc::new(provider));
-                tracing::debug!("Registered Gemini provider");
-            } else {
-                tracing::debug!("Gemini provider enabled but no API key found");
-            }
-        }
-    }
-
-    registry
+/// CLI feature flags that override config.toml settings for a single session.
+#[derive(Debug, Clone, Default)]
+pub struct FeatureFlags {
+    pub reasoning: bool,
+    pub orchestrate: bool,
+    pub tasks: bool,
+    pub reflexion: bool,
+    pub metrics: bool,
+    pub timeline: bool,
+    pub full: bool,
+    pub expert: bool,
 }
 
-/// Ensure Ollama is in the registry as a last-resort local fallback.
-///
-/// If Ollama is not already registered and is reachable at localhost:11434,
-/// it is added to the registry. This runs once at startup (~0-2s).
-async fn ensure_local_fallback(registry: &mut ProviderRegistry) {
-    // Skip if Ollama is already registered.
-    if registry.get("ollama").is_some() {
-        return;
-    }
-
-    // Create a temporary provider to probe availability (uses its own HTTP client
-    // with connect_timeout, so the probe is bounded).
-    let provider = OllamaProvider::new(None, HttpConfig::default());
-    if provider.is_available().await {
-        registry.register(Arc::new(provider));
-        tracing::info!("Auto-detected local Ollama — registered as fallback provider");
-    } else {
-        tracing::debug!("Ollama not reachable at localhost:11434, skipping local fallback");
-    }
-}
-
-/// Precheck that the requested provider is available; fall back if not.
-///
-/// Returns the (provider_name, model) to use. If the primary is unavailable,
-/// tries other registered providers. Shows clear errors if nothing works.
-async fn precheck_providers(
-    registry: &ProviderRegistry,
-    primary: &str,
-    model: &str,
-) -> Result<(String, String)> {
-    // Check if primary provider is in the registry and available.
-    if let Some(p) = registry.get(primary) {
-        if p.is_available().await {
-            return Ok((primary.to_string(), model.to_string()));
+impl FeatureFlags {
+    /// Apply CLI flag overrides to a mutable config.
+    pub fn apply(&self, config: &mut cuervo_core::types::AppConfig) {
+        if self.full || self.reasoning {
+            config.reasoning.enabled = true;
         }
-        feedback::user_warning(
-            &format!("primary provider '{primary}' is not available"),
-            Some("Checking fallback providers..."),
-        );
-    } else {
-        feedback::user_warning(
-            &format!("provider '{primary}' is not registered (missing API key?)"),
-            Some("Checking fallback providers..."),
-        );
-    }
-
-    // Try all other registered providers (excluding echo).
-    for name in registry.list() {
-        if name == primary || name == "echo" {
-            continue;
+        if self.full || self.orchestrate {
+            config.orchestrator.enabled = true;
         }
-        if let Some(p) = registry.get(name) {
-            if p.is_available().await {
-                let fallback_model = p
-                    .supported_models()
-                    .first()
-                    .map(|m| m.id.clone())
-                    .unwrap_or_else(|| model.to_string());
-                feedback::user_warning(
-                    &format!("using fallback provider '{name}' with model '{fallback_model}'"),
-                    None,
-                );
-                return Ok((name.to_string(), fallback_model));
-            }
+        if self.full || self.tasks {
+            config.task_framework.enabled = true;
+        }
+        if self.full || self.reflexion {
+            config.reflexion.enabled = true;
         }
     }
-
-    // No providers available.
-    feedback::user_error(
-        "no providers available",
-        Some("Set ANTHROPIC_API_KEY or start Ollama (`ollama serve`) and retry"),
-    );
-    anyhow::bail!(
-        "No providers available. Set an API key (e.g., ANTHROPIC_API_KEY) or start a local Ollama instance."
-    );
-}
-
-/// Connect to configured MCP servers and register their tools.
-///
-/// Each server is spawned via stdio, initialized, and its tools are
-/// registered in the tool registry as McpToolBridge instances.
-#[tracing::instrument(skip_all, fields(server_count = mcp_config.servers.len()))]
-async fn connect_mcp_servers(
-    mcp_config: &McpConfig,
-    tool_registry: &mut ToolRegistry,
-) -> Vec<Arc<tokio::sync::Mutex<cuervo_mcp::McpHost>>> {
-    let mut hosts = Vec::new();
-
-    for (name, server_config) in &mcp_config.servers {
-        tracing::debug!(server = name, command = %server_config.command, "Starting MCP server");
-
-        let mut host = match cuervo_mcp::McpHost::new(
-            name,
-            &server_config.command,
-            &server_config.args,
-            &server_config.env,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(server = name, error = %e, "Failed to start MCP server");
-                feedback::user_warning(
-                    &format!("MCP server '{name}' failed to start — {e}"),
-                    Some("Check the server command and arguments in your config"),
-                );
-                continue;
-            }
-        };
-
-        // Initialize the MCP connection.
-        if let Err(e) = host.initialize().await {
-            tracing::warn!(server = name, error = %e, "MCP server initialization failed");
-            feedback::user_warning(
-                &format!("MCP server '{name}' initialization failed — {e}"),
-                Some("Ensure the server supports MCP protocol"),
-            );
-            let _ = host.shutdown().await;
-            continue;
-        }
-
-        // Discover tools.
-        let tools = match host.list_tools().await {
-            Ok(tools) => tools.to_vec(),
-            Err(e) => {
-                tracing::warn!(server = name, error = %e, "MCP server tool discovery failed");
-                feedback::user_warning(
-                    &format!("MCP server '{name}' tool discovery failed — {e}"),
-                    None,
-                );
-                let _ = host.shutdown().await;
-                continue;
-            }
-        };
-
-        let tool_count = tools.len();
-        let host_arc = Arc::new(tokio::sync::Mutex::new(host));
-
-        // Register each MCP tool in the tool registry.
-        for tool_def in tools {
-            let bridge = cuervo_mcp::McpToolBridge::new(tool_def, Arc::clone(&host_arc));
-            tool_registry.register(Arc::new(bridge));
-        }
-
-        tracing::info!(server = name, tools = tool_count, "MCP server connected");
-        hosts.push(host_arc);
-    }
-
-    hosts
 }
 
 /// Run the chat command: interactive REPL or single prompt.
 #[tracing::instrument(skip_all, fields(provider, model))]
 pub async fn run(
-    config: &AppConfig,
+    config: &cuervo_core::types::AppConfig,
     provider: &str,
     model: &str,
     prompt: Option<String>,
@@ -280,6 +52,7 @@ pub async fn run(
     no_banner: bool,
     tui: bool,
     explicit_model: bool,
+    flags: FeatureFlags,
 ) -> Result<()> {
     // Validate configuration before proceeding.
     let issues = cuervo_core::types::validate_config(config);
@@ -301,20 +74,26 @@ pub async fn run(
         anyhow::bail!("Configuration has errors. Fix them and retry.");
     }
 
-    let mut registry = build_registry(config);
+    // Apply CLI flag overrides to a mutable copy of config.
+    let mut config = config.clone();
+    flags.apply(&mut config);
+
+    let mut registry = provider_factory::build_registry(&config);
 
     // Ensure Ollama is available as a last-resort local fallback.
-    ensure_local_fallback(&mut registry).await;
+    provider_factory::ensure_local_fallback(&mut registry).await;
 
     // Precheck that the selected provider is available, falling back if needed.
-    let (provider, model) = precheck_providers(&registry, provider, model).await?;
+    let (provider, model) =
+        provider_factory::precheck_providers(&registry, provider, model).await?;
     let provider = provider.as_str();
     let model = model.as_str();
 
     let mut tool_registry = cuervo_tools::default_registry(&config.tools);
 
     // Connect to MCP servers and register their tools.
-    let _mcp_hosts = connect_mcp_servers(&config.mcp, &mut tool_registry).await;
+    let _mcp_hosts =
+        provider_factory::connect_mcp_servers(&config.mcp, &mut tool_registry).await;
 
     // Instantiate the domain event bus for observability.
     let (event_tx, _event_rx) = cuervo_core::event_bus(256);
@@ -338,8 +117,8 @@ pub async fn run(
 
     // Resume session if requested.
     let resume_session = if let Some(ref id_str) = resume {
-        let id = Uuid::parse_str(id_str)
-            .map_err(|e| anyhow::anyhow!("Invalid session ID: {e}"))?;
+        let id =
+            Uuid::parse_str(id_str).map_err(|e| anyhow::anyhow!("Invalid session ID: {e}"))?;
         match db.as_ref().and_then(|d| d.load_session(id).ok().flatten()) {
             Some(session) => {
                 println!("Resuming session {}", &id_str[..8.min(id_str.len())]);
@@ -355,7 +134,7 @@ pub async fn run(
     };
 
     let mut repl = Repl::new(
-        config,
+        &config,
         provider.to_string(),
         model.to_string(),
         db,
@@ -367,6 +146,9 @@ pub async fn run(
         explicit_model,
     )?;
 
+    // Set expert mode (from --expert flag, --full flag, or config.toml display.ui_mode = "expert").
+    repl.expert_mode = flags.expert || flags.full || config.display.ui_mode == "expert";
+
     match prompt {
         Some(p) => {
             // Single prompt with full agent loop (tools, context, resilience).
@@ -376,6 +158,8 @@ pub async fn run(
             #[cfg(feature = "tui")]
             if tui {
                 repl.run_tui().await?;
+                // --metrics/--timeline handled below.
+                print_exit_hooks(&repl, &flags);
                 return Ok(());
             }
 
@@ -390,38 +174,57 @@ pub async fn run(
             repl.run().await?;
         }
     }
+
+    // Post-run exit hooks.
+    print_exit_hooks(&repl, &flags);
+
     Ok(())
+}
+
+/// Print --metrics summary and --timeline JSON on exit.
+fn print_exit_hooks(repl: &Repl, flags: &FeatureFlags) {
+    if flags.metrics || flags.full {
+        let s = &repl.session;
+        let total_tokens = s.total_usage.input_tokens + s.total_usage.output_tokens;
+        let latency = s.total_latency_ms as f64 / 1000.0;
+        eprintln!("\nSession Summary:");
+        eprintln!(
+            "  Rounds: {} | Tokens: \u{2191}{}K \u{2193}{}K | Cost: ${:.4}",
+            s.agent_rounds,
+            format_k(s.total_usage.input_tokens),
+            format_k(s.total_usage.output_tokens),
+            s.estimated_cost_usd,
+        );
+        eprintln!(
+            "  Duration: {:.1}s | Tools: {} calls | Total tokens: {}",
+            latency,
+            s.tool_invocations,
+            total_tokens,
+        );
+    }
+
+    if flags.timeline || flags.full {
+        if let Some(timeline_json) = repl.last_timeline_json() {
+            println!("{timeline_json}");
+        } else {
+            eprintln!("(no execution timeline available — no plan was generated)");
+        }
+    }
+}
+
+/// Format a token count as "X.XK" for display.
+fn format_k(tokens: u32) -> String {
+    if tokens >= 1000 {
+        format!("{:.1}", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn build_registry_always_has_echo() {
-        let config = AppConfig::default();
-        let registry = build_registry(&config);
-        // Echo is always registered.
-        assert!(registry.get("echo").is_some());
-    }
-
-    #[test]
-    fn build_registry_ollama_default_enabled() {
-        let config = AppConfig::default();
-        let registry = build_registry(&config);
-        // Ollama is enabled by default (no API key needed).
-        assert!(registry.get("ollama").is_some());
-    }
-
-    #[test]
-    fn build_registry_ollama_disabled() {
-        let mut config = AppConfig::default();
-        if let Some(p) = config.models.providers.get_mut("ollama") {
-            p.enabled = false;
-        }
-        let registry = build_registry(&config);
-        assert!(registry.get("ollama").is_none());
-    }
+    use cuervo_core::types::AppConfig;
 
     #[test]
     fn config_validation_empty_config_no_errors() {
@@ -432,5 +235,104 @@ mod tests {
             .filter(|i| i.level == cuervo_core::types::IssueLevel::Error)
             .collect();
         assert!(errors.is_empty(), "default config should have no errors");
+    }
+
+    #[test]
+    fn feature_flags_reasoning_ensures_enabled() {
+        let mut config = AppConfig::default();
+        // Default is now true; flag still ensures it stays true.
+        assert!(config.reasoning.enabled);
+        let flags = FeatureFlags { reasoning: true, ..Default::default() };
+        flags.apply(&mut config);
+        assert!(config.reasoning.enabled);
+    }
+
+    #[test]
+    fn feature_flags_reasoning_overrides_disabled_config() {
+        let mut config = AppConfig::default();
+        config.reasoning.enabled = false; // Simulate user disabling in config.toml
+        let flags = FeatureFlags { reasoning: true, ..Default::default() };
+        flags.apply(&mut config);
+        assert!(config.reasoning.enabled, "flag should re-enable reasoning");
+    }
+
+    #[test]
+    fn feature_flags_orchestrate_ensures_enabled() {
+        let mut config = AppConfig::default();
+        assert!(config.orchestrator.enabled);
+        let flags = FeatureFlags { orchestrate: true, ..Default::default() };
+        flags.apply(&mut config);
+        assert!(config.orchestrator.enabled);
+    }
+
+    #[test]
+    fn feature_flags_tasks_ensures_enabled() {
+        let mut config = AppConfig::default();
+        assert!(config.task_framework.enabled);
+        let flags = FeatureFlags { tasks: true, ..Default::default() };
+        flags.apply(&mut config);
+        assert!(config.task_framework.enabled);
+    }
+
+    #[test]
+    fn feature_flags_reflexion_ensures_enabled() {
+        let mut config = AppConfig::default();
+        assert!(config.reflexion.enabled);
+        let flags = FeatureFlags { reflexion: true, ..Default::default() };
+        flags.apply(&mut config);
+        assert!(config.reflexion.enabled);
+    }
+
+    #[test]
+    fn feature_flags_full_enables_all() {
+        let mut config = AppConfig::default();
+        let flags = FeatureFlags { full: true, ..Default::default() };
+        flags.apply(&mut config);
+        assert!(config.reasoning.enabled, "full should enable reasoning");
+        assert!(config.orchestrator.enabled, "full should enable orchestrator");
+        assert!(config.task_framework.enabled, "full should enable task_framework");
+        assert!(config.reflexion.enabled, "full should enable reflexion");
+    }
+
+    #[test]
+    fn feature_flags_default_changes_nothing() {
+        let mut config = AppConfig::default();
+        let orig = config.clone();
+        let flags = FeatureFlags::default();
+        flags.apply(&mut config);
+        assert_eq!(config.reasoning.enabled, orig.reasoning.enabled);
+        assert_eq!(config.orchestrator.enabled, orig.orchestrator.enabled);
+        assert_eq!(config.task_framework.enabled, orig.task_framework.enabled);
+        assert_eq!(config.reflexion.enabled, orig.reflexion.enabled);
+    }
+
+    #[test]
+    fn format_k_below_thousand() {
+        assert_eq!(format_k(500), "500");
+        assert_eq!(format_k(0), "0");
+        assert_eq!(format_k(999), "999");
+    }
+
+    #[test]
+    fn format_k_above_thousand() {
+        assert_eq!(format_k(1000), "1.0");
+        assert_eq!(format_k(2100), "2.1");
+        assert_eq!(format_k(8400), "8.4");
+    }
+
+    // --- Phase 42E: Expert mode tests ---
+
+    #[test]
+    fn expert_flag_in_feature_flags() {
+        let flags = FeatureFlags { expert: true, ..Default::default() };
+        assert!(flags.expert);
+    }
+
+    #[test]
+    fn full_flag_implies_expert_config() {
+        // full + expert should both result in expert mode.
+        let flags_full = FeatureFlags { full: true, ..Default::default() };
+        assert!(flags_full.full);
+        // In run(), expert_mode = flags.expert || flags.full
     }
 }

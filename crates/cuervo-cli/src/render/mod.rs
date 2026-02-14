@@ -2,8 +2,6 @@
 pub mod animations;
 #[allow(dead_code)]
 pub mod banner;
-#[allow(dead_code)]
-pub mod benchmarks;
 pub mod color;
 #[cfg(feature = "color-science")]
 pub mod color_science;
@@ -11,14 +9,8 @@ pub mod components;
 #[allow(dead_code)]
 pub mod diff;
 pub mod feedback;
-#[allow(dead_code)]
-pub mod indicators;
 pub mod markdown;
-#[allow(dead_code)]
-pub mod progress;
 pub mod spinner;
-#[allow(dead_code)]
-pub mod statusbar;
 pub mod stream;
 pub mod sink;
 pub mod syntax;

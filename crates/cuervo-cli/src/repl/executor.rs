@@ -2,7 +2,6 @@
 //! ReadOnly tools concurrently via `futures::join_all`, while Destructive/ReadWrite
 //! tools requiring permission run sequentially.
 
-use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
 
 use futures::stream::StreamExt as _;
@@ -170,6 +169,7 @@ async fn execute_one_tool(
     dry_run_mode: DryRunMode,
     idempotency: Option<&super::idempotency::IdempotencyRegistry>,
     retry_config: &ToolRetryConfig,
+    render_sink: &dyn RenderSink,
 ) -> ToolExecResult {
     let Some(tool) = registry.get(&tool_call.name) else {
         return ToolExecResult {
@@ -287,6 +287,7 @@ async fn execute_one_tool(
                         delay_ms = delay,
                         "Retrying transient tool error: {err_str}"
                     );
+                    render_sink.tool_retrying(&tool_call.name, (attempt + 1) as usize, max_attempts as usize, delay);
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     continue;
                 }
@@ -320,6 +321,7 @@ async fn execute_one_tool(
                         delay_ms = delay,
                         "Retrying timed out tool"
                     );
+                    render_sink.tool_retrying(&tool_call.name, (attempt + 1) as usize, max_attempts as usize, delay);
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     continue;
                 }
@@ -414,7 +416,7 @@ pub async fn execute_parallel_batch(
             let name = tool_call.name.clone();
             let input = tool_call.input.clone();
             render_sink.tool_start(&name, &input);
-            execute_one_tool(tool_call, registry, working_dir, tool_timeout, dry_run_mode, exec_config.idempotency, &exec_config.retry)
+            execute_one_tool(tool_call, registry, working_dir, tool_timeout, dry_run_mode, exec_config.idempotency, &exec_config.retry, render_sink)
         })
         .collect();
 
@@ -583,27 +585,21 @@ pub async fn execute_sequential_tool(
         }));
     }
 
-    let decision = if !permissions.needs_prompt(&tool_call.name, perm_level) {
-        permissions.auto_decide(&tool_call.name, perm_level)
-    } else {
-        // Permission check involves stdin I/O — move to blocking thread.
-        let prompt = PermissionChecker::format_prompt(&tool_call.name, &tool_input);
-        let answer = tokio::task::spawn_blocking(move || {
-            let mut stderr = io::stderr();
-            if stderr.write_all(prompt.as_bytes()).is_err() || stderr.flush().is_err() {
-                return String::new();
-            }
-            let mut line = String::new();
-            let stdin = io::stdin();
-            if stdin.lock().read_line(&mut line).is_err() {
-                return String::new();
-            }
-            line.trim().to_lowercase()
-        })
-        .await
-        .unwrap_or_default();
-        permissions.apply_answer(&tool_call.name, &answer)
-    };
+    // Emit permission-awaiting event for destructive tools.
+    if perm_level == cuervo_core::types::PermissionLevel::Destructive {
+        render_sink.permission_awaiting(&tool_call.name);
+        // Phase E5: Transition to ToolWait while awaiting permission.
+        render_sink.agent_state_transition("executing", "tool_wait", "awaiting permission");
+    }
+
+    let decision = permissions
+        .authorize(&tool_call.name, perm_level, &tool_input)
+        .await;
+
+    // Phase E5: Transition back from ToolWait after permission decision.
+    if perm_level == cuervo_core::types::PermissionLevel::Destructive {
+        render_sink.agent_state_transition("tool_wait", "executing", "permission decided");
+    }
 
     if decision == PermissionDecision::Denied {
         let _ = event_tx.send(DomainEvent::new(EventPayload::PermissionDenied {
@@ -654,7 +650,7 @@ pub async fn execute_sequential_tool(
 
     render_sink.tool_start(&tool_call.name, &tool_call.input);
 
-    let result = execute_one_tool(tool_call, registry, working_dir, tool_timeout, exec_config.dry_run_mode, exec_config.idempotency, &exec_config.retry).await;
+    let result = execute_one_tool(tool_call, registry, working_dir, tool_timeout, exec_config.dry_run_mode, exec_config.idempotency, &exec_config.retry, render_sink).await;
     let is_error = matches!(&result.content_block,
         ContentBlock::ToolResult { is_error, .. } if *is_error);
 
@@ -979,7 +975,7 @@ mod tests {
     async fn dry_run_off_executes_normally() {
         let registry = cuervo_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, None, &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, None, &ToolRetryConfig::default(), &*TEST_SINK).await;
         // file_read on non-existent path produces an error, but it DID execute (not a dry-run skip).
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
@@ -993,7 +989,7 @@ mod tests {
     async fn dry_run_full_skips_all_tools() {
         let registry = cuervo_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, None, &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, None, &ToolRetryConfig::default(), &*TEST_SINK).await;
         match &result.content_block {
             ContentBlock::ToolResult { content, is_error, .. } => {
                 assert!(content.contains("[dry-run]"));
@@ -1008,7 +1004,7 @@ mod tests {
     async fn dry_run_full_returns_synthetic_result() {
         let registry = cuervo_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "bash");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, None, &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, None, &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert_eq!(result.duration_ms, 0);
         assert_eq!(result.tool_name, "bash");
         match &result.content_block {
@@ -1023,7 +1019,7 @@ mod tests {
     async fn dry_run_destructive_only_skips_bash() {
         let registry = cuervo_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "bash");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::DestructiveOnly, None, &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::DestructiveOnly, None, &ToolRetryConfig::default(), &*TEST_SINK).await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(content.contains("[dry-run]"), "bash should be skipped in DestructiveOnly mode");
@@ -1036,7 +1032,7 @@ mod tests {
     async fn dry_run_destructive_only_allows_read_file() {
         let registry = cuervo_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::DestructiveOnly, None, &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::DestructiveOnly, None, &ToolRetryConfig::default(), &*TEST_SINK).await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(!content.contains("[dry-run]"), "file_read should execute in DestructiveOnly mode");
@@ -1223,11 +1219,11 @@ mod tests {
         };
 
         // First call: executes and records.
-        let r1 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        let r1 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert_eq!(idem.len(), 1);
 
         // Second call with same args: returns cached result.
-        let r2 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        let r2 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert_eq!(idem.len(), 1); // No new record.
 
         // Both should have the same content.
@@ -1254,8 +1250,8 @@ mod tests {
             input: serde_json::json!({"path": "/tmp/bbb"}),
         };
 
-        execute_one_tool(&tool1, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
-        execute_one_tool(&tool2, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        execute_one_tool(&tool1, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
+        execute_one_tool(&tool2, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert_eq!(idem.len(), 2); // Two distinct entries.
     }
 
@@ -1270,7 +1266,7 @@ mod tests {
         let exec_id = compute_execution_id("file_read", &serde_json::json!({}), "");
 
         assert!(idem.lookup(&exec_id).is_none());
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert!(idem.lookup(&exec_id).is_some());
     }
 
@@ -1292,7 +1288,7 @@ mod tests {
         });
 
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
                 assert_eq!(content, "cached output");
@@ -1306,7 +1302,7 @@ mod tests {
         let registry = cuervo_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
         // No idempotency (None) — should execute normally.
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, None, &ToolRetryConfig::default()).await;
+        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, None, &ToolRetryConfig::default(), &*TEST_SINK).await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(!content.contains("cached output"));
@@ -1324,11 +1320,11 @@ mod tests {
 
         let tool = make_completed("t1", "file_read");
         // Round 1.
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         // Round 2 (same tool).
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         // Round 3 (same tool).
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert_eq!(idem.len(), 1); // Still just 1 entry.
     }
 
@@ -1341,7 +1337,7 @@ mod tests {
 
         let tool = make_completed("t1", "file_read");
         // Dry-run full: should NOT record to idempotency (tool didn't execute).
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, Some(&idem), &ToolRetryConfig::default()).await;
+        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert!(idem.is_empty(), "dry-run should not record to idempotency registry");
     }
 
@@ -1358,11 +1354,11 @@ mod tests {
             name: "file_read".to_string(),
             input: serde_json::json!({"path": "/tmp/nonexistent_xyz_987654"}),
         };
-        let r1 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        let r1 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         assert_eq!(idem.len(), 1);
 
         // Second call returns cached error.
-        let r2 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default()).await;
+        let r2 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK).await;
         let e1 = matches!(&r1.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
         let e2 = matches!(&r2.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
         assert_eq!(e1, e2);
@@ -1463,7 +1459,7 @@ mod tests {
 
         let result = execute_one_tool(
             &tool, &registry, "/tmp", Duration::from_secs(10),
-            DryRunMode::Off, None, &no_retry,
+            DryRunMode::Off, None, &no_retry, &*TEST_SINK,
         ).await;
 
         // Unknown tool should return error (no retries attempted).
@@ -1543,7 +1539,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, dir.path().to_str().unwrap(),
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             assert_eq!(result.tool_use_id, unique_id);
@@ -1570,7 +1566,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, "/tmp",
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             assert_eq!(result.tool_use_id, unique_id);
@@ -1592,7 +1588,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, "/tmp",
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             assert_eq!(result.tool_use_id, unique_id);
@@ -1620,7 +1616,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, "/tmp",
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             assert_eq!(result.tool_use_id, "toolu_poisoned");
@@ -1652,7 +1648,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, "/tmp",
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             match &result.content_block {
@@ -1786,7 +1782,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, "/tmp",
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             assert_eq!(result.tool_name, "bash");
@@ -1815,7 +1811,7 @@ mod tests {
             let result = execute_one_tool(
                 &tool_call, &registry, dir.path().to_str().unwrap(),
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             match &result.content_block {
@@ -1843,7 +1839,7 @@ mod tests {
             let write_result = execute_one_tool(
                 &write_call, &registry, dir.path().to_str().unwrap(),
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             match &write_result.content_block {
@@ -1860,7 +1856,7 @@ mod tests {
             let read_result = execute_one_tool(
                 &read_call, &registry, dir.path().to_str().unwrap(),
                 Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(),
+                &ToolRetryConfig::default(), &*TEST_SINK,
             ).await;
 
             match &read_result.content_block {

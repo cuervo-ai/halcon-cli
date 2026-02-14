@@ -12,7 +12,6 @@ use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 /// A typed message between agents.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMessage {
     /// Sender agent ID.
@@ -28,7 +27,6 @@ pub struct AgentMessage {
 }
 
 /// Categories of inter-agent messages.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMessageKind {
@@ -66,13 +64,13 @@ impl SharedContextStore {
     }
 
     /// Get a value by key from the shared context.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in tests; production will use it via delegation.
     pub async fn get(&self, key: &str) -> Option<serde_json::Value> {
         self.inner.read().await.get(key).cloned()
     }
 
     /// Get all keys in the shared context.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in tests; production will use it via delegation.
     pub async fn keys(&self) -> Vec<String> {
         self.inner.read().await.keys().cloned().collect()
     }

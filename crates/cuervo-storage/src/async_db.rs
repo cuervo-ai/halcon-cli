@@ -440,6 +440,148 @@ impl AsyncDatabase {
             .await
             .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
     }
+
+    // --- Structured Tasks ---
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_structured_task(
+        &self,
+        task_id: String,
+        session_id: Option<String>,
+        plan_id: Option<String>,
+        step_index: Option<i64>,
+        title: String,
+        description: String,
+        status: String,
+        priority: i64,
+        depends_on_json: String,
+        inputs_json: String,
+        outputs_json: String,
+        artifacts_json: String,
+        provenance_json: Option<String>,
+        retry_policy_json: String,
+        retry_count: i64,
+        tags_json: String,
+        tool_name: Option<String>,
+        expected_args_json: Option<String>,
+        error: Option<String>,
+        created_at: String,
+        started_at: Option<String>,
+        finished_at: Option<String>,
+        duration_ms: Option<i64>,
+    ) -> Result<()> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            db.save_structured_task(
+                &task_id,
+                session_id.as_deref(),
+                plan_id.as_deref(),
+                step_index,
+                &title,
+                &description,
+                &status,
+                priority,
+                &depends_on_json,
+                &inputs_json,
+                &outputs_json,
+                &artifacts_json,
+                provenance_json.as_deref(),
+                &retry_policy_json,
+                retry_count,
+                &tags_json,
+                tool_name.as_deref(),
+                expected_args_json.as_deref(),
+                error.as_deref(),
+                &created_at,
+                started_at.as_deref(),
+                finished_at.as_deref(),
+                duration_ms,
+            )
+        })
+        .await
+        .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_structured_tasks_by_session(
+        &self,
+        session_id: String,
+    ) -> Result<Vec<crate::db::StructuredTaskRow>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.load_structured_tasks_by_session(&session_id))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_structured_tasks_by_plan(
+        &self,
+        plan_id: String,
+    ) -> Result<Vec<crate::db::StructuredTaskRow>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.load_structured_tasks_by_plan(&plan_id))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_incomplete_structured_tasks(
+        &self,
+    ) -> Result<Vec<crate::db::StructuredTaskRow>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.load_incomplete_structured_tasks())
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn delete_structured_tasks_by_session(
+        &self,
+        session_id: String,
+    ) -> Result<u64> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.delete_structured_tasks_by_session(&session_id))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    // --- Reasoning Experience ---
+
+    pub async fn load_all_experience(
+        &self,
+    ) -> Result<Vec<crate::db::experience::ExperienceRow>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.load_all_experience())
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn save_experience(
+        &self,
+        task_type: String,
+        strategy: String,
+        avg_score: f64,
+        uses: u32,
+        last_score: f64,
+        last_task_hash: Option<String>,
+    ) -> Result<()> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            db.save_experience(
+                &task_type,
+                &strategy,
+                avg_score,
+                uses,
+                last_score,
+                last_task_hash.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn delete_all_experience(&self) -> Result<u64> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.delete_all_experience())
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
 }
 
 #[cfg(test)]

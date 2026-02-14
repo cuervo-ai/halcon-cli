@@ -67,6 +67,20 @@ pub enum InspectTarget {
     Memory,
     Db,
     Traces,
+    /// Context pipeline tier occupancy (L0-L4).
+    Context,
+    /// Structured task framework state.
+    Tasks,
+    /// MCP server pool health and discovered tools.
+    Mcp,
+    /// Adaptive reasoning engine state (strategy, scores, UCB1).
+    Reasoning,
+    /// Multi-agent orchestrator state (delegation, concurrency).
+    Orchestration,
+    /// Resilience layer state (circuit breakers, health, backpressure).
+    Resilience,
+    /// Session cost, tokens, and duration breakdown.
+    CostMetrics,
 }
 
 /// Direction for /step command.
@@ -132,6 +146,11 @@ pub fn handle(input: &str, provider: &str, model: &str) -> CommandResult {
         "benchmark" | "bench" => handle_benchmark(args),
         "optimize" | "opt" => CommandResult::Optimize,
         "analyze" => CommandResult::Analyze,
+
+        // --- Phase 42D: Quick aliases ---
+        "why" => CommandResult::Inspect(InspectTarget::Reasoning),
+        "cost" => CommandResult::Inspect(InspectTarget::CostMetrics),
+        "context" | "ctx" => CommandResult::Inspect(InspectTarget::Context),
 
         _ => CommandResult::Unknown(cmd.to_string()),
     }
@@ -216,14 +235,23 @@ fn handle_inspect(args: &str) -> CommandResult {
         "memory" | "mem" => CommandResult::Inspect(InspectTarget::Memory),
         "db" | "database" => CommandResult::Inspect(InspectTarget::Db),
         "traces" | "trace" => CommandResult::Inspect(InspectTarget::Traces),
+        "context" | "ctx" => CommandResult::Inspect(InspectTarget::Context),
+        "tasks" | "task" => CommandResult::Inspect(InspectTarget::Tasks),
+        "mcp" => CommandResult::Inspect(InspectTarget::Mcp),
+        "reasoning" | "reason" => CommandResult::Inspect(InspectTarget::Reasoning),
+        "orchestration" | "orch" => CommandResult::Inspect(InspectTarget::Orchestration),
+        "resilience" | "health" => CommandResult::Inspect(InspectTarget::Resilience),
+        "cost" | "cost-metrics" => CommandResult::Inspect(InspectTarget::CostMetrics),
         "" => {
             println!("Usage: /inspect <target>");
-            println!("  Targets: runtime, memory, db, traces");
+            println!("  Targets: runtime, memory, db, traces, context, tasks, mcp,");
+            println!("           reasoning, orchestration, resilience, cost");
             CommandResult::Continue
         }
         other => {
             println!("Unknown inspect target '{other}'");
-            println!("  Targets: runtime, memory, db, traces");
+            println!("  Targets: runtime, memory, db, traces, context, tasks, mcp,");
+            println!("           reasoning, orchestration, resilience, cost");
             CommandResult::Continue
         }
     }
@@ -324,7 +352,11 @@ fn print_help() {
         "\
 Research:
   /research <query>   Spawn parallel agents to research a topic
-  /inspect <target>   Inspect subsystem (runtime, memory, db, traces)
+  /inspect <target>   Inspect subsystem (runtime, memory, db, traces, context, tasks,
+                                       mcp, reasoning, orchestration, resilience, cost)
+  /why                Alias for /inspect reasoning
+  /cost               Alias for /inspect cost
+  /context            Alias for /inspect context
 
 Plan & Execute:
   /plan <goal>        Generate an execution plan via LLM
@@ -631,10 +663,86 @@ mod tests {
     }
 
     #[test]
+    fn inspect_context_target() {
+        assert!(matches!(
+            handle("inspect context", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Context)
+        ));
+        assert!(matches!(
+            handle("inspect ctx", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Context)
+        ));
+    }
+
+    #[test]
+    fn inspect_tasks_target() {
+        assert!(matches!(
+            handle("inspect tasks", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Tasks)
+        ));
+        assert!(matches!(
+            handle("inspect task", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Tasks)
+        ));
+    }
+
+    #[test]
+    fn inspect_mcp_target() {
+        assert!(matches!(
+            handle("inspect mcp", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Mcp)
+        ));
+    }
+
+    #[test]
+    fn inspect_unknown_target_shows_usage() {
+        assert!(matches!(
+            handle("inspect foobar", "p", "m"),
+            CommandResult::Continue
+        ));
+    }
+
+    #[test]
     fn inspect_empty_shows_usage() {
         assert!(matches!(
             handle("inspect", "p", "m"),
             CommandResult::Continue
+        ));
+    }
+
+    #[test]
+    fn inspect_reasoning_target() {
+        assert!(matches!(
+            handle("inspect reasoning", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Reasoning)
+        ));
+        assert!(matches!(
+            handle("inspect reason", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Reasoning)
+        ));
+    }
+
+    #[test]
+    fn inspect_orchestration_target() {
+        assert!(matches!(
+            handle("inspect orchestration", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Orchestration)
+        ));
+        assert!(matches!(
+            handle("inspect orch", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Orchestration)
+        ));
+    }
+
+    #[test]
+    fn inspect_resilience_target() {
+        assert!(matches!(
+            handle("inspect resilience", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Resilience)
+        ));
+        assert!(matches!(
+            handle("inspect health", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Resilience)
         ));
     }
 
@@ -814,6 +922,48 @@ mod tests {
         assert!(matches!(
             handle("analyze", "p", "m"),
             CommandResult::Analyze
+        ));
+    }
+
+    // --- Phase 42D: Quick alias tests ---
+
+    #[test]
+    fn slash_why_alias() {
+        assert!(matches!(
+            handle("why", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Reasoning)
+        ));
+    }
+
+    #[test]
+    fn slash_cost_alias() {
+        assert!(matches!(
+            handle("cost", "p", "m"),
+            CommandResult::Inspect(InspectTarget::CostMetrics)
+        ));
+    }
+
+    #[test]
+    fn slash_context_alias() {
+        assert!(matches!(
+            handle("context", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Context)
+        ));
+        assert!(matches!(
+            handle("ctx", "p", "m"),
+            CommandResult::Inspect(InspectTarget::Context)
+        ));
+    }
+
+    #[test]
+    fn inspect_cost_target() {
+        assert!(matches!(
+            handle("inspect cost", "p", "m"),
+            CommandResult::Inspect(InspectTarget::CostMetrics)
+        ));
+        assert!(matches!(
+            handle("inspect cost-metrics", "p", "m"),
+            CommandResult::Inspect(InspectTarget::CostMetrics)
         ));
     }
 }

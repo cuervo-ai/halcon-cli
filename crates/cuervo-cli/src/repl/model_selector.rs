@@ -534,7 +534,8 @@ mod tests {
 
     #[test]
     fn disabled_returns_none() {
-        let selector = make_selector(ModelSelectionConfig::default());
+        let config = ModelSelectionConfig { enabled: false, ..Default::default() };
+        let selector = make_selector(config);
         let req = make_request("hello");
         assert!(selector.select_model(&req, 0.0).is_none());
     }
@@ -612,7 +613,7 @@ mod tests {
     #[test]
     fn config_defaults() {
         let config = ModelSelectionConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.budget_cap_usd, 0.0);
         assert_eq!(config.complexity_token_threshold, 2000);
         assert!(config.simple_model.is_none());

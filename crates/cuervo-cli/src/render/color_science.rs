@@ -56,6 +56,21 @@ pub fn palette_from_hue(hue: f64) -> Palette {
         muted: ThemeColor::oklch(0.55, 0.02, hue),
         text: ThemeColor::oklch(0.93, 0.01, hue),
         text_dim: ThemeColor::oklch(0.68, 0.02, hue),
+
+        // Cockpit semantic tokens
+        running: ThemeColor::oklch(0.78, 0.12, 195.0),
+        planning: ThemeColor::oklch(0.72, 0.14, 280.0),
+        reasoning: ThemeColor::oklch(0.70, 0.10, 170.0),
+        delegated: ThemeColor::oklch(0.65, 0.16, 310.0),
+        destructive: ThemeColor::oklch(0.58, 0.24, 25.0),
+        cached: ThemeColor::oklch(0.75, 0.08, 85.0),
+        retrying: ThemeColor::oklch(0.82, 0.15, 60.0),
+        compacting: ThemeColor::oklch(0.68, 0.06, hue),
+        border: ThemeColor::oklch(0.40, 0.03, hue),
+        bg_panel: ThemeColor::oklch(0.18, 0.02, hue),
+        bg_highlight: ThemeColor::oklch(0.22, 0.04, hue),
+        text_label: ThemeColor::oklch(0.60, 0.04, hue),
+        spinner_color: ThemeColor::oklch(0.85, 0.12, 195.0),
     }
 }
 
@@ -104,6 +119,38 @@ pub fn wcag_badge(ratio: f64) -> &'static str {
 /// Check whether a contrast ratio passes WCAG AA for normal text.
 pub fn passes_aa(ratio: f64) -> bool {
     ratio >= 4.5
+}
+
+/// Validate all cockpit palette tokens for accessibility against `bg_panel`.
+///
+/// Text tokens must pass WCAG AA (>= 4.5:1). Decorative tokens need >= 3.0:1.
+/// Returns a Vec of (token_name, ratio, required_ratio) for failures.
+pub fn validate_cockpit_palette(palette: &Palette) -> Vec<(&'static str, f64, f64)> {
+    let bg = &palette.bg_panel;
+    // Text tokens need 4.5:1, decorative tokens need 3.0:1
+    let checks: &[(&str, &ThemeColor, f64)] = &[
+        ("running", &palette.running, 3.0),
+        ("planning", &palette.planning, 3.0),
+        ("reasoning", &palette.reasoning, 3.0),
+        ("delegated", &palette.delegated, 3.0),
+        ("destructive", &palette.destructive, 3.0),
+        ("cached", &palette.cached, 3.0),
+        ("retrying", &palette.retrying, 3.0),
+        ("compacting", &palette.compacting, 3.0),
+        ("text_label", &palette.text_label, 4.5),
+        ("spinner_color", &palette.spinner_color, 3.0),
+        ("text", &palette.text, 4.5),
+        ("text_dim", &palette.text_dim, 4.5),
+        ("success", &palette.success, 3.0),
+    ];
+    let mut failures = Vec::new();
+    for &(name, color, min_ratio) in checks {
+        let ratio = contrast_ratio(color, bg);
+        if ratio < min_ratio {
+            failures.push((name, ratio, min_ratio));
+        }
+    }
+    failures
 }
 
 #[cfg(test)]
@@ -210,5 +257,16 @@ mod tests {
         assert!(passes_aa(7.0));
         assert!(!passes_aa(4.4));
         assert!(!passes_aa(1.0));
+    }
+
+    #[test]
+    fn validate_cockpit_palette_passes() {
+        // Use palette_from_hue which is already pub and produces the same cockpit tokens.
+        let p = palette_from_hue(210.0);
+        let failures = validate_cockpit_palette(&p);
+        assert!(
+            failures.is_empty(),
+            "cockpit palette should pass all checks, failures: {failures:?}"
+        );
     }
 }

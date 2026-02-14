@@ -48,6 +48,12 @@ impl LlmPlanner {
         self.provider.name()
     }
 
+    /// Test-only accessor to verify plan prompt content.
+    #[cfg(test)]
+    pub fn build_plan_prompt_for_test(user_message: &str, tools: &[ToolDefinition]) -> String {
+        Self::build_plan_prompt(user_message, tools)
+    }
+
     /// Build the planning prompt from user message and available tools.
     fn build_plan_prompt(user_message: &str, tools: &[ToolDefinition]) -> String {
         let tool_list: Vec<String> = tools
@@ -70,7 +76,10 @@ impl LlmPlanner {
              - Only use tools from the list above.\n\
              - Set parallel=true ONLY for ReadOnly steps with no data dependencies.\n\
              - Set requires_confirmation=true for plans with Destructive tools.\n\
-             - If no plan is needed (simple question), return null.",
+             - If no plan is needed (simple question), return null.\n\
+             - ALWAYS include a final step with tool_name: null and description: \
+             \"Synthesize findings and respond to the user\". This step requires NO tool.\n\
+             - Keep plans to 5 steps or fewer. Prefer fewer tools over more.",
             tool_list.join("\n")
         )
     }
@@ -121,7 +130,10 @@ impl LlmPlanner {
              - The \"goal\" field is REQUIRED.\n\
              - Only include steps for REMAINING work (not already-completed steps).\n\
              - Only use tools from the list above.\n\
-             - Return null if the goal cannot be achieved.",
+             - Return null if the goal cannot be achieved.\n\
+             - ALWAYS include a final step with tool_name: null and description: \
+             \"Synthesize findings and respond to the user\".\n\
+             - Keep plans to 5 steps or fewer.",
             plan.goal,
             completed.join("\n"),
             failed.description,

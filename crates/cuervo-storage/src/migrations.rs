@@ -17,6 +17,8 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
     (13, "replay_support", MIGRATION_013),
     (14, "agent_state_checkpoint", MIGRATION_014),
     (15, "metrics_composite_index", MIGRATION_015),
+    (16, "structured_tasks", MIGRATION_016),
+    (17, "reasoning_experience", MIGRATION_017),
 ];
 
 const MIGRATION_001: &str = r#"
@@ -335,6 +337,57 @@ const MIGRATION_015: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_metrics_provider_created ON invocation_metrics(provider, created_at DESC);
 "#;
 
+const MIGRATION_016: &str = r#"
+-- Structured tasks: formal task framework with provenance and artifact tracking.
+CREATE TABLE IF NOT EXISTS structured_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL UNIQUE,
+    session_id TEXT,
+    plan_id TEXT,
+    step_index INTEGER,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    depends_on_json TEXT NOT NULL DEFAULT '[]',
+    inputs_json TEXT NOT NULL DEFAULT '{}',
+    outputs_json TEXT NOT NULL DEFAULT '{}',
+    artifacts_json TEXT NOT NULL DEFAULT '[]',
+    provenance_json TEXT,
+    retry_policy_json TEXT NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    tool_name TEXT,
+    expected_args_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_structured_tasks_session ON structured_tasks(session_id);
+CREATE INDEX IF NOT EXISTS idx_structured_tasks_status ON structured_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_structured_tasks_plan ON structured_tasks(plan_id);
+"#;
+
+const MIGRATION_017: &str = r#"
+-- Reasoning experience: cross-session strategy learning via UCB1.
+CREATE TABLE IF NOT EXISTS reasoning_experience (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    avg_score REAL NOT NULL DEFAULT 0.0,
+    uses INTEGER NOT NULL DEFAULT 0,
+    last_score REAL NOT NULL DEFAULT 0.0,
+    last_task_hash TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_type, strategy)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reasoning_experience_type ON reasoning_experience(task_type);
+"#;
+
 /// Run all pending migrations.
 pub fn run_migrations(conn: &Connection) -> Result<(), cuervo_core::error::CuervoError> {
     // Ensure migrations table exists
@@ -389,7 +442,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 17);
     }
 
     #[test]
@@ -403,7 +456,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 15);
+        assert_eq!(count, 17);
     }
 
     #[test]
@@ -903,5 +956,132 @@ mod tests {
             )
             .unwrap();
         assert!(state2.is_none());
+    }
+
+    #[test]
+    fn migration_016_creates_structured_tasks_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Verify structured_tasks table exists.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='structured_tasks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists, "structured_tasks table should exist");
+
+        // Verify indexes exist.
+        let idx_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_structured_tasks_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 3, "should have 3 structured_tasks indexes");
+
+        // Insert a task record.
+        conn.execute(
+            "INSERT INTO structured_tasks (task_id, title, description, status, priority, depends_on_json, retry_policy_json, created_at)
+             VALUES ('t-1', 'Read file', 'Read the config', 'Ready', 10, '[]', '{}', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let (title, status): (String, String) = conn
+            .query_row(
+                "SELECT title, status FROM structured_tasks WHERE task_id = 't-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Read file");
+        assert_eq!(status, "Ready");
+    }
+
+    #[test]
+    fn migration_017_creates_reasoning_experience_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Verify reasoning_experience table exists.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='reasoning_experience'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists, "reasoning_experience table should exist");
+
+        // Verify index exists.
+        let idx_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_reasoning_experience_type'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(idx_exists, "idx_reasoning_experience_type index should exist");
+
+        // Insert a record.
+        conn.execute(
+            "INSERT INTO reasoning_experience (task_type, strategy, avg_score, uses, last_score, updated_at)
+             VALUES ('CodeModification', 'DirectExecution', 0.75, 5, 0.8, '2026-02-12T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let (task_type, avg_score, uses): (String, f64, u32) = conn
+            .query_row(
+                "SELECT task_type, avg_score, uses FROM reasoning_experience WHERE strategy = 'DirectExecution'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(task_type, "CodeModification");
+        assert!((avg_score - 0.75).abs() < f64::EPSILON);
+        assert_eq!(uses, 5);
+    }
+
+    #[test]
+    fn migration_017_unique_constraint() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO reasoning_experience (task_type, strategy, avg_score, uses, last_score, updated_at)
+             VALUES ('General', 'DirectExecution', 0.5, 1, 0.5, '2026-02-12T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Same (task_type, strategy) should conflict.
+        let result = conn.execute(
+            "INSERT INTO reasoning_experience (task_type, strategy, avg_score, uses, last_score, updated_at)
+             VALUES ('General', 'DirectExecution', 0.9, 2, 0.9, '2026-02-12T00:00:00Z')",
+            [],
+        );
+        assert!(result.is_err(), "UNIQUE constraint should prevent duplicate (task_type, strategy)");
+
+        // INSERT OR REPLACE should work.
+        conn.execute(
+            "INSERT OR REPLACE INTO reasoning_experience (task_type, strategy, avg_score, uses, last_score, updated_at)
+             VALUES ('General', 'DirectExecution', 0.9, 2, 0.9, '2026-02-12T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let uses: u32 = conn
+            .query_row(
+                "SELECT uses FROM reasoning_experience WHERE task_type = 'General' AND strategy = 'DirectExecution'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(uses, 2);
     }
 }

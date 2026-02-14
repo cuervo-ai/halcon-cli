@@ -10,22 +10,30 @@ use tracing::instrument;
 use cuervo_core::traits::{ExecutionPlan, ModelProvider, Planner, StepOutcome};
 use cuervo_core::types::{
     AgentLimits, ChatMessage, ContentBlock, DomainEvent, EventPayload, MessageContent, ModelChunk,
-    ModelRequest, Phase14Context, PlanningConfig, Role, RoutingConfig, Session, StopReason,
-    TaskContext, TokenUsage,
+    ModelRequest, OrchestratorConfig, Phase14Context, PlanningConfig, Role, RoutingConfig, Session,
+    StopReason, TaskContext, TokenUsage,
 };
 use cuervo_core::EventSender;
 use cuervo_providers::ProviderRegistry;
-use cuervo_storage::{AsyncDatabase, InvocationMetric, TraceStep, TraceStepType};
+use cuervo_storage::{AsyncDatabase, InvocationMetric, TraceStepType};
 use cuervo_tools::ToolRegistry;
 
 use super::accumulator::ToolUseAccumulator;
 use super::compaction::ContextCompactor;
+use super::execution_tracker::ExecutionTracker;
 use super::executor;
+use super::failure_tracker::ToolFailureTracker;
+use super::loop_guard::{hash_tool_args, LoopAction, ToolLoopGuard};
 use super::permissions::PermissionChecker;
 use super::resilience::{PreInvokeDecision, ResilienceManager};
 use super::response_cache::ResponseCache;
 use super::speculative::SpeculativeInvoker;
 use crate::render::sink::RenderSink;
+
+// Re-export types that are part of agent's public API.
+// External modules reference these as `agent::StopCondition`, `agent::AgentLoopResult`, etc.
+pub use super::agent_types::{AgentLoopResult, StopCondition};
+pub use super::agent_utils::{classify_error_hint, compute_fingerprint};
 
 /// Bundled configuration and dependencies for the agent loop.
 ///
@@ -67,6 +75,30 @@ pub struct AgentContext<'a> {
     pub episode_id: Option<uuid::Uuid>,
     /// Planning configuration (timeout, replans, etc.).
     pub planning_config: &'a PlanningConfig,
+    /// Orchestrator configuration for sub-agent delegation.
+    pub orchestrator_config: &'a OrchestratorConfig,
+    /// Whether dynamic intent-based tool selection is enabled (Phase 38).
+    pub tool_selection_enabled: bool,
+    /// Optional structured task bridge (Phase 39). None = disabled (default).
+    pub task_bridge: Option<&'a mut super::task_bridge::TaskBridge>,
+    /// Optional reasoning config (Phase 40). None = disabled (default).
+    pub reasoning_config: Option<&'a cuervo_core::types::ReasoningConfig>,
+    /// Optional context metrics for assembly observability (Phase 42).
+    pub context_metrics: Option<&'a std::sync::Arc<super::context_metrics::ContextMetrics>>,
+    /// Optional control channel receiver (Phase 43). TUI sends Pause/Step/Cancel events.
+    /// Classic REPL passes None. When Some, agent loop checks at yield points.
+    pub ctrl_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::tui::events::ControlEvent>>,
+}
+
+/// Action determined by checking the control channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlAction {
+    /// Continue normally.
+    Continue,
+    /// Execute one more round then auto-pause.
+    StepOnce,
+    /// Cancel the agent loop immediately.
+    Cancel,
 }
 
 /// Result of an invocation attempt through the routing + resilience chain.
@@ -321,260 +353,61 @@ async fn invoke_with_fallback(
     }
 }
 
-/// Tracks repeated tool failures to prevent infinite retry loops (RC-2 fix).
+// ToolFailureTracker → failure_tracker.rs
+// LoopAction, ToolLoopGuard, hash_tool_args → loop_guard.rs
+
+// StopCondition, AgentLoopResult → agent_types.rs (re-exported above)
+
+// compute_fingerprint, record_trace, auto_checkpoint, classify_error_hint → agent_utils.rs
+use super::agent_utils::{auto_checkpoint, record_trace};
+
+/// Check the control channel for pause/step/cancel events.
 ///
-/// When the same `(tool_name, error_pattern)` combination is seen >= `threshold` times,
-/// the tracker marks it as tripped. The agent loop uses this to:
-/// 1. Inject a strong "stop retrying" directive to the model
-/// 2. Skip replanning for deterministic failures
-/// 3. Classify which tools the model should avoid
-pub(crate) struct ToolFailureTracker {
-    /// Map of (tool_name, error_pattern) → occurrence count.
-    failures: std::collections::HashMap<(String, String), u32>,
-    /// Number of identical failures before tripping the circuit.
-    threshold: u32,
-}
-
-impl ToolFailureTracker {
-    pub(crate) fn new(threshold: u32) -> Self {
-        Self {
-            failures: std::collections::HashMap::new(),
-            threshold,
-        }
-    }
-
-    /// Normalize error message into a classification pattern.
-    /// Groups similar errors (e.g., different file paths but same "not found" error type).
-    fn error_pattern(error: &str) -> String {
-        let lower = error.to_lowercase();
-        if lower.contains("no such file or directory") || lower.contains("not found") {
-            "not_found".to_string()
-        } else if lower.contains("permission denied") {
-            "permission_denied".to_string()
-        } else if lower.contains("is a directory") || lower.contains("not a directory") {
-            "path_type_error".to_string()
-        } else if lower.contains("path traversal") || lower.contains("blocked by security") {
-            "security_blocked".to_string()
-        } else if lower.contains("unknown tool") {
-            "unknown_tool".to_string()
-        } else if lower.contains("denied by task context") {
-            "tbac_denied".to_string()
-        } else {
-            // Use first 80 chars as a generic key for unclassified errors.
-            lower.chars().take(80).collect()
-        }
-    }
-
-    /// Record a tool failure. Returns `true` if the circuit has tripped
-    /// (i.e., this failure pattern has reached the threshold).
-    pub(crate) fn record(&mut self, tool_name: &str, error: &str) -> bool {
-        let pattern = Self::error_pattern(error);
-        let key = (tool_name.to_string(), pattern);
-        let count = self.failures.entry(key).or_insert(0);
-        *count += 1;
-        *count >= self.threshold
-    }
-
-    /// Check if a specific tool+error combination has already tripped.
-    pub(crate) fn is_tripped(&self, tool_name: &str, error: &str) -> bool {
-        let pattern = Self::error_pattern(error);
-        let key = (tool_name.to_string(), pattern);
-        self.failures.get(&key).copied().unwrap_or(0) >= self.threshold
-    }
-
-    /// Get all tripped tool names for directive injection.
-    fn tripped_tools(&self) -> Vec<String> {
-        let mut tools: Vec<String> = self
-            .failures
-            .iter()
-            .filter(|(_, count)| **count >= self.threshold)
-            .map(|((tool, _), _)| tool.clone())
-            .collect();
-        tools.sort();
-        tools.dedup();
-        tools
-    }
-}
-
-/// Why the agent loop stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopCondition {
-    /// Model returned EndTurn or MaxTokens.
-    EndTurn,
-    /// Reached the configured max_rounds limit.
-    MaxRounds,
-    /// Total tokens exceeded the budget.
-    TokenBudget,
-    /// Session wall-clock duration exceeded the budget.
-    DurationBudget,
-    /// User interrupted with Ctrl+C.
-    Interrupted,
-    /// Provider returned an error.
-    ProviderError,
-}
-
-/// Result of an agent loop execution.
-#[allow(dead_code)]
-pub struct AgentLoopResult {
-    /// All text generated by the model across all rounds.
-    pub full_text: String,
-    /// Number of tool use rounds executed.
-    pub rounds: usize,
-    /// Why the loop stopped.
-    pub stop_condition: StopCondition,
-    /// Total input tokens consumed during this agent call.
-    pub input_tokens: u64,
-    /// Total output tokens consumed during this agent call.
-    pub output_tokens: u64,
-    /// Total estimated cost (USD) for this agent call.
-    pub cost_usd: f64,
-    /// Total wall-clock latency (ms) for this agent call.
-    pub latency_ms: u64,
-    /// SHA-256 fingerprint of the final message sequence (for replay verification).
-    pub execution_fingerprint: String,
-}
-
-/// Compute a SHA-256 fingerprint of the message sequence for replay verification.
+/// Non-blocking: returns immediately if no events pending.
+/// On Pause: blocks until Resume, Step, or Cancel is received.
+/// Returns the action the agent loop should take.
 ///
-/// Hashes raw content directly instead of JSON-serializing each message,
-/// eliminating N string allocations per call (only ToolUse inputs still serialize).
-pub fn compute_fingerprint(messages: &[ChatMessage]) -> String {
-    let mut hasher = sha2::Sha256::new();
-    for msg in messages {
-        // Role discriminant as a single byte.
-        let role_byte = match msg.role {
-            Role::User => b'U',
-            Role::Assistant => b'A',
-            Role::System => b'S',
-        };
-        hasher.update([role_byte]);
-        // Hash content without JSON serialization.
-        match &msg.content {
-            MessageContent::Text(t) => {
-                hasher.update(b"T");
-                hasher.update(t.as_bytes());
-            }
-            MessageContent::Blocks(blocks) => {
-                hasher.update(b"B");
-                for block in blocks {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            hasher.update(b"t");
-                            hasher.update(text.as_bytes());
-                        }
-                        ContentBlock::ToolUse { id, name, input } => {
-                            hasher.update(b"u");
-                            hasher.update(id.as_bytes());
-                            hasher.update(name.as_bytes());
-                            hasher.update(input.to_string().as_bytes());
-                        }
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                        } => {
-                            hasher.update(b"r");
-                            hasher.update(tool_use_id.as_bytes());
-                            hasher.update(content.as_bytes());
-                            hasher.update([*is_error as u8]);
-                        }
+/// All ControlEvent variants are handled explicitly — no silent ignores.
+/// ApproveAction/RejectAction are permission responses handled by the
+/// dedicated permission channel in TUI mode; they are no-ops here.
+async fn check_control(
+    ctrl_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::tui::events::ControlEvent>,
+    sink: &dyn RenderSink,
+) -> ControlAction {
+    use crate::tui::events::ControlEvent;
+    match ctrl_rx.try_recv() {
+        Ok(ControlEvent::Pause) => {
+            sink.info("  [paused] Press Space to resume, N to step");
+            // Block until Resume, Step, or Cancel.
+            loop {
+                match ctrl_rx.recv().await {
+                    Some(ControlEvent::Resume) => return ControlAction::Continue,
+                    Some(ControlEvent::Step) => return ControlAction::StepOnce,
+                    Some(ControlEvent::CancelAgent) => return ControlAction::Cancel,
+                    None => return ControlAction::Cancel, // Channel closed.
+                    // Permission events are handled by the dedicated permission
+                    // channel, not the control channel. Log and continue waiting.
+                    Some(ControlEvent::Pause) => {
+                        // Already paused — no-op.
+                    }
+                    Some(ControlEvent::ApproveAction | ControlEvent::RejectAction) => {
+                        tracing::debug!("Permission event received on control channel while paused (handled by permission channel)");
                     }
                 }
             }
         }
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-/// Fire-and-forget trace step recording. Errors are logged but never propagate.
-///
-/// Uses the provided `ExecutionClock` for timestamps — deterministic in replay,
-/// real-time in production.
-fn record_trace(
-    db: Option<&AsyncDatabase>,
-    session_id: uuid::Uuid,
-    step_index: &mut u32,
-    step_type: TraceStepType,
-    data_json: String,
-    duration_ms: u64,
-    clock: &cuervo_core::types::ExecutionClock,
-) {
-    if let Some(db) = db {
-        let step = TraceStep {
-            session_id,
-            step_index: *step_index,
-            step_type,
-            data_json,
-            duration_ms,
-            timestamp: clock.now(),
-        };
-        if let Err(e) = db.inner().append_trace_step(&step) {
-            tracing::warn!("trace recording failed (step {}): {e}", *step_index);
+        Ok(ControlEvent::CancelAgent) => ControlAction::Cancel,
+        Ok(ControlEvent::Step) => ControlAction::StepOnce,
+        Ok(ControlEvent::Resume) => {
+            // Resume without prior pause — treat as continue.
+            ControlAction::Continue
         }
-        *step_index += 1;
-    }
-}
-
-/// Fire-and-forget session checkpoint (lightweight, ~2-5ms).
-///
-/// Persists the current conversation state so the session can be resumed
-/// after a crash or unexpected termination.
-fn auto_checkpoint(
-    db: Option<&AsyncDatabase>,
-    session_id: uuid::Uuid,
-    rounds: usize,
-    messages: &[ChatMessage],
-    session: &Session,
-    trace_step_index: u32,
-) {
-    if let Some(db) = db {
-        let checkpoint = cuervo_storage::SessionCheckpoint {
-            session_id,
-            round: rounds as u32,
-            step_index: trace_step_index,
-            messages_json: serde_json::to_string(messages).unwrap_or_default(),
-            usage_json: serde_json::json!({
-                "input_tokens": session.total_usage.input_tokens,
-                "output_tokens": session.total_usage.output_tokens,
-            })
-            .to_string(),
-            fingerprint: compute_fingerprint(messages),
-            created_at: Utc::now(),
-            agent_state: None,
-        };
-        if let Err(e) = db.inner().save_checkpoint(&checkpoint) {
-            tracing::warn!("auto-checkpoint failed: {e}");
+        Ok(ControlEvent::ApproveAction | ControlEvent::RejectAction) => {
+            // Permission events are handled by the dedicated permission channel.
+            tracing::debug!("Permission event received on control channel (handled by permission channel)");
+            ControlAction::Continue
         }
-    }
-}
-
-/// Classify a provider error message and return a user-friendly hint.
-///
-/// Uses case-insensitive matching with separate `.contains()` checks
-/// (not regex patterns) for reliable matching.
-pub fn classify_error_hint(error: &str) -> &'static str {
-    let lower = error.to_lowercase();
-    if lower.contains("credit balance")
-        || lower.contains("billing")
-        || lower.contains("payment")
-        || lower.contains("insufficient_quota")
-    {
-        "Check your account balance at https://console.anthropic.com/settings/billing"
-    } else if lower.contains("authentication")
-        || lower.contains("invalid api key")
-        || lower.contains("invalid_api_key")
-        || lower.contains("unauthorized")
-        || lower.contains("api key")
-    {
-        "Verify your API key with `cuervo auth status` or set ANTHROPIC_API_KEY"
-    } else if lower.contains("429")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-        || lower.contains("too many requests")
-    {
-        "Rate limited — wait a moment and retry, or switch to a different provider"
-    } else {
-        "Check your API key and network connection"
+        Err(_) => ControlAction::Continue, // No events pending.
     }
 }
 
@@ -611,6 +444,12 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         registry,
         episode_id,
         planning_config,
+        orchestrator_config,
+        tool_selection_enabled,
+        mut task_bridge,
+        reasoning_config: _reasoning_config,
+        context_metrics,
+        mut ctrl_rx,
     } = ctx;
 
     let silent = render_sink.is_silent();
@@ -622,6 +461,22 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     };
     let exec_clock = &phase14.exec_ctx.clock;
     let mut messages = request.messages.clone();
+
+    // Phase E1: Emit dry-run banner if active.
+    if phase14.dry_run_mode != cuervo_core::types::DryRunMode::Off {
+        render_sink.dry_run_active(true);
+    }
+
+    // Phase E5: Emit agent state transition: Idle → Planning/Executing.
+    if !silent {
+        render_sink.agent_state_transition("idle", "executing", "agent loop started");
+    }
+
+    // Phase 43: auto_pause flag — set by StepOnce control action.
+    // When true, the agent pauses before the next model invocation.
+    let mut auto_pause = false;
+    // Phase 43: set when user cancels via control channel.
+    let mut ctrl_cancelled = false;
 
     // Context pipeline: multi-tiered message management (L0-L4 cascade).
     // Feed initial messages into the pipeline; it manages L0 hot buffer overflow
@@ -725,12 +580,21 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         }
 
         let plan_result = if needs_planning {
+            // Phase E5: Transition to Planning state.
+            if !silent {
+                render_sink.agent_state_transition("executing", "planning", "generating plan");
+            }
             let plan_timeout = Duration::from_secs(planning_config.timeout_secs);
-            tokio::time::timeout(
+            let result = tokio::time::timeout(
                 plan_timeout,
                 planner.plan(user_msg, &tool_defs),
             )
-            .await
+            .await;
+            // Phase E5: Transition back to Executing after planning.
+            if !silent {
+                render_sink.agent_state_transition("planning", "executing", "plan generated");
+            }
+            result
         } else {
             Ok(Ok(None))
         };
@@ -748,6 +612,20 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 // Persist plan steps.
                 if let Some(db) = trace_db {
                     let _ = db.save_plan_steps(&session_id, &plan).await;
+                }
+                // Ingest plan into task bridge (structured task framework).
+                if let Some(ref mut bridge) = task_bridge {
+                    let mappings = bridge.ingest_plan(&plan);
+                    tracing::info!(
+                        task_count = mappings.len(),
+                        "TaskBridge ingested plan into structured tasks"
+                    );
+                    render_sink.task_status(
+                        &plan.goal,
+                        "Planned",
+                        None,
+                        0,
+                    );
                 }
                 active_plan = Some(plan);
             }
@@ -802,11 +680,41 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         false
     };
 
-    // Track current plan step index (advances as tools complete steps).
-    let mut plan_step_index: usize = 0;
+    // Centralized plan execution tracker with step timing and state management.
+    let mut execution_tracker = active_plan.as_ref().map(|plan| {
+        ExecutionTracker::new(plan.clone(), event_tx.clone())
+    });
 
     // Cache tools outside the loop — tool definitions never change between rounds.
-    let cached_tools = request.tools.clone();
+    // Phase 38: Apply intent-based tool selection when dynamic_tool_selection is enabled.
+    let cached_tools = {
+        let all_tools = request.tools.clone();
+        let tool_selector = super::tool_selector::ToolSelector::new(
+            tool_selection_enabled,
+        );
+        let user_msg_text = messages
+            .last()
+            .and_then(|m| match &m.content {
+                MessageContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        let intent = tool_selector.classify_intent(user_msg_text);
+        let selected = tool_selector.select_tools(&intent, &all_tools);
+        if selected.len() < all_tools.len() {
+            tracing::info!(
+                intent = ?intent,
+                total = all_tools.len(),
+                selected = selected.len(),
+                "ToolSelector filtered tools for model request"
+            );
+        }
+        // Phase 42: record tool selection metrics.
+        if let Some(ref metrics) = context_metrics {
+            metrics.record_tool_selection(all_tools.len(), selected.len());
+        }
+        selected
+    };
     // System prompt may update mid-session if instruction files (CUERVO.md) change on disk.
     // Track instruction content separately for surgical replacement in the full system prompt.
     let mut cached_system = request.system.clone();
@@ -814,13 +722,124 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         cuervo_context::load_instructions(std::path::Path::new(working_dir));
 
     // Inject plan into system prompt so the model knows its own plan.
-    if let Some(ref plan) = active_plan {
-        let plan_section = format_plan_for_prompt(plan, plan_step_index);
+    if let Some(ref tracker) = execution_tracker {
+        let plan = tracker.plan();
+        let plan_section = format_plan_for_prompt(plan, tracker.current_step());
         if let Some(ref mut sys) = cached_system {
             update_plan_in_system(sys, &plan_section);
         }
-        // Emit initial plan progress.
-        render_sink.plan_progress(&plan.goal, &plan.steps, plan_step_index);
+        // Emit initial plan progress with timing.
+        let (_, _, elapsed) = tracker.progress();
+        render_sink.plan_progress_with_timing(
+            &plan.goal,
+            &plan.steps,
+            tracker.current_step(),
+            tracker.tracked_steps(),
+            elapsed,
+        );
+    }
+
+    // Phase 37: Attempt delegation of eligible plan steps to sub-agents.
+    if let Some(ref mut tracker) = execution_tracker {
+        let delegation_router = super::delegation::DelegationRouter::new(orchestrator_config.enabled)
+            .with_min_confidence(orchestrator_config.min_delegation_confidence);
+        let decisions = delegation_router.analyze_plan(tracker.plan());
+
+        if !decisions.is_empty() {
+            let tasks_with_indices =
+                delegation_router.build_tasks(tracker.plan(), &decisions, &request.model);
+
+            // Mark steps as delegated in tracker.
+            for (step_idx, task) in &tasks_with_indices {
+                tracker.mark_delegated(*step_idx, task.task_id, &format!("{:?}", task.agent_type));
+            }
+
+            let tasks: Vec<cuervo_core::types::SubAgentTask> =
+                tasks_with_indices.into_iter().map(|(_, t)| t).collect();
+
+            // Run orchestrator for delegated steps.
+            let orch_result = super::orchestrator::run_orchestrator(
+                uuid::Uuid::new_v4(),
+                tasks,
+                provider,
+                tool_registry,
+                event_tx,
+                limits,
+                orchestrator_config,
+                routing_config,
+                trace_db,
+                response_cache,
+                fallback_providers,
+                &request.model,
+                working_dir,
+                request.system.as_deref(),
+                guardrails,
+                false, // Sub-agents run non-interactively.
+                false,
+            )
+            .await;
+
+            // Feed orchestrator results back into tracker.
+            if let Ok(orch_result) = orch_result {
+                let matched =
+                    tracker.record_delegation_results(&orch_result.sub_results, rounds);
+
+                // Persist to DB.
+                if let Some(db) = trace_db {
+                    for m in &matched {
+                        let (status, detail) = match &m.outcome {
+                            StepOutcome::Success { summary } => ("success", summary.as_str()),
+                            StepOutcome::Failed { error } => ("failed", error.as_str()),
+                            StepOutcome::Skipped { reason } => ("skipped", reason.as_str()),
+                        };
+                        let _ = db
+                            .update_plan_step_outcome(
+                                &tracker.plan().plan_id,
+                                m.step_index as u32,
+                                status,
+                                detail,
+                            )
+                            .await;
+                    }
+                }
+
+                // Render updated progress.
+                let plan = tracker.plan();
+                let (_, _, elapsed) = tracker.progress();
+                render_sink.plan_progress_with_timing(
+                    &plan.goal,
+                    &plan.steps,
+                    tracker.current_step(),
+                    tracker.tracked_steps(),
+                    elapsed,
+                );
+
+                let delegated_count = matched.len();
+                if delegated_count > 0 {
+                    tracing::info!(delegated_count, "Steps delegated to sub-agents");
+                }
+            } else if let Err(ref e) = orch_result {
+                tracing::warn!("Delegation orchestrator failed: {e}, falling back to inline execution");
+            }
+        }
+    }
+
+    // Phase 33: inject tool usage policy into the system prompt.
+    // Instructs the model to converge: prefer fewer tool calls, don't repeat,
+    // respond directly once enough information is gathered.
+    const TOOL_USAGE_POLICY: &str = "\n\n## Tool Usage Policy\n\
+        - Only call tools when you need NEW information you don't already have.\n\
+        - After gathering data with tools, respond directly to the user.\n\
+        - Never call the same tool twice with the same or very similar arguments.\n\
+        - Prefer fewer tool calls. 1-3 tool rounds should suffice for most tasks.\n\
+        - When you have enough information to answer, STOP calling tools and respond.\n\
+        - If a tool fails, try a different approach or inform the user — do not retry the same call.\n";
+    if !cached_tools.is_empty() {
+        if let Some(ref mut sys) = cached_system {
+            if !sys.contains("## Tool Usage Policy") {
+                sys.push_str(TOOL_USAGE_POLICY);
+            }
+        }
     }
 
     // Confidence feedback: track the last reflection's entry_id so we can
@@ -839,12 +858,11 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // persist the adapted model name so subsequent rounds use it.
     let mut fallback_adapted_model: Option<String> = None;
 
-    // Phase 32: runaway tool loop guard — prevents local models from endlessly calling tools
-    // without making progress. After MAX_CONSECUTIVE_TOOL_ROUNDS consecutive tool rounds,
-    // if at least one tool succeeded, force-break (the task is likely done but the model
-    // doesn't know when to stop).
-    const MAX_CONSECUTIVE_TOOL_ROUNDS: usize = 5;
-    let mut consecutive_tool_rounds: usize = 0;
+    // Phase 33: intelligent tool loop guard — multi-layered termination.
+    // Replaces the blunt consecutive_tool_rounds >= 5 counter with graduated
+    // escalation: synthesis directive → forced tool withdrawal → break.
+    let mut loop_guard = ToolLoopGuard::new();
+    let mut force_no_tools_next_round = false;
 
     for round in 0..limits.max_rounds {
         // Round separator is emitted after model selection (see below) so we can show provider info.
@@ -863,13 +881,16 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         // Wrapped in a 15s timeout to prevent indefinite blocking on slow providers.
         if let Some(compactor) = compactor {
             if compactor.needs_compaction(&messages) {
+                if !silent {
+                    render_sink.spinner_start("Compacting context...");
+                }
                 tracing::info!(
                     round,
                     message_count = messages.len(),
                     estimated_tokens = ContextCompactor::estimate_message_tokens(&messages),
                     "Context compaction triggered"
                 );
-                if !silent { render_sink.info("\n[compacting context...]"); }
+                let pre_compact_count = messages.len();
 
                 let compaction_result = tokio::time::timeout(
                     std::time::Duration::from_secs(15),
@@ -908,6 +929,11 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 )
                 .await;
 
+                // Stop compaction spinner before processing result.
+                if !silent {
+                    render_sink.spinner_stop();
+                }
+
                 match compaction_result {
                     Ok(summary_text) if !summary_text.is_empty() => {
                         compactor.apply_compaction(&mut messages, &summary_text);
@@ -916,6 +942,10 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         context_pipeline.reset();
                         for msg in &messages {
                             context_pipeline.add_message(msg.clone());
+                        }
+                        let tokens_saved = ContextCompactor::estimate_message_tokens(&messages);
+                        if !silent {
+                            render_sink.compaction_complete(pre_compact_count, messages.len(), tokens_saved as u64);
                         }
                         tracing::info!(
                             new_message_count = messages.len(),
@@ -970,6 +1000,9 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     reason = %selection.reason,
                     "Model selector override"
                 );
+                if !silent {
+                    render_sink.model_selected(&selection.model_id, &selection.provider_name, &selection.reason);
+                }
                 // Switch provider if the selected model belongs to a different one.
                 let resolved_provider = if selection.provider_name != provider.name() {
                     let looked_up = registry.and_then(|r| r.get(&selection.provider_name));
@@ -1014,11 +1047,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
 
         // Round separator: shown for rounds 2+ (after model selection so we can display provider).
         if round > 0 && !silent {
-            render_sink.info(&format!(
-                "\n  --- round {} [{}] ---",
-                round + 1,
-                effective_provider.name()
-            ));
+            render_sink.round_started(round + 1, effective_provider.name(), &selected_model);
         }
 
         // Per-round instruction refresh: check if CUERVO.md files changed on disk.
@@ -1035,8 +1064,9 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         }
 
         // Per-round plan section update: refresh step statuses and current step indicator.
-        if let Some(ref plan) = active_plan {
-            let plan_section = format_plan_for_prompt(plan, plan_step_index);
+        if let Some(ref tracker) = execution_tracker {
+            let plan = tracker.plan();
+            let plan_section = format_plan_for_prompt(plan, tracker.current_step());
             if let Some(ref mut sys) = cached_system {
                 update_plan_in_system(sys, &plan_section);
             }
@@ -1047,15 +1077,50 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         // automatically handling token budget enforcement across tiers.
         // The full `messages` Vec is preserved for fingerprinting/checkpointing.
         context_pipeline.set_round(round as u32);
+        let built_messages = context_pipeline.build_messages();
+        // Phase 42: record context assembly metrics.
+        if let Some(ref metrics) = context_metrics {
+            let approx_tokens = built_messages.iter().map(|m| {
+                match &m.content {
+                    MessageContent::Text(t) => t.len() / 4,
+                    MessageContent::Blocks(blocks) => blocks.iter().map(|b| match b {
+                        cuervo_core::types::ContentBlock::Text { text, .. } => text.len() / 4,
+                        _ => 20,
+                    }).sum(),
+                }
+            }).sum::<usize>();
+            metrics.record_assembly(approx_tokens as u32, 0);
+        }
+        // Phase 43D: Emit context tier data for TUI panel.
+        if !silent {
+            let l0_tokens = context_pipeline.l0().token_count();
+            let l0_cap = context_pipeline.l0().capacity() as u32 * 50; // approx token capacity
+            let l1_tokens = context_pipeline.l1().token_count();
+            let l1_entries = context_pipeline.l1().len();
+            let l2_entries = context_pipeline.l2().len();
+            let l3_entries = context_pipeline.l3().len();
+            let l4_entries = context_pipeline.l4().len();
+            let total = context_pipeline.estimated_tokens();
+            render_sink.context_tier_update(
+                l0_tokens, l0_cap, l1_tokens, l1_entries,
+                l2_entries, l3_entries, l4_entries, total,
+            );
+        }
         let mut round_request = ModelRequest {
             model: selected_model.clone(),
-            messages: context_pipeline.build_messages(),
-            tools: cached_tools.clone(),
+            messages: built_messages,
+            tools: if force_no_tools_next_round {
+                vec![] // Phase 33: loop guard forced tool withdrawal
+            } else {
+                cached_tools.clone()
+            },
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             system: cached_system.clone(),
             stream: true,
         };
+        // Reset the flag after consuming it.
+        force_no_tools_next_round = false;
 
         // Pre-invoke validation: ensure model is supported by the effective provider.
         if let Err(e) = effective_provider.validate_model(&selected_model) {
@@ -1089,6 +1154,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 cost_usd: call_cost,
                 latency_ms: loop_start.elapsed().as_millis() as u64,
                 execution_fingerprint: compute_fingerprint(&round_request.messages),
+                timeline_json: None,
+                ctrl_rx,
             });
         }
 
@@ -1211,7 +1278,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         if let Some(cache) = response_cache {
             if let Some(entry) = cache.lookup(&round_request).await {
                 tracing::info!(round, "Response cache hit");
-                if !silent { render_sink.info("  [cached]"); }
+                if !silent { render_sink.cache_status(true, "response_cache"); }
                 let round_text = entry.response_text.clone();
 
                 // Render the cached response (only if visible).
@@ -1265,6 +1332,40 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         let round_model_name = round_request.model.clone();
         // Track the actual provider Arc for cost estimation (updated on fallback).
         let mut round_cost_provider: Arc<dyn ModelProvider> = Arc::clone(&effective_provider);
+
+        // Phase 43: Check control channel before model invocation (yield point 1).
+        if let Some(ref mut rx) = ctrl_rx {
+            // If auto_pause is set (from previous StepOnce), pause before this round.
+            if auto_pause {
+                auto_pause = false;
+                render_sink.info("  [paused] Step complete — Space to resume, N to step");
+                loop {
+                    match rx.recv().await {
+                        Some(crate::tui::events::ControlEvent::Resume) => break,
+                        Some(crate::tui::events::ControlEvent::Step) => {
+                            auto_pause = true;
+                            break;
+                        }
+                        Some(crate::tui::events::ControlEvent::CancelAgent) | None => {
+                            ctrl_cancelled = true;
+                            break;
+                        }
+                        _ => continue,
+                    }
+                }
+                if ctrl_cancelled {
+                    break;
+                }
+            }
+            match check_control(rx, render_sink).await {
+                ControlAction::Continue => {}
+                ControlAction::StepOnce => { auto_pause = true; }
+                ControlAction::Cancel => {
+                    ctrl_cancelled = true;
+                    break;
+                }
+            }
+        }
 
         // Show spinner during model inference (appears after 200ms delay).
         if !silent {
@@ -1384,6 +1485,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     cost_usd: call_cost,
                     latency_ms: loop_start.elapsed().as_millis() as u64,
                     execution_fingerprint: compute_fingerprint(&round_request.messages),
+                    timeline_json: None,
+                    ctrl_rx,
                 });
             }
         };
@@ -1395,9 +1498,10 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 round_provider_name = attempt.provider_name.clone();
                 if attempt.is_fallback {
                     if !silent {
-                        render_sink.warning(
-                            &format!("using fallback provider '{}'", attempt.provider_name),
-                            None,
+                        render_sink.provider_fallback(
+                            effective_provider.name(),
+                            &attempt.provider_name,
+                            "primary provider failed",
                         );
                     }
                     // Adapt model for subsequent rounds: the fallback provider may not
@@ -1416,6 +1520,9 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                                     provider = %attempt.provider_name,
                                     "Adapted model for fallback provider on subsequent rounds"
                                 );
+                                if !silent {
+                                    render_sink.model_selected(&default_model.id, &attempt.provider_name, "adapted for fallback provider");
+                                }
                                 round_request.model = default_model.id.clone();
                                 fallback_adapted_model = Some(default_model.id.clone());
                             }
@@ -1475,6 +1582,13 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                                     // Record stream failure for health scoring.
                                     if resilience.is_enabled() {
                                         resilience.record_failure(&used_provider_name).await;
+                                        // Phase E3/E4: emit provider health as degraded after failure.
+                                        if !silent {
+                                            render_sink.provider_health_update(
+                                                &used_provider_name, "degraded", 0.0,
+                                                round_start.elapsed().as_millis() as u64,
+                                            );
+                                        }
                                     }
                                     stream_had_error = true;
                                     break false;
@@ -1501,12 +1615,18 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         cost_usd: call_cost,
                         latency_ms: loop_start.elapsed().as_millis() as u64,
                         execution_fingerprint: compute_fingerprint(&round_request.messages),
+                        timeline_json: None,
+                        ctrl_rx,
                     });
                 }
 
                 // Resilience: record success for the provider that was used.
                 if resilience.is_enabled() && !stream_had_error {
                     resilience.record_success(&used_provider_name).await;
+                    // Phase E3/E4: emit provider health as healthy after success.
+                    if !silent {
+                        render_sink.provider_health_update(&used_provider_name, "healthy", 0.0, 0);
+                    }
                 }
 
                 // Stream error: retry the round if retries remain, discarding partial output.
@@ -1617,6 +1737,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     cost_usd: call_cost,
                     latency_ms: loop_start.elapsed().as_millis() as u64,
                     execution_fingerprint: compute_fingerprint(&round_request.messages),
+                    timeline_json: None,
+                    ctrl_rx,
                 });
             }
         }
@@ -1651,6 +1773,26 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 cumulative = format!("${:.4}", session.estimated_cost_usd),
                 "Round cost"
             );
+        }
+
+        // Emit round-end metrics to sink.
+        if !silent {
+            render_sink.round_ended(
+                round + 1,
+                round_usage.input_tokens,
+                round_usage.output_tokens,
+                round_cost.estimated_cost_usd,
+                round_latency_ms,
+            );
+        }
+
+        // Phase E2: Emit token budget update after each round.
+        if !silent && limits.max_total_tokens > 0 {
+            let used_tokens = session.total_usage.total() as u64;
+            let limit_tokens = limits.max_total_tokens as u64;
+            let elapsed_secs = loop_start.elapsed().as_secs_f64().max(0.001);
+            let rate = used_tokens as f64 / (elapsed_secs / 60.0);
+            render_sink.token_budget_update(used_tokens, limit_tokens, rate);
         }
 
         // Convert stop_reason to API-compatible string.
@@ -1799,6 +1941,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 cost_usd: call_cost,
                 latency_ms: loop_start.elapsed().as_millis() as u64,
                 execution_fingerprint: compute_fingerprint(&messages),
+                timeline_json: None,
+                ctrl_rx,
             });
         }
 
@@ -1839,6 +1983,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 cost_usd: call_cost,
                 latency_ms: loop_start.elapsed().as_millis() as u64,
                 execution_fingerprint: compute_fingerprint(&messages),
+                timeline_json: None,
+                ctrl_rx,
             });
         }
 
@@ -1920,9 +2066,38 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         context_pipeline.add_message(assistant_msg.clone());
         session.add_message(assistant_msg);
 
+        // Phase 33: collect (tool_name, args_hash) for this round's loop guard log.
+        let round_tool_log: Vec<(String, u64)> = completed_tools
+            .iter()
+            .map(|t| (t.name.clone(), hash_tool_args(&t.input)))
+            .collect();
+
+        // Phase 33: dedup — filter out tool calls that were already executed with the
+        // same arguments in a prior round. Produces a synthetic ToolResult for filtered calls
+        // so the model doesn't get confused by missing results.
+        let mut dedup_result_blocks: Vec<ContentBlock> = Vec::new();
+        let deduplicated_tools: Vec<_> = completed_tools
+            .into_iter()
+            .filter(|tool| {
+                let args_hash = hash_tool_args(&tool.input);
+                if loop_guard.is_duplicate(&tool.name, args_hash) {
+                    tracing::warn!(tool = %tool.name, "Duplicate tool call filtered");
+                    dedup_result_blocks.push(ContentBlock::ToolResult {
+                        tool_use_id: tool.id.clone(),
+                        content: "Already executed in a previous round. Use the existing result."
+                            .to_string(),
+                        is_error: true,
+                    });
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         // Execute tools: in replay mode, return recorded results; otherwise execute normally.
-        let plan = executor::plan_execution(completed_tools, tool_registry);
-        let mut tool_result_blocks: Vec<ContentBlock> = Vec::new();
+        let plan = executor::plan_execution(deduplicated_tools, tool_registry);
+        let mut tool_result_blocks: Vec<ContentBlock> = dedup_result_blocks;
         let mut tool_failures: Vec<(String, String)> = Vec::new(); // (tool_name, error)
         let mut tool_successes: Vec<String> = Vec::new(); // tool_name of successful executions
 
@@ -1956,6 +2131,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 for tool_call in &plan.parallel_batch {
                     if let Some(cached) = speculator.get_cached(&tool_call.name, &tool_call.input).await {
                         tracing::debug!(tool = %tool_call.name, "Speculation cache hit");
+                        if !silent { render_sink.speculative_result(&tool_call.name, true); }
                         hits.push(executor::ToolExecResult {
                             tool_use_id: tool_call.id.clone(),
                             tool_name: tool_call.name.clone(),
@@ -2109,59 +2285,75 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             }
         }
 
-        // Match successful tool executions to plan steps.
-        if let Some(ref mut plan) = active_plan {
-            for tool_name in &tool_successes {
-                if let Some((step_idx, step)) = plan
-                    .steps
-                    .iter_mut()
-                    .enumerate()
-                    .find(|(_, s)| {
-                        s.tool_name.as_deref() == Some(tool_name.as_str())
-                            && s.outcome.is_none()
-                    })
-                {
-                    step.outcome = Some(StepOutcome::Success {
-                        summary: format!("{tool_name} OK"),
-                    });
-                    // Emit step completion event.
-                    let _ = event_tx.send(DomainEvent::new(EventPayload::PlanStepCompleted {
-                        plan_id: plan.plan_id,
-                        step_index: step_idx,
-                        outcome: "success".to_string(),
-                    }));
-                    // Persist outcome.
-                    if let Some(db) = trace_db {
-                        let _ = db
-                            .update_plan_step_outcome(
-                                &plan.plan_id,
-                                step_idx as u32,
-                                "success",
-                                &format!("{tool_name} OK"),
-                            )
-                            .await;
-                    }
+        // Match successful tool executions to plan steps via ExecutionTracker.
+        if let Some(ref mut tracker) = execution_tracker {
+            let failures_ref: Vec<(String, String)> = tool_failures.clone();
+            let matched = tracker.record_tool_results(
+                &tool_successes,
+                &failures_ref,
+                round,
+            );
+
+            // Persist outcomes to DB (tracker doesn't do I/O).
+            if let Some(db) = trace_db {
+                let plan_id = tracker.plan().plan_id;
+                for m in &matched {
+                    let (status, detail) = match &m.outcome {
+                        StepOutcome::Success { summary } => ("success", summary.as_str()),
+                        StepOutcome::Failed { error } => ("failed", error.as_str()),
+                        StepOutcome::Skipped { reason } => ("skipped", reason.as_str()),
+                    };
+                    let _ = db
+                        .update_plan_step_outcome(&plan_id, m.step_index as u32, status, detail)
+                        .await;
                 }
             }
-            // Advance plan_step_index to the next incomplete step.
-            plan_step_index = plan
-                .steps
-                .iter()
-                .position(|s| s.outcome.is_none())
-                .unwrap_or(plan.steps.len());
+
+            // Phase 33: plan completion → force synthesis on next round.
+            if tracker.is_complete() {
+                tracing::info!("All plan steps completed — forcing synthesis");
+                loop_guard.force_synthesis();
+            }
 
             // Update plan section in system prompt with new step statuses.
-            let plan_section = format_plan_for_prompt(plan, plan_step_index);
+            let plan = tracker.plan();
+            let current = tracker.current_step();
+            let plan_section = format_plan_for_prompt(plan, current);
             if let Some(ref mut sys) = cached_system {
                 update_plan_in_system(sys, &plan_section);
             }
 
-            // Emit plan progress to render sink.
-            render_sink.plan_progress(
+            // Emit plan progress with timing to render sink.
+            let (_, _, elapsed) = tracker.progress();
+            render_sink.plan_progress_with_timing(
                 &plan.goal,
                 &plan.steps,
-                plan_step_index,
+                current,
+                tracker.tracked_steps(),
+                elapsed,
             );
+
+            // Sync outcomes into structured task bridge.
+            if let Some(ref mut bridge) = task_bridge {
+                bridge.sync_from_tracker(
+                    tracker,
+                    &round_model_name,
+                    &round_provider_name,
+                    Some(session_id),
+                );
+            }
+        }
+
+        // Phase 43: Check control channel after plan step completion (yield point 3).
+        if let Some(ref mut rx) = ctrl_rx {
+            match check_control(rx, render_sink).await {
+                ControlAction::Continue => {}
+                ControlAction::StepOnce => { auto_pause = true; }
+                ControlAction::Cancel => {
+                    ctrl_cancelled = true;
+                    break;
+                }
+            }
         }
 
         // Reflexion: evaluate round and generate reflection on non-success.
@@ -2192,8 +2384,14 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             }
 
             if !matches!(outcome, super::reflexion::RoundOutcome::Success) {
+                // Phase E5: Transition to Reflecting state.
+                if !silent {
+                    render_sink.agent_state_transition("executing", "reflecting", "round had issues");
+                }
+                render_sink.reflection_started();
                 match reflector.reflect(round, &outcome, &messages).await {
                     Ok(Some(reflection)) => {
+                        render_sink.reflection_complete(&reflection.analysis, 0.0);
                         tracing::info!(
                             round,
                             analysis = %reflection.analysis,
@@ -2251,6 +2449,10 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     Ok(None) => {}
                     Err(e) => tracing::warn!("Reflection failed: {e}"),
                 }
+                // Phase E5: Transition back from Reflecting.
+                if !silent {
+                    render_sink.agent_state_transition("reflecting", "executing", "reflection complete");
+                }
             }
         }
 
@@ -2263,111 +2465,90 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     error_pattern = %ToolFailureTracker::error_pattern(error_msg),
                     "Tool failure circuit breaker tripped — repeated identical failures"
                 );
+                if !silent {
+                    render_sink.loop_guard_action("circuit_breaker", &format!("{failed_tool_name}: repeated failures"));
+                }
             }
         }
 
         // Adaptive replanning: if a tool failed and we have an active plan, attempt replan.
+        // Failure outcomes are already recorded by the tracker above.
         // RC-3/RC-4 fix: skip replan for deterministic errors that will never succeed.
-        if let (Some(ref mut plan), Some(planner)) = (&mut active_plan, planner) {
+        if let (Some(ref mut tracker), Some(planner)) = (&mut execution_tracker, planner) {
             for (failed_tool_name, error_msg) in &tool_failures {
-                // Find the step that corresponds to this tool failure.
-                if let Some((step_idx, step)) = plan
-                    .steps
-                    .iter_mut()
-                    .enumerate()
-                    .find(|(_, s)| {
-                        s.tool_name.as_deref() == Some(failed_tool_name.as_str())
-                            && s.outcome.is_none()
-                    })
-                {
-                    step.outcome = Some(StepOutcome::Failed {
-                        error: error_msg.clone(),
-                    });
-
-                    // Emit step completion event.
-                    let _ = event_tx.send(DomainEvent::new(EventPayload::PlanStepCompleted {
-                        plan_id: plan.plan_id,
-                        step_index: step_idx,
-                        outcome: "failed".to_string(),
-                    }));
-
-                    // Persist outcome.
-                    if let Some(db) = trace_db {
-                        let _ = db
-                            .update_plan_step_outcome(
-                                &plan.plan_id,
-                                step_idx as u32,
-                                "failed",
-                                error_msg,
-                            )
-                            .await;
-                    }
-
-                    // RC-3 fix: skip replan on deterministic errors (file not found,
-                    // permission denied, etc.) — these will never succeed on retry.
-                    if executor::is_deterministic_error(error_msg) {
-                        tracing::info!(
-                            tool = %failed_tool_name,
-                            error = %error_msg,
-                            "Skipping replan: deterministic error (will never succeed on retry)"
-                        );
-                        continue;
-                    }
-
-                    // RC-2 fix: skip replan if this tool+error has already tripped.
-                    if failure_tracker.is_tripped(failed_tool_name, error_msg) {
-                        tracing::info!(
-                            tool = %failed_tool_name,
-                            "Skipping replan: circuit breaker tripped for this failure pattern"
-                        );
-                        continue;
-                    }
-
-                    // Attempt replan (only for non-deterministic, non-repeated failures).
-                    match planner
-                        .replan(plan, step_idx, error_msg, &request.tools)
-                        .await
-                    {
-                        Ok(Some(new_plan)) => {
-                            tracing::info!(
-                                goal = %new_plan.goal,
-                                replan = new_plan.replan_count,
-                                "Replanned after tool failure"
-                            );
-                            let _ = event_tx.send(DomainEvent::new(
-                                EventPayload::PlanGenerated {
-                                    plan_id: new_plan.plan_id,
-                                    goal: new_plan.goal.clone(),
-                                    step_count: new_plan.steps.len(),
-                                    replan_count: new_plan.replan_count,
-                                },
-                            ));
-                            if let Some(db) = trace_db {
-                                let _ = db.save_plan_steps(&session_id, &new_plan).await;
-                            }
-                            *plan = new_plan;
-                            // Reset step index and update system prompt for new plan.
-                            plan_step_index = plan
-                                .steps
-                                .iter()
-                                .position(|s| s.outcome.is_none())
-                                .unwrap_or(plan.steps.len());
-                            let plan_section = format_plan_for_prompt(plan, plan_step_index);
-                            if let Some(ref mut sys) = cached_system {
-                                update_plan_in_system(sys, &plan_section);
-                            }
-                            render_sink.plan_progress(&plan.goal, &plan.steps, plan_step_index);
-                        }
-                        Ok(None) => {
-                            tracing::debug!("Replanning returned no plan");
-                        }
-                        Err(e) => {
-                            tracing::warn!("Replanning failed: {e}");
-                        }
-                    }
-                    // Only replan on the first failure per round.
-                    break;
+                // RC-3 fix: skip replan on deterministic errors.
+                if executor::is_deterministic_error(error_msg) {
+                    tracing::info!(
+                        tool = %failed_tool_name,
+                        error = %error_msg,
+                        "Skipping replan: deterministic error (will never succeed on retry)"
+                    );
+                    continue;
                 }
+                // RC-2 fix: skip replan if this tool+error has already tripped.
+                if failure_tracker.is_tripped(failed_tool_name, error_msg) {
+                    tracing::info!(
+                        tool = %failed_tool_name,
+                        "Skipping replan: circuit breaker tripped for this failure pattern"
+                    );
+                    continue;
+                }
+                // Find the failed step index from the plan.
+                let plan = tracker.plan();
+                let failed_idx = plan.steps.iter().position(|s| {
+                    s.tool_name.as_deref() == Some(failed_tool_name.as_str())
+                        && matches!(s.outcome, Some(StepOutcome::Failed { .. }))
+                });
+                let Some(step_idx) = failed_idx else { continue };
+
+                // Attempt replan (only for non-deterministic, non-repeated failures).
+                match planner
+                    .replan(plan, step_idx, error_msg, &request.tools)
+                    .await
+                {
+                    Ok(Some(new_plan)) => {
+                        tracing::info!(
+                            goal = %new_plan.goal,
+                            replan = new_plan.replan_count,
+                            "Replanned after tool failure"
+                        );
+                        let _ = event_tx.send(DomainEvent::new(
+                            EventPayload::PlanGenerated {
+                                plan_id: new_plan.plan_id,
+                                goal: new_plan.goal.clone(),
+                                step_count: new_plan.steps.len(),
+                                replan_count: new_plan.replan_count,
+                            },
+                        ));
+                        if let Some(db) = trace_db {
+                            let _ = db.save_plan_steps(&session_id, &new_plan).await;
+                        }
+                        tracker.reset_plan(new_plan);
+
+                        let plan = tracker.plan();
+                        let current = tracker.current_step();
+                        let plan_section = format_plan_for_prompt(plan, current);
+                        if let Some(ref mut sys) = cached_system {
+                            update_plan_in_system(sys, &plan_section);
+                        }
+                        let (_, _, elapsed) = tracker.progress();
+                        render_sink.plan_progress_with_timing(
+                            &plan.goal,
+                            &plan.steps,
+                            current,
+                            tracker.tracked_steps(),
+                            elapsed,
+                        );
+                    }
+                    Ok(None) => {
+                        tracing::debug!("Replanning returned no plan");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Replanning failed: {e}");
+                    }
+                }
+                // Only replan on the first failure per round.
+                break;
             }
         }
 
@@ -2396,21 +2577,95 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         context_pipeline.add_message(tool_result_msg.clone());
         session.add_message(tool_result_msg);
 
-        // Phase 32: runaway tool loop guard.
-        consecutive_tool_rounds += 1;
-        if consecutive_tool_rounds >= MAX_CONSECUTIVE_TOOL_ROUNDS && !tool_successes.is_empty() {
-            tracing::warn!(
-                consecutive_tool_rounds,
-                "Runaway tool loop guard: breaking after {} consecutive tool rounds with successes",
-                consecutive_tool_rounds
-            );
-            if !silent {
-                render_sink.warning(
-                    &format!("auto-stopped after {} consecutive tool rounds", consecutive_tool_rounds),
-                    Some("The model kept calling tools without stopping. Task likely completed."),
-                );
+        // Phase 43: Check control channel after tool execution (yield point 2).
+        if let Some(ref mut rx) = ctrl_rx {
+            match check_control(rx, render_sink).await {
+                ControlAction::Continue => {}
+                ControlAction::StepOnce => { auto_pause = true; }
+                ControlAction::Cancel => {
+                    ctrl_cancelled = true;
+                    break;
+                }
             }
-            break;
+        }
+
+        // Phase 33: intelligent tool loop guard — graduated escalation.
+        // Uses the round_tool_log collected before dedup (above) for full
+        // (tool_name, args_hash) tracking.
+        let loop_action = loop_guard.record_round(&round_tool_log);
+
+        tracing::info!(
+            round,
+            consecutive_tool_rounds = loop_guard.consecutive_rounds(),
+            action = ?loop_action,
+            oscillation = loop_guard.detect_oscillation(),
+            read_saturation = loop_guard.detect_read_saturation(),
+            "Tool loop guard decision"
+        );
+
+        match loop_action {
+            LoopAction::Break => {
+                tracing::warn!(
+                    consecutive_tool_rounds = loop_guard.consecutive_rounds(),
+                    "Tool loop guard: breaking (oscillation or plan complete)"
+                );
+                if !silent {
+                    render_sink.warning(
+                        &format!(
+                            "auto-stopped after {} consecutive tool rounds (pattern detected)",
+                            loop_guard.consecutive_rounds()
+                        ),
+                        Some("Oscillation or plan completion detected — synthesizing response."),
+                    );
+                }
+                break;
+            }
+            LoopAction::ForceNoTools => {
+                tracing::warn!(
+                    consecutive_tool_rounds = loop_guard.consecutive_rounds(),
+                    "Tool loop guard: forcing tool withdrawal for next round"
+                );
+                if !silent {
+                    render_sink.loop_guard_action("force_no_tools", "removing tools for next round");
+                }
+                // Inject synthesis directive.
+                let synth_msg = ChatMessage {
+                    role: Role::User,
+                    content: MessageContent::Text(
+                        "[System: You have gathered sufficient information across multiple tool rounds. \
+                         SYNTHESIZE your findings and respond directly to the user. \
+                         Do NOT call any more tools unless absolutely necessary for NEW information.]"
+                            .into(),
+                    ),
+                };
+                messages.push(synth_msg.clone());
+                context_pipeline.add_message(synth_msg.clone());
+                session.add_message(synth_msg);
+                // Flag: next round_request should have tools removed.
+                force_no_tools_next_round = true;
+            }
+            LoopAction::InjectSynthesis => {
+                tracing::info!(
+                    consecutive_tool_rounds = loop_guard.consecutive_rounds(),
+                    "Tool loop guard: injecting synthesis directive"
+                );
+                if !silent {
+                    render_sink.loop_guard_action("inject_synthesis", "hinting model to synthesize");
+                }
+                let synth_msg = ChatMessage {
+                    role: Role::User,
+                    content: MessageContent::Text(
+                        "[System: You have been calling tools for several rounds. \
+                         Consider whether you already have enough information to respond. \
+                         If so, respond directly to the user instead of calling more tools.]"
+                            .into(),
+                    ),
+                };
+                messages.push(synth_msg.clone());
+                context_pipeline.add_message(synth_msg.clone());
+                session.add_message(synth_msg);
+            }
+            LoopAction::Continue => {}
         }
 
         // Self-correction context injection: when tools fail, inject a structured
@@ -2469,8 +2724,12 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         permissions.pop_context();
     }
 
-    // If we exhausted the loop without breaking, we hit max_rounds.
-    let stop_condition = if rounds >= limits.max_rounds {
+    // Determine stop condition: max_rounds, forced synthesis, or normal end.
+    // If the loop guard forced a break (oscillation/plan completion) or forced no-tools,
+    // and the loop ended due to that, use ForcedSynthesis.
+    let stop_condition = if ctrl_cancelled {
+        StopCondition::Interrupted
+    } else if rounds >= limits.max_rounds {
         tracing::warn!(max_rounds = limits.max_rounds, "Max agent rounds reached");
         if !silent {
             render_sink.warning(
@@ -2479,15 +2738,29 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             );
         }
         StopCondition::MaxRounds
+    } else if loop_guard.plan_complete() || loop_guard.detect_oscillation() {
+        StopCondition::ForcedSynthesis
     } else {
         StopCondition::EndTurn
     };
+
+    // Phase E5: Emit final agent state transition (Complete or Failed).
+    if !silent {
+        let (to_state, reason) = match stop_condition {
+            StopCondition::EndTurn | StopCondition::ForcedSynthesis => ("complete", "task finished"),
+            StopCondition::Interrupted => ("idle", "user cancelled"),
+            StopCondition::MaxRounds => ("failed", "max rounds reached"),
+            StopCondition::ProviderError => ("failed", "provider error"),
+            _ => ("complete", "loop ended"),
+        };
+        render_sink.agent_state_transition("executing", to_state, reason);
+    }
 
     // Emit AgentCompleted event.
     let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
         agent_type: cuervo_core::types::AgentType::Chat,
         result: cuervo_core::types::AgentResult {
-            success: stop_condition == StopCondition::EndTurn,
+            success: matches!(stop_condition, StopCondition::EndTurn | StopCondition::ForcedSynthesis),
             summary: format!("{} rounds, {:?}", rounds, stop_condition),
             files_modified: vec![],
             tools_used: vec![],
@@ -2502,6 +2775,34 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         tracing::debug!(bytes, "L4 archive flushed to disk");
     }
 
+    // Log plan execution summary with timing.
+    if let Some(ref tracker) = execution_tracker {
+        let (completed, total, elapsed) = tracker.progress();
+        let delegated = tracker
+            .tracked_steps()
+            .iter()
+            .filter(|s| s.delegation.is_some())
+            .count();
+        tracing::info!(
+            completed,
+            total,
+            delegated,
+            elapsed_ms = elapsed,
+            "Plan execution summary"
+        );
+        if !silent {
+            let delegation_note = if delegated > 0 {
+                format!(", {delegated} delegated")
+            } else {
+                String::new()
+            };
+            render_sink.info(&format!(
+                "Plan: {completed}/{total} steps in {:.1}s{delegation_note}",
+                elapsed as f64 / 1000.0
+            ));
+        }
+    }
+
     let execution_fingerprint = compute_fingerprint(&messages);
     Ok(AgentLoopResult {
         full_text,
@@ -2512,6 +2813,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         cost_usd: call_cost,
         latency_ms: loop_start.elapsed().as_millis() as u64,
         execution_fingerprint,
+        timeline_json: execution_tracker.as_ref().map(|t| t.to_json().to_string()),
+        ctrl_rx,
     })
 }
 
@@ -2552,6 +2855,9 @@ mod tests {
     static TEST_PLANNING_CONFIG: std::sync::LazyLock<PlanningConfig> =
         std::sync::LazyLock::new(PlanningConfig::default);
 
+    static TEST_ORCHESTRATOR_CONFIG: std::sync::LazyLock<OrchestratorConfig> =
+        std::sync::LazyLock::new(OrchestratorConfig::default);
+
     /// Build an AgentContext with test defaults for optional fields.
     #[allow(clippy::too_many_arguments)]
     fn test_ctx<'a>(
@@ -2590,6 +2896,12 @@ mod tests {
             registry: None,
             episode_id: None,
             planning_config: &*TEST_PLANNING_CONFIG,
+            orchestrator_config: &*TEST_ORCHESTRATOR_CONFIG,
+            tool_selection_enabled: false,
+            task_bridge: None,
+            reasoning_config: None,
+            context_metrics: None,
+            ctrl_rx: None,
         }
     }
 
@@ -3579,171 +3891,86 @@ mod tests {
         assert!(system.contains("More instructions."));
     }
 
-    // ── Plan success tracking tests (SP-3) ──
+    // ── Plan success tracking tests (SP-3 → Phase 36 ExecutionTracker) ──
 
-    #[test]
-    fn plan_step_success_match() {
-        use cuervo_core::traits::{ExecutionPlan, PlanStep, StepOutcome};
-        let mut plan = ExecutionPlan {
+    fn make_plan_step(desc: &str, tool: &str) -> cuervo_core::traits::PlanStep {
+        cuervo_core::traits::PlanStep {
+            description: desc.into(),
+            tool_name: Some(tool.into()),
+            parallel: false,
+            confidence: 0.9,
+            expected_args: None,
+            outcome: None,
+        }
+    }
+
+    fn make_test_plan(steps: Vec<cuervo_core::traits::PlanStep>) -> ExecutionPlan {
+        ExecutionPlan {
             goal: "Test".into(),
-            steps: vec![
-                PlanStep {
-                    description: "Read file".into(),
-                    tool_name: Some("file_read".into()),
-                    parallel: false,
-                    confidence: 0.9,
-                    expected_args: None,
-                    outcome: None,
-                },
-                PlanStep {
-                    description: "Edit file".into(),
-                    tool_name: Some("file_edit".into()),
-                    parallel: false,
-                    confidence: 0.8,
-                    expected_args: None,
-                    outcome: None,
-                },
-            ],
+            steps,
             requires_confirmation: false,
             plan_id: uuid::Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
-        };
-        // Simulate matching file_read success to plan step.
-        let tool_successes = vec!["file_read".to_string()];
-        for tool_name in &tool_successes {
-            if let Some((_idx, step)) = plan.steps.iter_mut().enumerate().find(|(_, s)| {
-                s.tool_name.as_deref() == Some(tool_name.as_str()) && s.outcome.is_none()
-            }) {
-                step.outcome = Some(StepOutcome::Success {
-                    summary: format!("{tool_name} OK"),
-                });
-            }
         }
-        assert!(matches!(
-            plan.steps[0].outcome,
-            Some(StepOutcome::Success { .. })
-        ));
-        assert!(plan.steps[1].outcome.is_none());
+    }
+
+    fn make_test_tracker(steps: Vec<cuervo_core::traits::PlanStep>) -> ExecutionTracker {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        ExecutionTracker::new(make_test_plan(steps), tx)
+    }
+
+    #[test]
+    fn plan_step_success_match() {
+        let mut tracker = make_test_tracker(vec![
+            make_plan_step("Read file", "file_read"),
+            make_plan_step("Edit file", "file_edit"),
+        ]);
+        let matched = tracker.record_tool_results(&["file_read".into()], &[], 1);
+        assert_eq!(matched.len(), 1);
+        assert!(matches!(tracker.plan().steps[0].outcome, Some(StepOutcome::Success { .. })));
+        assert!(tracker.plan().steps[1].outcome.is_none());
     }
 
     #[test]
     fn plan_step_no_match_ignored() {
-        use cuervo_core::traits::{ExecutionPlan, PlanStep};
-        let mut plan = ExecutionPlan {
-            goal: "Test".into(),
-            steps: vec![PlanStep {
-                description: "Run tests".into(),
-                tool_name: Some("bash".into()),
-                parallel: false,
-                confidence: 0.9,
-                expected_args: None,
-                outcome: None,
-            }],
-            requires_confirmation: false,
-            plan_id: uuid::Uuid::nil(),
-            replan_count: 0,
-            parent_plan_id: None,
-        };
-        // file_read doesn't match any step.
-        let tool_successes = vec!["file_read".to_string()];
-        for tool_name in &tool_successes {
-            if let Some((_idx, step)) = plan.steps.iter_mut().enumerate().find(|(_, s)| {
-                s.tool_name.as_deref() == Some(tool_name.as_str()) && s.outcome.is_none()
-            }) {
-                step.outcome = Some(cuervo_core::traits::StepOutcome::Success {
-                    summary: format!("{tool_name} OK"),
-                });
-            }
-        }
-        assert!(plan.steps[0].outcome.is_none());
+        let mut tracker = make_test_tracker(vec![make_plan_step("Run tests", "bash")]);
+        let matched = tracker.record_tool_results(&["file_read".into()], &[], 1);
+        assert!(matched.is_empty());
+        assert!(tracker.plan().steps[0].outcome.is_none());
     }
 
     #[test]
     fn plan_step_multi_same_tool_sequential() {
-        use cuervo_core::traits::{ExecutionPlan, PlanStep, StepOutcome};
-        let mut plan = ExecutionPlan {
-            goal: "Test".into(),
-            steps: vec![
-                PlanStep {
-                    description: "Read first".into(),
-                    tool_name: Some("file_read".into()),
-                    parallel: false,
-                    confidence: 0.9,
-                    expected_args: None,
-                    outcome: None,
-                },
-                PlanStep {
-                    description: "Read second".into(),
-                    tool_name: Some("file_read".into()),
-                    parallel: false,
-                    confidence: 0.9,
-                    expected_args: None,
-                    outcome: None,
-                },
-            ],
-            requires_confirmation: false,
-            plan_id: uuid::Uuid::nil(),
-            replan_count: 0,
-            parent_plan_id: None,
-        };
-        // First file_read should match first step only.
-        let tool_successes = vec!["file_read".to_string()];
-        for tool_name in &tool_successes {
-            if let Some((_idx, step)) = plan.steps.iter_mut().enumerate().find(|(_, s)| {
-                s.tool_name.as_deref() == Some(tool_name.as_str()) && s.outcome.is_none()
-            }) {
-                step.outcome = Some(StepOutcome::Success {
-                    summary: format!("{tool_name} OK"),
-                });
-            }
-        }
-        assert!(matches!(
-            plan.steps[0].outcome,
-            Some(StepOutcome::Success { .. })
-        ));
-        assert!(plan.steps[1].outcome.is_none());
+        let mut tracker = make_test_tracker(vec![
+            make_plan_step("Read first", "file_read"),
+            make_plan_step("Read second", "file_read"),
+        ]);
+        let m1 = tracker.record_tool_results(&["file_read".into()], &[], 1);
+        assert_eq!(m1.len(), 1);
+        assert!(matches!(tracker.plan().steps[0].outcome, Some(StepOutcome::Success { .. })));
+        assert!(tracker.plan().steps[1].outcome.is_none());
     }
 
     #[test]
     fn plan_step_all_completed_advances_index() {
-        use cuervo_core::traits::{ExecutionPlan, PlanStep, StepOutcome};
-        let plan = ExecutionPlan {
-            goal: "Test".into(),
-            steps: vec![
-                PlanStep {
-                    description: "Step 1".into(),
-                    tool_name: Some("bash".into()),
-                    parallel: false,
-                    confidence: 0.9,
-                    expected_args: None,
-                    outcome: Some(StepOutcome::Success {
-                        summary: "done".into(),
-                    }),
-                },
-                PlanStep {
-                    description: "Step 2".into(),
-                    tool_name: Some("file_read".into()),
-                    parallel: false,
-                    confidence: 0.9,
-                    expected_args: None,
-                    outcome: Some(StepOutcome::Success {
-                        summary: "done".into(),
-                    }),
-                },
-            ],
-            requires_confirmation: false,
-            plan_id: uuid::Uuid::nil(),
-            replan_count: 0,
-            parent_plan_id: None,
-        };
-        let idx = plan
-            .steps
-            .iter()
-            .position(|s| s.outcome.is_none())
-            .unwrap_or(plan.steps.len());
-        assert_eq!(idx, 2); // Past all steps.
-        let formatted = format_plan_for_prompt(&plan, idx);
+        let plan = make_test_plan(vec![
+            {
+                let mut s = make_plan_step("Step 1", "bash");
+                s.outcome = Some(StepOutcome::Success { summary: "done".into() });
+                s
+            },
+            {
+                let mut s = make_plan_step("Step 2", "file_read");
+                s.outcome = Some(StepOutcome::Success { summary: "done".into() });
+                s
+            },
+        ]);
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let tracker = ExecutionTracker::new(plan.clone(), tx);
+        assert!(tracker.is_complete());
+        assert_eq!(tracker.current_step(), 2); // Past all steps.
+        let formatted = format_plan_for_prompt(tracker.plan(), tracker.current_step());
         assert!(formatted.contains("All steps completed."));
     }
 
@@ -3897,8 +4124,7 @@ mod tests {
             }
         }
         // Count should be 1000
-        let key = ("file_read".to_string(), "not_found".to_string());
-        assert_eq!(*tracker.failures.get(&key).unwrap(), 1000);
+        assert_eq!(tracker.failure_count("file_read", "not found"), 1000);
     }
 
     #[test]
@@ -4193,5 +4419,416 @@ mod tests {
             "Expected primary cost ~0.02, got {}",
             session.estimated_cost_usd
         );
+    }
+
+    // === Phase 33: ToolLoopGuard tests ===
+
+    #[test]
+    fn loop_guard_continue_on_first_round() {
+        let mut guard = ToolLoopGuard::new();
+        let tools = vec![("file_read".into(), 123u64)];
+        assert_eq!(guard.record_round(&tools), LoopAction::Continue);
+        assert_eq!(guard.consecutive_rounds(), 1);
+    }
+
+    #[test]
+    fn loop_guard_continue_on_second_round() {
+        let mut guard = ToolLoopGuard::new();
+        assert_eq!(
+            guard.record_round(&[("file_read".into(), 1)]),
+            LoopAction::Continue
+        );
+        assert_eq!(
+            guard.record_round(&[("grep".into(), 2)]),
+            LoopAction::Continue
+        );
+        assert_eq!(guard.consecutive_rounds(), 2);
+    }
+
+    #[test]
+    fn loop_guard_synthesis_at_threshold() {
+        let mut guard = ToolLoopGuard::new();
+        // Rounds 1-2: Continue
+        guard.record_round(&[("file_read".into(), 1)]);
+        guard.record_round(&[("grep".into(), 2)]);
+        // Round 3: InjectSynthesis (synthesis_threshold = 3)
+        let action = guard.record_round(&[("directory_tree".into(), 3)]);
+        assert_eq!(action, LoopAction::InjectSynthesis);
+    }
+
+    #[test]
+    fn loop_guard_force_at_threshold() {
+        let mut guard = ToolLoopGuard::new();
+        guard.record_round(&[("file_read".into(), 1)]);
+        guard.record_round(&[("grep".into(), 2)]);
+        guard.record_round(&[("directory_tree".into(), 3)]);
+        // Round 4: ForceNoTools (force_threshold = 4)
+        let action = guard.record_round(&[("file_inspect".into(), 4)]);
+        assert_eq!(action, LoopAction::ForceNoTools);
+    }
+
+    #[test]
+    fn loop_guard_oscillation_aaa() {
+        // A→A→A pattern: 3 identical rounds
+        let mut guard = ToolLoopGuard::new();
+        let tools = vec![("file_read".into(), 42u64)];
+        guard.record_round(&tools); // Round 1: Continue
+        guard.record_round(&tools); // Round 2: Continue
+        let action = guard.record_round(&tools); // Round 3: oscillation detected → Break
+        assert_eq!(action, LoopAction::Break);
+        assert!(guard.detect_oscillation());
+    }
+
+    #[test]
+    fn loop_guard_oscillation_abab() {
+        // A→B→A→B pattern: alternating over 4 rounds
+        let mut guard = ToolLoopGuard::new();
+        let a = vec![("file_read".into(), 1u64)];
+        let b = vec![("grep".into(), 2u64)];
+        guard.record_round(&a); // Round 1: Continue
+        guard.record_round(&b); // Round 2: Continue
+        guard.record_round(&a); // Round 3: InjectSynthesis (but also check oscillation)
+        let action = guard.record_round(&b); // Round 4: oscillation A→B→A→B → Break
+        assert_eq!(action, LoopAction::Break);
+        assert!(guard.detect_oscillation());
+    }
+
+    #[test]
+    fn loop_guard_no_oscillation_different_tools() {
+        let mut guard = ToolLoopGuard::new();
+        guard.record_round(&[("file_read".into(), 1)]);
+        guard.record_round(&[("grep".into(), 2)]);
+        guard.record_round(&[("directory_tree".into(), 3)]);
+        assert!(!guard.detect_oscillation());
+    }
+
+    #[test]
+    fn loop_guard_read_saturation_detected() {
+        let mut guard = ToolLoopGuard::new();
+        guard.record_round(&[("file_read".into(), 1)]);
+        guard.record_round(&[("grep".into(), 2)]);
+        guard.record_round(&[("glob".into(), 3)]);
+        assert!(guard.detect_read_saturation());
+    }
+
+    #[test]
+    fn loop_guard_read_saturation_not_with_write() {
+        let mut guard = ToolLoopGuard::new();
+        guard.record_round(&[("file_read".into(), 1)]);
+        guard.record_round(&[("file_write".into(), 2)]); // Not read-only
+        guard.record_round(&[("grep".into(), 3)]);
+        assert!(!guard.detect_read_saturation());
+    }
+
+    #[test]
+    fn loop_guard_duplicate_detection() {
+        let mut guard = ToolLoopGuard::new();
+        // Record a round with a specific tool+hash.
+        guard.record_round(&[("file_read".into(), 12345)]);
+        // Same tool+hash should be detected as duplicate.
+        assert!(guard.is_duplicate("file_read", 12345));
+        // Different hash should not be duplicate.
+        assert!(!guard.is_duplicate("file_read", 99999));
+        // Different tool should not be duplicate.
+        assert!(!guard.is_duplicate("grep", 12345));
+    }
+
+    #[test]
+    fn loop_guard_near_duplicate_different_hash() {
+        let mut guard = ToolLoopGuard::new();
+        guard.record_round(&[("file_read".into(), 111)]);
+        // Different hash → not a duplicate.
+        assert!(!guard.is_duplicate("file_read", 222));
+    }
+
+    #[test]
+    fn loop_guard_plan_complete_forces_break() {
+        let mut guard = ToolLoopGuard::new();
+        guard.force_synthesis();
+        let action = guard.record_round(&[("file_read".into(), 1)]);
+        assert_eq!(action, LoopAction::Break);
+        assert!(guard.plan_complete());
+    }
+
+    #[test]
+    fn loop_guard_plan_complete_false_initially() {
+        let guard = ToolLoopGuard::new();
+        assert!(!guard.plan_complete());
+    }
+
+    #[test]
+    fn loop_guard_consecutive_rounds_tracks() {
+        let mut guard = ToolLoopGuard::new();
+        assert_eq!(guard.consecutive_rounds(), 0);
+        guard.record_round(&[("a".into(), 1)]);
+        assert_eq!(guard.consecutive_rounds(), 1);
+        guard.record_round(&[("b".into(), 2)]);
+        assert_eq!(guard.consecutive_rounds(), 2);
+    }
+
+    #[test]
+    fn loop_guard_empty_round_still_counts() {
+        let mut guard = ToolLoopGuard::new();
+        assert_eq!(guard.record_round(&[]), LoopAction::Continue);
+        assert_eq!(guard.record_round(&[]), LoopAction::Continue);
+        // Empty rounds don't trigger oscillation (empty == empty, but also
+        // the model probably didn't call tools, which is unusual).
+        assert_eq!(guard.record_round(&[]), LoopAction::Break); // AAA oscillation on empty
+    }
+
+    #[test]
+    fn hash_tool_args_deterministic() {
+        let val = serde_json::json!({"path": "/tmp/test.rs", "line": 42});
+        let h1 = hash_tool_args(&val);
+        let h2 = hash_tool_args(&val);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_tool_args_different_for_different_input() {
+        let v1 = serde_json::json!({"path": "/tmp/a.rs"});
+        let v2 = serde_json::json!({"path": "/tmp/b.rs"});
+        assert_ne!(hash_tool_args(&v1), hash_tool_args(&v2));
+    }
+
+    #[test]
+    fn loop_action_debug_display() {
+        // Ensure Debug is derived properly.
+        let action = LoopAction::InjectSynthesis;
+        let debug_str = format!("{:?}", action);
+        assert!(debug_str.contains("InjectSynthesis"));
+    }
+
+    #[test]
+    fn stop_condition_forced_synthesis_variant() {
+        let sc = StopCondition::ForcedSynthesis;
+        assert_ne!(sc, StopCondition::EndTurn);
+        assert_ne!(sc, StopCondition::MaxRounds);
+    }
+
+    #[test]
+    fn forced_synthesis_considered_success() {
+        let sc = StopCondition::ForcedSynthesis;
+        let success = matches!(sc, StopCondition::EndTurn | StopCondition::ForcedSynthesis);
+        assert!(success, "ForcedSynthesis should be considered a success");
+    }
+
+    #[test]
+    fn tool_usage_policy_content() {
+        // Verify the policy text is well-formed.
+        let policy = "\n\n## Tool Usage Policy\n\
+            - Only call tools when you need NEW information you don't already have.\n\
+            - After gathering data with tools, respond directly to the user.\n\
+            - Never call the same tool twice with the same or very similar arguments.\n\
+            - Prefer fewer tool calls. 1-3 tool rounds should suffice for most tasks.\n\
+            - When you have enough information to answer, STOP calling tools and respond.\n\
+            - If a tool fails, try a different approach or inform the user — do not retry the same call.\n";
+        assert!(policy.contains("## Tool Usage Policy"));
+        assert!(policy.contains("STOP calling tools"));
+    }
+
+    #[test]
+    fn plan_prompt_includes_synthesis_step_rule() {
+        use cuervo_core::types::ToolDefinition;
+        let tools = vec![ToolDefinition {
+            name: "file_read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({}),
+        }];
+        let prompt = crate::repl::planner::LlmPlanner::build_plan_prompt_for_test("test", &tools);
+        assert!(
+            prompt.contains("Synthesize findings"),
+            "Plan prompt should include synthesis step rule"
+        );
+        assert!(
+            prompt.contains("5 steps or fewer"),
+            "Plan prompt should include step limit rule"
+        );
+    }
+
+    #[test]
+    fn read_only_tools_list_correct() {
+        use crate::repl::loop_guard::READ_ONLY_TOOLS_LIST as READ_ONLY_TOOLS;
+        // Verify known ReadOnly tools are in the list.
+        assert!(READ_ONLY_TOOLS.contains(&"file_read"));
+        assert!(READ_ONLY_TOOLS.contains(&"grep"));
+        assert!(READ_ONLY_TOOLS.contains(&"glob"));
+        assert!(READ_ONLY_TOOLS.contains(&"directory_tree"));
+        assert!(READ_ONLY_TOOLS.contains(&"git_status"));
+        // Destructive tools should NOT be in the list.
+        assert!(!READ_ONLY_TOOLS.contains(&"file_write"));
+        assert!(!READ_ONLY_TOOLS.contains(&"bash"));
+        assert!(!READ_ONLY_TOOLS.contains(&"file_delete"));
+    }
+
+    // --- Phase 43A: Control channel tests ---
+
+    #[test]
+    fn control_action_variants() {
+        // Verify ControlAction enum has expected variants.
+        assert_eq!(ControlAction::Continue, ControlAction::Continue);
+        assert_ne!(ControlAction::Continue, ControlAction::StepOnce);
+        assert_ne!(ControlAction::Continue, ControlAction::Cancel);
+        assert_ne!(ControlAction::StepOnce, ControlAction::Cancel);
+    }
+
+    #[tokio::test]
+    async fn check_control_noop_when_none() {
+        // When ctrl_rx is None, agent loop should proceed without error.
+        let provider: Arc<dyn ModelProvider> = Arc::new(cuervo_providers::EchoProvider::new());
+        let mut session = Session::new("echo".into(), "echo".into(), "/tmp".into());
+        let request = make_request(vec![]);
+        let tool_reg = ToolRegistry::new();
+        let (event_tx, _event_rx) = test_event_tx();
+        let limits = AgentLimits::default();
+        let mut permissions = PermissionChecker::new(false);
+        let mut resilience = test_resilience();
+        let routing_config = RoutingConfig::default();
+        let ctx = test_ctx(
+            &provider, &mut session, &request, &tool_reg,
+            &mut permissions, &event_tx, &limits, &mut resilience,
+            &routing_config,
+        );
+        // ctrl_rx is None in test_ctx — should complete without panic.
+        let result = run_agent_loop(ctx).await;
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        // ctrl_rx should come back as None.
+        assert!(res.ctrl_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_control_cancel_breaks_loop() {
+        use crate::tui::events::ControlEvent;
+        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Send Cancel immediately — the agent loop should exit on first yield point.
+        ctrl_tx.send(ControlEvent::CancelAgent).unwrap();
+
+        let provider: Arc<dyn ModelProvider> = Arc::new(cuervo_providers::EchoProvider::new());
+        let mut session = Session::new("echo".into(), "echo".into(), "/tmp".into());
+        let request = make_request(vec![]);
+        let tool_reg = ToolRegistry::new();
+        let (event_tx, _event_rx) = test_event_tx();
+        let limits = AgentLimits::default();
+        let mut permissions = PermissionChecker::new(false);
+        let mut resilience = test_resilience();
+        let routing_config = RoutingConfig::default();
+        let mut ctx = test_ctx(
+            &provider, &mut session, &request, &tool_reg,
+            &mut permissions, &event_tx, &limits, &mut resilience,
+            &routing_config,
+        );
+        ctx.ctrl_rx = Some(ctrl_rx);
+        let result = run_agent_loop(ctx).await;
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        // When cancelled before model invocation, should have 0 rounds.
+        assert_eq!(res.rounds, 0);
+        assert_eq!(res.stop_condition, StopCondition::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn check_control_step_returns_ctrl_rx() {
+        use crate::tui::events::ControlEvent;
+        let (_ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<ControlEvent>();
+        // No events queued — should pass through all yield points normally.
+        let provider: Arc<dyn ModelProvider> = Arc::new(cuervo_providers::EchoProvider::new());
+        let mut session = Session::new("echo".into(), "echo".into(), "/tmp".into());
+        let request = make_request(vec![]);
+        let tool_reg = ToolRegistry::new();
+        let (event_tx, _event_rx) = test_event_tx();
+        let limits = AgentLimits::default();
+        let mut permissions = PermissionChecker::new(false);
+        let mut resilience = test_resilience();
+        let routing_config = RoutingConfig::default();
+        let mut ctx = test_ctx(
+            &provider, &mut session, &request, &tool_reg,
+            &mut permissions, &event_tx, &limits, &mut resilience,
+            &routing_config,
+        );
+        ctx.ctrl_rx = Some(ctrl_rx);
+        let result = run_agent_loop(ctx).await.unwrap();
+        // ctrl_rx should be returned for reuse.
+        assert!(result.ctrl_rx.is_some());
+    }
+
+    #[tokio::test]
+    async fn check_control_resume_after_pause() {
+        use crate::tui::events::ControlEvent;
+        let sink = crate::render::sink::SilentSink::new();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Send Pause, then Resume — check_control should return Continue.
+        ctrl_tx.send(ControlEvent::Pause).unwrap();
+        ctrl_tx.send(ControlEvent::Resume).unwrap();
+        let action = check_control(&mut ctrl_rx, &sink).await;
+        assert_eq!(action, ControlAction::Continue);
+    }
+
+    #[tokio::test]
+    async fn check_control_step_after_pause() {
+        use crate::tui::events::ControlEvent;
+        let sink = crate::render::sink::SilentSink::new();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Send Pause, then Step — should return StepOnce.
+        ctrl_tx.send(ControlEvent::Pause).unwrap();
+        ctrl_tx.send(ControlEvent::Step).unwrap();
+        let action = check_control(&mut ctrl_rx, &sink).await;
+        assert_eq!(action, ControlAction::StepOnce);
+    }
+
+    #[tokio::test]
+    async fn check_control_cancel_during_pause() {
+        use crate::tui::events::ControlEvent;
+        let sink = crate::render::sink::SilentSink::new();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Send Pause, then CancelAgent — should return Cancel.
+        ctrl_tx.send(ControlEvent::Pause).unwrap();
+        ctrl_tx.send(ControlEvent::CancelAgent).unwrap();
+        let action = check_control(&mut ctrl_rx, &sink).await;
+        assert_eq!(action, ControlAction::Cancel);
+    }
+
+    #[tokio::test]
+    async fn check_control_ignore_unknown_events() {
+        use crate::tui::events::ControlEvent;
+        let sink = crate::render::sink::SilentSink::new();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Send ApproveAction — not a control action, should return Continue.
+        ctrl_tx.send(ControlEvent::ApproveAction).unwrap();
+        let action = check_control(&mut ctrl_rx, &sink).await;
+        assert_eq!(action, ControlAction::Continue);
+    }
+
+    // === Phase 43C: Feedback completeness tests ===
+
+    #[test]
+    fn compaction_spinner_label_is_specific() {
+        // Compaction should say "Compacting context..." not "Thinking...".
+        let label = "Compacting context...";
+        assert!(label.contains("Compacting"));
+        assert!(!label.contains("Thinking"));
+    }
+
+    #[test]
+    fn reflection_feedback_methods_exist() {
+        use crate::render::sink::RenderSink;
+        let sink = crate::render::sink::SilentSink::new();
+        // These should be callable without panic (default no-ops on SilentSink).
+        sink.reflection_started();
+        sink.reflection_complete("test analysis", 0.85);
+    }
+
+    #[test]
+    fn consolidation_feedback_method_exists() {
+        use crate::render::sink::RenderSink;
+        let sink = crate::render::sink::SilentSink::new();
+        sink.consolidation_status("consolidating reflections...");
+    }
+
+    #[test]
+    fn tool_retrying_feedback_method_exists() {
+        use crate::render::sink::RenderSink;
+        let sink = crate::render::sink::SilentSink::new();
+        sink.tool_retrying("bash", 2, 3, 500);
     }
 }

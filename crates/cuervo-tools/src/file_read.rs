@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -5,20 +7,16 @@ use cuervo_core::error::{CuervoError, Result};
 use cuervo_core::traits::Tool;
 use cuervo_core::types::{PermissionLevel, ToolInput, ToolOutput};
 
-use crate::path_security;
+use crate::fs_service::FsService;
 
 /// Read the contents of a file.
 pub struct FileReadTool {
-    allowed_dirs: Vec<std::path::PathBuf>,
-    blocked_patterns: Vec<String>,
+    fs: Arc<FsService>,
 }
 
 impl FileReadTool {
-    pub fn new(allowed_dirs: Vec<std::path::PathBuf>, blocked_patterns: Vec<String>) -> Self {
-        Self {
-            allowed_dirs,
-            blocked_patterns,
-        }
+    pub fn new(fs: Arc<FsService>) -> Self {
+        Self { fs }
     }
 }
 
@@ -41,38 +39,35 @@ impl Tool for FileReadTool {
             .as_str()
             .ok_or_else(|| CuervoError::InvalidInput("file_read requires 'path' string".into()))?;
 
-        let resolved = path_security::resolve_and_validate(
-            path_str,
-            &input.working_directory,
-            &self.allowed_dirs,
-            &self.blocked_patterns,
-        )?;
-
-        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-            CuervoError::ToolExecutionFailed {
-                tool: "file_read".into(),
-                message: format!("failed to read {}: {e}", resolved.display()),
-            }
-        })?;
+        let resolved = self.fs.resolve_path(path_str, &input.working_directory)?;
 
         let offset = input.arguments["offset"].as_u64().unwrap_or(0) as usize;
         let limit = input.arguments["limit"].as_u64().unwrap_or(0) as usize;
 
+        // Use streaming read_lines when offset/limit specified, full read otherwise.
+        if offset > 0 || limit > 0 {
+            let (numbered, total) = self.fs.read_lines(&resolved, offset, limit).await?;
+            return Ok(ToolOutput {
+                tool_use_id: input.tool_use_id,
+                content: numbered,
+                is_error: false,
+                metadata: Some(json!({ "total_lines": total })),
+            });
+        }
+
+        let content = self.fs.read_to_string(&resolved).await?;
+
         // Count total lines without collecting into Vec.
         let total = content.lines().count();
 
-        // Iterator-based skip/take — avoids allocating Vec<&str> of ALL lines.
-        let start = if offset > 0 { offset.min(total) } else { 0 };
-        let take_n = if limit > 0 { limit } else { total };
-
         // Build numbered output directly without intermediate Vec.
         let mut numbered = String::new();
-        for (i, line) in content.lines().skip(start).take(take_n).enumerate() {
+        for (i, line) in content.lines().enumerate() {
             if i > 0 {
                 numbered.push('\n');
             }
             use std::fmt::Write;
-            let _ = write!(numbered, "{:>6}\t{}", start + i + 1, line);
+            let _ = write!(numbered, "{:>6}\t{}", i + 1, line);
         }
 
         Ok(ToolOutput {
@@ -108,10 +103,11 @@ impl Tool for FileReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_service::FsService;
     use tempfile::TempDir;
 
     fn tool() -> FileReadTool {
-        FileReadTool::new(vec![], vec![])
+        FileReadTool::new(Arc::new(FsService::new(vec![], vec![])))
     }
 
     fn make_input(dir: &str, args: serde_json::Value) -> ToolInput {
@@ -173,7 +169,7 @@ mod tests {
         let file = dir.path().join(".env");
         std::fs::write(&file, "SECRET=abc").unwrap();
 
-        let t = FileReadTool::new(vec![], vec![".env".into()]);
+        let t = FileReadTool::new(Arc::new(FsService::new(vec![], vec![".env".into()])));
         let input = make_input(dir.path().to_str().unwrap(), json!({ "path": ".env" }));
         let result = t.execute(input).await;
         assert!(result.is_err());

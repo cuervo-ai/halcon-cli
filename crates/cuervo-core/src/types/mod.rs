@@ -10,6 +10,8 @@ pub mod phase14;
 mod session;
 mod tool;
 pub mod trace_context;
+pub mod reasoning;
+pub mod structured_task;
 pub mod validation;
 
 pub use agent::*;
@@ -23,4 +25,6 @@ pub use orchestrator::*;
 pub use phase14::*;
 pub use session::*;
 pub use tool::*;
+pub use reasoning::*;
+pub use structured_task::*;
 pub use trace_context::*;

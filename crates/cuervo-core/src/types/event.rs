@@ -160,6 +160,54 @@ pub enum EventPayload {
         round: usize,
         reason: Option<String>,
     },
+    TaskCreated {
+        task_id: Uuid,
+        title: String,
+        plan_id: Option<Uuid>,
+    },
+    TaskStatusChanged {
+        task_id: Uuid,
+        from: String,
+        to: String,
+        retry_count: u32,
+    },
+    TaskCompleted {
+        task_id: Uuid,
+        duration_ms: u64,
+        artifact_count: usize,
+        cost_usd: f64,
+    },
+    TaskFailed {
+        task_id: Uuid,
+        error: String,
+        retry_eligible: bool,
+        retry_count: u32,
+    },
+    ReasoningStarted {
+        query_hash: String,
+        complexity: String,
+        task_type: String,
+    },
+    StrategySelected {
+        strategy: String,
+        confidence: f64,
+        task_type: String,
+    },
+    EvaluationCompleted {
+        score: f64,
+        success: bool,
+        strategy: String,
+    },
+    ExperienceRecorded {
+        task_type: String,
+        strategy: String,
+        score: f64,
+    },
+    ReasoningRetry {
+        attempt: u32,
+        previous_score: f64,
+        new_strategy: String,
+    },
 }
 
 /// Action taken when PII is detected.
@@ -169,4 +217,158 @@ pub enum PiiAction {
     Redacted,
     Blocked,
     Warned,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_created_serde_roundtrip() {
+        let payload = EventPayload::TaskCreated {
+            task_id: Uuid::new_v4(),
+            title: "Read config file".into(),
+            plan_id: Some(Uuid::new_v4()),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"task_created\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::TaskCreated { ref title, .. } if title == "Read config file"));
+    }
+
+    #[test]
+    fn task_status_changed_serde_roundtrip() {
+        let payload = EventPayload::TaskStatusChanged {
+            task_id: Uuid::new_v4(),
+            from: "Ready".into(),
+            to: "Running".into(),
+            retry_count: 1,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"task_status_changed\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::TaskStatusChanged { retry_count: 1, .. }));
+    }
+
+    #[test]
+    fn task_completed_serde_roundtrip() {
+        let payload = EventPayload::TaskCompleted {
+            task_id: Uuid::new_v4(),
+            duration_ms: 1234,
+            artifact_count: 2,
+            cost_usd: 0.005,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"task_completed\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::TaskCompleted { duration_ms: 1234, artifact_count: 2, .. }));
+    }
+
+    #[test]
+    fn task_failed_serde_roundtrip() {
+        let payload = EventPayload::TaskFailed {
+            task_id: Uuid::new_v4(),
+            error: "file not found".into(),
+            retry_eligible: true,
+            retry_count: 2,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"task_failed\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::TaskFailed { retry_eligible: true, retry_count: 2, .. }));
+    }
+
+    #[test]
+    fn existing_event_still_deserializes() {
+        // Verify backward compatibility: pre-existing variant still works.
+        let payload = EventPayload::ToolExecuted {
+            tool: "bash".into(),
+            permission: PermissionLevel::Destructive,
+            duration_ms: 500,
+            success: true,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::ToolExecuted { ref tool, success: true, .. } if tool == "bash"));
+    }
+
+    #[test]
+    fn task_created_no_plan_id() {
+        let payload = EventPayload::TaskCreated {
+            task_id: Uuid::new_v4(),
+            title: "Standalone task".into(),
+            plan_id: None,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"plan_id\":null"));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::TaskCreated { plan_id: None, .. }));
+    }
+
+    // --- Phase 40: Reasoning engine event tests ---
+
+    #[test]
+    fn reasoning_started_serde_roundtrip() {
+        let payload = EventPayload::ReasoningStarted {
+            query_hash: "abc123".into(),
+            complexity: "Moderate".into(),
+            task_type: "CodeModification".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"reasoning_started\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::ReasoningStarted { ref complexity, .. } if complexity == "Moderate"));
+    }
+
+    #[test]
+    fn strategy_selected_serde_roundtrip() {
+        let payload = EventPayload::StrategySelected {
+            strategy: "PlanExecuteReflect".into(),
+            confidence: 0.85,
+            task_type: "CodeGeneration".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"strategy_selected\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::StrategySelected { confidence, .. } if (confidence - 0.85).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn evaluation_completed_serde_roundtrip() {
+        let payload = EventPayload::EvaluationCompleted {
+            score: 0.78,
+            success: true,
+            strategy: "DirectExecution".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"evaluation_completed\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::EvaluationCompleted { success: true, .. }));
+    }
+
+    #[test]
+    fn experience_recorded_serde_roundtrip() {
+        let payload = EventPayload::ExperienceRecorded {
+            task_type: "Debugging".into(),
+            strategy: "PlanExecuteReflect".into(),
+            score: 0.92,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"experience_recorded\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::ExperienceRecorded { ref task_type, .. } if task_type == "Debugging"));
+    }
+
+    #[test]
+    fn reasoning_retry_serde_roundtrip() {
+        let payload = EventPayload::ReasoningRetry {
+            attempt: 2,
+            previous_score: 0.35,
+            new_strategy: "PlanExecuteReflect".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"type\":\"reasoning_retry\""));
+        let roundtrip: EventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(roundtrip, EventPayload::ReasoningRetry { attempt: 2, .. }));
+    }
 }

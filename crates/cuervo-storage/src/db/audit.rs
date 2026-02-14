@@ -50,6 +50,15 @@ impl Database {
             EventPayload::SubAgentCompleted { .. } => "sub_agent_completed",
             EventPayload::OrchestratorCompleted { .. } => "orchestrator_completed",
             EventPayload::AgentStateChanged { .. } => "agent_state_changed",
+            EventPayload::TaskCreated { .. } => "task_created",
+            EventPayload::TaskStatusChanged { .. } => "task_status_changed",
+            EventPayload::TaskCompleted { .. } => "task_completed",
+            EventPayload::TaskFailed { .. } => "task_failed",
+            EventPayload::ReasoningStarted { .. } => "reasoning_started",
+            EventPayload::StrategySelected { .. } => "strategy_selected",
+            EventPayload::EvaluationCompleted { .. } => "evaluation_completed",
+            EventPayload::ExperienceRecorded { .. } => "experience_recorded",
+            EventPayload::ReasoningRetry { .. } => "reasoning_retry",
         };
 
         // Get previous hash from in-memory cache (eliminates 1 SELECT per insert).

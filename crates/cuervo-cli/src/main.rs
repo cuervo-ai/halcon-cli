@@ -73,6 +73,38 @@ enum Commands {
         /// Use 3-zone TUI mode (requires --features tui)
         #[arg(long, env = "CUERVO_TUI")]
         tui: bool,
+
+        /// Enable adaptive reasoning engine
+        #[arg(long, env = "CUERVO_REASONING")]
+        reasoning: bool,
+
+        /// Enable multi-agent orchestration
+        #[arg(long, env = "CUERVO_ORCHESTRATE")]
+        orchestrate: bool,
+
+        /// Enable structured task framework
+        #[arg(long, env = "CUERVO_TASKS")]
+        tasks: bool,
+
+        /// Enable self-improvement reflexion loop
+        #[arg(long, env = "CUERVO_REFLEXION")]
+        reflexion: bool,
+
+        /// Show session metrics on exit
+        #[arg(long)]
+        metrics: bool,
+
+        /// Export execution timeline as JSON on exit
+        #[arg(long)]
+        timeline: bool,
+
+        /// Enable all advanced features
+        #[arg(long)]
+        full: bool,
+
+        /// Expert mode: show full agent feedback (model selection, caching, compaction, reasoning)
+        #[arg(long, env = "CUERVO_EXPERT")]
+        expert: bool,
     },
 
     /// Manage configuration
@@ -280,8 +312,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| config.general.default_model.clone());
 
     match cli.command {
-        Some(Commands::Chat { prompt, resume, tui }) => {
-            commands::chat::run(&config, &provider, &model, prompt, resume, cli.no_banner, tui, explicit_model).await
+        Some(Commands::Chat { prompt, resume, tui, reasoning, orchestrate, tasks, reflexion, metrics, timeline, full, expert }) => {
+            commands::chat::run(
+                &config, &provider, &model, prompt, resume, cli.no_banner, tui, explicit_model,
+                commands::chat::FeatureFlags { reasoning, orchestrate, tasks, reflexion, metrics, timeline, full, expert },
+            ).await
         }
         Some(Commands::Config { action }) => match action {
             ConfigAction::Show => commands::config::show(&config),
@@ -328,7 +363,10 @@ async fn main() -> Result<()> {
         }
         None => {
             // Default: start interactive chat
-            commands::chat::run(&config, &provider, &model, None, None, cli.no_banner, false, explicit_model).await
+            commands::chat::run(
+                &config, &provider, &model, None, None, cli.no_banner, false, explicit_model,
+                commands::chat::FeatureFlags::default(),
+            ).await
         }
     }
 }

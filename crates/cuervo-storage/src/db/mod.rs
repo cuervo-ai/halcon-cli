@@ -8,12 +8,14 @@ mod audit;
 mod cache_repo;
 mod checkpoints;
 mod episodes;
+pub mod experience;
 mod memories;
 mod metrics_repo;
 mod plans;
 mod policies;
 mod resilience_repo;
 mod sessions;
+pub mod structured_tasks;
 mod traces;
 
 use std::path::{Path, PathBuf};
@@ -30,6 +32,7 @@ pub use agent_tasks::AgentTaskRow;
 pub use checkpoints::SessionCheckpoint;
 pub use memories::{blob_to_f32_vec, cosine_similarity};
 pub use plans::PlanStepRow;
+pub use structured_tasks::StructuredTaskRow;
 
 /// SQLite database handle for Cuervo CLI.
 ///

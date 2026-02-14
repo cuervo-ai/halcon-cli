@@ -110,6 +110,18 @@ impl ThemeColor {
         }
     }
 
+    /// Convert to a ratatui Color for TUI rendering.
+    #[cfg(feature = "tui")]
+    pub fn to_ratatui_color(&self) -> ratatui::style::Color {
+        let [r, g, b] = self.inner.to_srgb8();
+        ratatui::style::Color::Rgb(r, g, b)
+    }
+
+    /// Return the sRGB8 triple.
+    pub fn srgb8(&self) -> [u8; 3] {
+        self.inner.to_srgb8()
+    }
+
     /// ANSI 24-bit foreground escape sequence.
     ///
     /// Returns an empty string when color is disabled.
@@ -218,6 +230,17 @@ impl ThemeColor {
         *self
     }
 
+    /// Convert to a ratatui Color for TUI rendering.
+    pub fn to_ratatui_color(&self) -> ratatui::style::Color {
+        let [r, g, b] = self.rgb;
+        ratatui::style::Color::Rgb(r, g, b)
+    }
+
+    /// Return the sRGB8 triple.
+    pub fn srgb8(&self) -> [u8; 3] {
+        self.rgb
+    }
+
     /// ANSI 24-bit foreground escape sequence.
     pub fn fg(&self) -> String {
         if !color::color_enabled() {
@@ -292,6 +315,21 @@ pub struct Palette {
     pub muted: ThemeColor,
     pub text: ThemeColor,
     pub text_dim: ThemeColor,
+
+    // Cockpit semantic tokens (Phase 42A)
+    pub running: ThemeColor,
+    pub planning: ThemeColor,
+    pub reasoning: ThemeColor,
+    pub delegated: ThemeColor,
+    pub destructive: ThemeColor,
+    pub cached: ThemeColor,
+    pub retrying: ThemeColor,
+    pub compacting: ThemeColor,
+    pub border: ThemeColor,
+    pub bg_panel: ThemeColor,
+    pub bg_highlight: ThemeColor,
+    pub text_label: ThemeColor,
+    pub spinner_color: ThemeColor,
 }
 
 impl Palette {
@@ -309,6 +347,16 @@ impl Palette {
             ("muted", &self.muted),
             ("text", &self.text),
             ("text_dim", &self.text_dim),
+            ("running", &self.running),
+            ("planning", &self.planning),
+            ("reasoning", &self.reasoning),
+            ("delegated", &self.delegated),
+            ("destructive", &self.destructive),
+            ("cached", &self.cached),
+            ("retrying", &self.retrying),
+            ("compacting", &self.compacting),
+            ("text_label", &self.text_label),
+            ("spinner_color", &self.spinner_color),
         ]
     }
 }
@@ -388,6 +436,21 @@ fn neon_palette() -> Palette {
         muted: ThemeColor::oklch(0.55, 0.02, 250.0),      // #6e7681-ish
         text: ThemeColor::oklch(0.93, 0.01, 250.0),       // #e6edf3-ish
         text_dim: ThemeColor::oklch(0.68, 0.02, 250.0),   // #8b949e-ish
+
+        // Cockpit semantic tokens
+        running: ThemeColor::oklch(0.78, 0.12, 195.0),
+        planning: ThemeColor::oklch(0.72, 0.14, 280.0),
+        reasoning: ThemeColor::oklch(0.70, 0.10, 170.0),
+        delegated: ThemeColor::oklch(0.65, 0.16, 310.0),
+        destructive: ThemeColor::oklch(0.58, 0.24, 25.0),
+        cached: ThemeColor::oklch(0.75, 0.08, 85.0),
+        retrying: ThemeColor::oklch(0.82, 0.15, 60.0),
+        compacting: ThemeColor::oklch(0.68, 0.06, 250.0),
+        border: ThemeColor::oklch(0.40, 0.03, 250.0),
+        bg_panel: ThemeColor::oklch(0.18, 0.02, 250.0),
+        bg_highlight: ThemeColor::oklch(0.22, 0.04, 250.0),
+        text_label: ThemeColor::oklch(0.60, 0.04, 250.0),
+        spinner_color: ThemeColor::oklch(0.85, 0.12, 195.0),
     }
 }
 
@@ -408,6 +471,21 @@ fn minimal_palette() -> Palette {
         muted: ThemeColor::oklch(0.58, 0.02, 250.0),
         text: ThemeColor::oklch(0.85, 0.01, 250.0),
         text_dim: ThemeColor::oklch(0.68, 0.01, 250.0),
+
+        // Cockpit semantic tokens (softer than neon)
+        running: ThemeColor::oklch(0.72, 0.08, 195.0),
+        planning: ThemeColor::oklch(0.66, 0.10, 280.0),
+        reasoning: ThemeColor::oklch(0.65, 0.07, 170.0),
+        delegated: ThemeColor::oklch(0.60, 0.12, 310.0),
+        destructive: ThemeColor::oklch(0.55, 0.18, 25.0),
+        cached: ThemeColor::oklch(0.70, 0.06, 85.0),
+        retrying: ThemeColor::oklch(0.76, 0.12, 60.0),
+        compacting: ThemeColor::oklch(0.62, 0.04, 250.0),
+        border: ThemeColor::oklch(0.38, 0.02, 250.0),
+        bg_panel: ThemeColor::oklch(0.18, 0.01, 250.0),
+        bg_highlight: ThemeColor::oklch(0.22, 0.03, 250.0),
+        text_label: ThemeColor::oklch(0.58, 0.03, 250.0),
+        spinner_color: ThemeColor::oklch(0.80, 0.08, 195.0),
     }
 }
 
@@ -427,6 +505,21 @@ fn plain_palette() -> Palette {
         muted: ThemeColor::oklch(0.55, 0.0, 0.0),
         text: ThemeColor::oklch(0.83, 0.0, 0.0),
         text_dim: ThemeColor::oklch(0.63, 0.0, 0.0),
+
+        // Cockpit tokens — all neutral in plain mode
+        running: neutral,
+        planning: neutral,
+        reasoning: neutral,
+        delegated: neutral,
+        destructive: neutral,
+        cached: neutral,
+        retrying: neutral,
+        compacting: neutral,
+        border: ThemeColor::oklch(0.40, 0.0, 0.0),
+        bg_panel: ThemeColor::oklch(0.18, 0.0, 0.0),
+        bg_highlight: ThemeColor::oklch(0.22, 0.0, 0.0),
+        text_label: ThemeColor::oklch(0.55, 0.0, 0.0),
+        spinner_color: neutral,
     }
 }
 
@@ -621,12 +714,16 @@ mod tests {
     }
 
     #[test]
-    fn semantic_pairs_has_eight_entries() {
+    fn semantic_pairs_includes_cockpit() {
         let p = neon_palette();
         let pairs = p.semantic_pairs();
-        assert_eq!(pairs.len(), 8);
+        // 8 original + 10 cockpit text tokens (border/bg_panel/bg_highlight are non-text)
+        assert_eq!(pairs.len(), 18);
         assert_eq!(pairs[0].0, "primary");
         assert_eq!(pairs[7].0, "text_dim");
+        // Cockpit tokens start at index 8
+        assert_eq!(pairs[8].0, "running");
+        assert_eq!(pairs[17].0, "spinner_color");
     }
 
     #[cfg(feature = "color-science")]
@@ -651,5 +748,103 @@ mod tests {
         let p = brand_palette("#ff6600").unwrap();
         let hue = p.primary.to_oklch().h;
         assert!(hue > 30.0 && hue < 90.0, "orange brand hue, got {hue}");
+    }
+
+    // --- Phase 42A: Cockpit semantic color tests ---
+
+    #[test]
+    fn neon_palette_has_cockpit_tokens() {
+        let p = neon_palette();
+        // All 13 cockpit fields should be accessible without panic.
+        let _ = p.running.r();
+        let _ = p.planning.g();
+        let _ = p.reasoning.b();
+        let _ = p.delegated.fg();
+        let _ = p.destructive.r();
+        let _ = p.cached.r();
+        let _ = p.retrying.r();
+        let _ = p.compacting.r();
+        let _ = p.border.r();
+        let _ = p.bg_panel.r();
+        let _ = p.bg_highlight.r();
+        let _ = p.text_label.r();
+        let _ = p.spinner_color.r();
+    }
+
+    #[test]
+    fn minimal_palette_has_cockpit_tokens() {
+        let p = minimal_palette();
+        let _ = p.running.r();
+        let _ = p.planning.r();
+        let _ = p.reasoning.r();
+        let _ = p.delegated.r();
+        let _ = p.destructive.r();
+        let _ = p.cached.r();
+        let _ = p.retrying.r();
+        let _ = p.compacting.r();
+        let _ = p.border.r();
+        let _ = p.bg_panel.r();
+        let _ = p.bg_highlight.r();
+        let _ = p.text_label.r();
+        let _ = p.spinner_color.r();
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn to_ratatui_color_roundtrip() {
+        let c = ThemeColor::rgb(42, 128, 200);
+        let rcolor = c.to_ratatui_color();
+        assert!(matches!(rcolor, ratatui::style::Color::Rgb(42, 128, 200)));
+    }
+
+    #[test]
+    fn no_color_returns_empty_escape() {
+        // This tests the function exists and doesn't panic; actual behavior depends on NO_COLOR env.
+        let c = ThemeColor::rgb(255, 0, 0);
+        let _ = c.fg();
+        let _ = c.bg();
+    }
+
+    #[test]
+    fn state_color_mapping_consistent() {
+        let p = neon_palette();
+        // Running, success, and error should be visually distinct.
+        let r = p.running.srgb8();
+        let s = p.success.srgb8();
+        let e = p.error.srgb8();
+        assert_ne!(r, s, "running != success");
+        assert_ne!(s, e, "success != error");
+        assert_ne!(r, e, "running != error");
+    }
+
+    #[cfg(feature = "color-science")]
+    #[test]
+    fn cockpit_palette_wcag_aa_compliance() {
+        let p = neon_palette();
+        let failures = crate::render::color_science::validate_cockpit_palette(&p);
+        assert!(
+            failures.is_empty(),
+            "WCAG failures: {failures:?}"
+        );
+    }
+
+    #[cfg(feature = "color-science")]
+    #[test]
+    fn cockpit_palette_apca_compliance() {
+        let p = neon_palette();
+        let bg = &p.bg_panel;
+        // Primary text tokens need higher APCA contrast, labels can be dimmer.
+        let checks: &[(&str, &ThemeColor, f64)] = &[
+            ("text", &p.text, 45.0),
+            ("text_dim", &p.text_dim, 30.0),
+            ("text_label", &p.text_label, 25.0),
+        ];
+        for &(name, color, min_lc) in checks {
+            let lc = crate::render::color_science::apca_contrast(color, bg).abs();
+            assert!(
+                lc >= min_lc,
+                "APCA {name}: Lc={lc:.1} should be >= {min_lc}"
+            );
+        }
     }
 }

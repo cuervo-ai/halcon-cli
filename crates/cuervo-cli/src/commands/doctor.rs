@@ -1092,6 +1092,7 @@ mod tests {
                 command: "echo".to_string(),
                 args: vec![],
                 env: std::collections::HashMap::new(),
+                tool_permissions: std::collections::HashMap::new(),
             },
         );
         config.mcp.max_reconnect_attempts = 5;
@@ -1278,13 +1279,13 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_section_disabled_by_default() {
+    fn model_selection_section_enabled_by_default() {
         let config = AppConfig::default();
         let mut out = Vec::new();
         print_model_selection_section(&config, &mut out);
         let output = String::from_utf8(out).unwrap();
         assert!(output.contains("Model Selection"));
-        assert!(output.contains("disabled"));
+        assert!(output.contains("enabled"));
         assert!(output.contains("Strategy"));
         assert!(output.contains("Budget cap"));
         assert!(output.contains("unlimited"));

@@ -20,10 +20,16 @@ git2 = { workspace = true }
 regex = { workspace = true }
 glob = { workspace = true }
 reqwest = { workspace = true }
+futures = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "fs_bench"
+harness = false

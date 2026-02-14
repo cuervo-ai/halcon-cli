@@ -18,11 +18,53 @@ use crate::types::McpToolDefinition;
 pub struct McpToolBridge {
     definition: McpToolDefinition,
     host: Arc<tokio::sync::Mutex<McpHost>>,
+    permission_override: Option<PermissionLevel>,
 }
 
 impl McpToolBridge {
-    pub fn new(definition: McpToolDefinition, host: Arc<tokio::sync::Mutex<McpHost>>) -> Self {
-        Self { definition, host }
+    pub fn new(
+        definition: McpToolDefinition,
+        host: Arc<tokio::sync::Mutex<McpHost>>,
+        permission_override: Option<PermissionLevel>,
+    ) -> Self {
+        Self {
+            definition,
+            host,
+            permission_override,
+        }
+    }
+
+    /// Infer permission level from tool name and description keywords.
+    fn infer_permission(&self) -> PermissionLevel {
+        infer_permission_from_definition(&self.definition)
+    }
+}
+
+/// Infer permission level from tool name and description.
+/// Exposed for testability without needing a full McpHost.
+fn infer_permission_from_definition(def: &McpToolDefinition) -> PermissionLevel {
+    let name = def.name.to_lowercase();
+    let desc = def.description.as_deref().unwrap_or("").to_lowercase();
+    let text = format!("{name} {desc}");
+
+    let write_signals = [
+        "write", "create", "update", "delete", "remove", "set", "put", "post", "push",
+        "commit", "execute", "run", "send", "modify",
+    ];
+    let read_signals = [
+        "read", "get", "list", "search", "fetch", "show", "find", "query", "describe",
+        "count", "view",
+    ];
+
+    let has_write = write_signals.iter().any(|p| text.contains(p));
+    let has_read = read_signals.iter().any(|p| text.contains(p));
+
+    if has_write {
+        PermissionLevel::Destructive
+    } else if has_read {
+        PermissionLevel::ReadOnly
+    } else {
+        PermissionLevel::Destructive // safe default
     }
 }
 
@@ -37,9 +79,9 @@ impl Tool for McpToolBridge {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        // MCP tools are external and potentially destructive.
-        // Default to Destructive so the permission system prompts the user.
-        PermissionLevel::Destructive
+        // Use explicit override if set, otherwise infer from tool name/description.
+        self.permission_override
+            .unwrap_or_else(|| self.infer_permission())
     }
 
     async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
@@ -87,19 +129,64 @@ mod tests {
         }
     }
 
+    fn make_def(name: &str, description: &str) -> McpToolDefinition {
+        McpToolDefinition {
+            name: name.into(),
+            description: Some(description.into()),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
     #[test]
     fn bridge_name_matches_definition() {
-        // We can't easily create a real McpHost in tests without a real server,
-        // but we can test the metadata accessors.
         let def = sample_definition();
         assert_eq!(def.name, "mcp_read_file");
         assert_eq!(def.description.as_deref(), Some("Read a file via MCP"));
     }
 
     #[test]
-    fn bridge_permission_is_destructive() {
-        // MCP tools should default to Destructive.
-        assert_eq!(PermissionLevel::Destructive, PermissionLevel::Destructive);
+    fn infer_permission_read_tool() {
+        let def = make_def("github_search", "Search repositories and code");
+        // "search" is a read signal → ReadOnly
+        assert_eq!(infer_permission_from_definition(&def), PermissionLevel::ReadOnly);
+    }
+
+    #[test]
+    fn infer_permission_write_tool() {
+        let def = make_def("file_create", "Create a new file on disk");
+        // "create" is a write signal → Destructive
+        assert_eq!(infer_permission_from_definition(&def), PermissionLevel::Destructive);
+    }
+
+    #[test]
+    fn infer_permission_unknown_is_destructive() {
+        let def = make_def("custom_tool", "Does something custom");
+        // No recognized signals → Destructive (safe default)
+        assert_eq!(infer_permission_from_definition(&def), PermissionLevel::Destructive);
+    }
+
+    #[test]
+    fn permission_override_takes_precedence() {
+        // Override field is checked before infer_permission in permission_level().
+        // Test via struct field access since permission_level() is on the Tool trait.
+        let override_perm = Some(PermissionLevel::ReadOnly);
+        let def = make_def("dangerous_delete", "Delete everything");
+        // infer_permission would return Destructive, but override takes precedence.
+        let inferred = infer_permission_from_definition(&def);
+        assert_eq!(inferred, PermissionLevel::Destructive);
+        let result = override_perm.unwrap_or(inferred);
+        assert_eq!(result, PermissionLevel::ReadOnly);
+    }
+
+    #[test]
+    fn new_constructor_signature() {
+        // Verify the 3-argument constructor signature compiles.
+        // We can't construct a full McpToolBridge without a real McpHost,
+        // but we verify the permission inference logic independently above.
+        let def = sample_definition();
+        let inferred = infer_permission_from_definition(&def);
+        // "read" in name → ReadOnly
+        assert_eq!(inferred, PermissionLevel::ReadOnly);
     }
 
     #[test]

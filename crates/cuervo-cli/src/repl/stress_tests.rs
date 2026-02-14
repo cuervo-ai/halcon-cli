@@ -130,6 +130,9 @@ static TEST_SINK: std::sync::LazyLock<SilentSink> = std::sync::LazyLock::new(Sil
 static TEST_PLANNING_CONFIG: std::sync::LazyLock<cuervo_core::types::PlanningConfig> =
     std::sync::LazyLock::new(cuervo_core::types::PlanningConfig::default);
 
+static TEST_ORCH_CONFIG: std::sync::LazyLock<cuervo_core::types::OrchestratorConfig> =
+    std::sync::LazyLock::new(cuervo_core::types::OrchestratorConfig::default);
+
 fn make_tool_registry() -> ToolRegistry {
     let config = ToolsConfig {
         allowed_directories: vec!["/tmp".into(), "/private/tmp".into()],
@@ -193,6 +196,12 @@ fn test_ctx<'a>(
         registry: None,
         episode_id: None,
         planning_config: &*TEST_PLANNING_CONFIG,
+        orchestrator_config: &*TEST_ORCH_CONFIG,
+        tool_selection_enabled: false,
+        task_bridge: None,
+        reasoning_config: None,
+        context_metrics: None,
+        ctrl_rx: None,
     }
 }
 
@@ -563,7 +572,7 @@ fn compaction_protocol_integrity() {
 
 #[test]
 fn tool_failure_tracker_circuit_breaker() {
-    use super::agent::ToolFailureTracker;
+    use super::failure_tracker::ToolFailureTracker;
 
     let mut tracker = ToolFailureTracker::new(3);
 
