@@ -74,10 +74,6 @@ enum Commands {
         #[arg(long, env = "CUERVO_TUI")]
         tui: bool,
 
-        /// Enable adaptive reasoning engine
-        #[arg(long, env = "CUERVO_REASONING")]
-        reasoning: bool,
-
         /// Enable multi-agent orchestration
         #[arg(long, env = "CUERVO_ORCHESTRATE")]
         orchestrate: bool,
@@ -102,7 +98,7 @@ enum Commands {
         #[arg(long)]
         full: bool,
 
-        /// Expert mode: show full agent feedback (model selection, caching, compaction, reasoning)
+        /// Expert mode: show full agent feedback (model selection, caching, compaction)
         #[arg(long, env = "CUERVO_EXPERT")]
         expert: bool,
     },
@@ -312,10 +308,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| config.general.default_model.clone());
 
     match cli.command {
-        Some(Commands::Chat { prompt, resume, tui, reasoning, orchestrate, tasks, reflexion, metrics, timeline, full, expert }) => {
+        Some(Commands::Chat { prompt, resume, tui, orchestrate, tasks, reflexion, metrics, timeline, full, expert }) => {
             commands::chat::run(
                 &config, &provider, &model, prompt, resume, cli.no_banner, tui, explicit_model,
-                commands::chat::FeatureFlags { reasoning, orchestrate, tasks, reflexion, metrics, timeline, full, expert },
+                commands::chat::FeatureFlags { orchestrate, tasks, reflexion, metrics, timeline, full, expert },
             ).await
         }
         Some(Commands::Config { action }) => match action {

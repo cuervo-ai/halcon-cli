@@ -522,30 +522,7 @@ impl Repl {
             }
             commands::InspectTarget::Reasoning => {
                 let _ = writeln!(out, "--- Reasoning Engine ---");
-                let _ = writeln!(out, "Enabled: {}", self.config.reasoning.enabled);
-                if self.config.reasoning.enabled {
-                    let _ = writeln!(out, "Success threshold: {:.2}", self.config.reasoning.success_threshold);
-                    let _ = writeln!(out, "Max retries:       {}", self.config.reasoning.max_retries);
-                    let _ = writeln!(out, "Learning:          {}", self.config.reasoning.learning_enabled);
-                    let _ = writeln!(out, "Exploration (UCB1): {:.2}", self.config.reasoning.exploration_factor);
-                    if let Some(ref engine) = self.reasoning_engine {
-                        let history = engine.history();
-                        let experience = engine.experience();
-                        let _ = writeln!(out, "Session history:   {} queries", history.len());
-                        let _ = writeln!(out, "Experience records: {}", experience.len());
-                        if let Some(last) = history.last() {
-                            let _ = writeln!(out, "Last query:");
-                            let _ = writeln!(out, "  Type:     {:?}", last.analysis.task_type);
-                            let _ = writeln!(out, "  Complex:  {:?}", last.analysis.complexity);
-                            let _ = writeln!(out, "  Strategy: {:?}", last.strategy);
-                            if let Some(ref eval) = last.evaluation {
-                                let _ = writeln!(out, "  Score:    {:.2} ({})", eval.score, if eval.success { "success" } else { "fail" });
-                            }
-                        }
-                    } else {
-                        let _ = writeln!(out, "Engine: not initialized");
-                    }
-                }
+                let _ = writeln!(out, "Reasoning engine has been removed (dead code).");
             }
             commands::InspectTarget::Orchestration => {
                 let _ = writeln!(out, "--- Orchestration ---");

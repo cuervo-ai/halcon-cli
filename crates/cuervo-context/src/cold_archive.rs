@@ -346,18 +346,59 @@ impl ColdArchive {
     }
 
     /// Flush pending entries to disk (call from async context via spawn_blocking).
+    ///
+    /// Uses atomic write-rename pattern to prevent corruption on crash:
+    /// 1. Serialize to temp file `.tmp`
+    /// 2. Fsync temp file
+    /// 3. Rename temp → final (atomic on POSIX)
+    /// 4. Fsync parent directory
+    ///
     /// Returns number of bytes written, or None if no archive path configured.
     pub fn flush_to_disk(&mut self) -> Option<usize> {
         let path = self.archive_path.as_ref()?;
         let data = self.serialize();
-        std::fs::write(path, &data).ok()?;
+
+        // Write to temporary file first.
+        let tmp_path = path.with_extension("tmp");
+        let file = std::fs::File::create(&tmp_path).ok()?;
+
+        // Write data and fsync to ensure durability.
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(&data).ok()?;
+        let file = writer.into_inner().ok()?;
+        file.sync_all().ok()?; // fsync file contents
+        drop(file);
+
+        // Atomic rename (POSIX guarantees atomicity).
+        std::fs::rename(&tmp_path, path).ok()?;
+
+        // Fsync parent directory to persist rename operation.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all(); // Best-effort directory fsync
+            }
+        }
+
         let bytes = data.len();
         self.pending_flush.clear();
         Some(bytes)
     }
 
     /// Load archive from disk file.
+    ///
+    /// Automatically cleans up leftover `.tmp` files from interrupted flushes.
     pub fn load_from_disk(path: &Path, max_entries: usize) -> Option<Self> {
+        // Cleanup: remove orphaned temp file from previous crash (if exists).
+        let tmp_path = path.with_extension("tmp");
+        if tmp_path.exists() {
+            tracing::warn!(
+                "Removing orphaned temp file from interrupted flush: {}",
+                tmp_path.display()
+            );
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+
         let data = std::fs::read(path).ok()?;
         let mut archive = Self::deserialize(&data, max_entries)?;
         archive.archive_path = Some(path.to_path_buf());
@@ -580,6 +621,71 @@ mod tests {
         let mut archive = ColdArchive::new(100);
         archive.store(&make_segment(1, 3, "Content"));
         assert!(archive.flush_to_disk().is_none());
+    }
+
+    // --- Atomic persistence ---
+
+    #[test]
+    fn atomic_flush_no_partial_writes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("archive.l4");
+
+        let mut archive = ColdArchive::with_path(100, path.clone());
+        archive.store(&make_segment(1, 5, "Test data for atomic write"));
+
+        // Flush creates file atomically.
+        archive.flush_to_disk().unwrap();
+
+        // Verify: final file exists, no .tmp leftover.
+        assert!(path.exists());
+        assert!(!path.with_extension("tmp").exists());
+
+        // Verify: file content is valid (can be loaded).
+        let loaded = ColdArchive::load_from_disk(&path, 100);
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn temp_file_cleanup_on_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("archive.l4");
+
+        // Simulate orphaned .tmp file from interrupted flush.
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, b"orphaned data").unwrap();
+        assert!(tmp_path.exists());
+
+        // Also create a valid archive file.
+        let mut archive = ColdArchive::with_path(100, path.clone());
+        archive.store(&make_segment(1, 3, "Valid data"));
+        archive.flush_to_disk().unwrap();
+
+        // Load from disk should clean up the orphaned .tmp file.
+        let loaded = ColdArchive::load_from_disk(&path, 100).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!tmp_path.exists()); // Orphaned .tmp was removed
+    }
+
+    #[test]
+    fn repeated_flush_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("archive.l4");
+
+        let mut archive = ColdArchive::with_path(100, path.clone());
+        archive.store(&make_segment(1, 3, "First flush content"));
+
+        let bytes1 = archive.flush_to_disk().unwrap();
+        assert!(bytes1 > 0);
+
+        // Add more data and flush again.
+        archive.store(&make_segment(4, 6, "Second flush content"));
+        let bytes2 = archive.flush_to_disk().unwrap();
+        assert!(bytes2 > bytes1); // More data = larger file
+
+        // Load and verify both entries present.
+        let loaded = ColdArchive::load_from_disk(&path, 100).unwrap();
+        assert_eq!(loaded.len(), 2);
     }
 
     // --- Compression ---

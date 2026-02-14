@@ -81,8 +81,6 @@ pub struct AgentContext<'a> {
     pub tool_selection_enabled: bool,
     /// Optional structured task bridge (Phase 39). None = disabled (default).
     pub task_bridge: Option<&'a mut super::task_bridge::TaskBridge>,
-    /// Optional reasoning config (Phase 40). None = disabled (default).
-    pub reasoning_config: Option<&'a cuervo_core::types::ReasoningConfig>,
     /// Optional context metrics for assembly observability (Phase 42).
     pub context_metrics: Option<&'a std::sync::Arc<super::context_metrics::ContextMetrics>>,
     /// Optional control channel receiver (Phase 43). TUI sends Pause/Step/Cancel events.
@@ -447,7 +445,6 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         orchestrator_config,
         tool_selection_enabled,
         mut task_bridge,
-        reasoning_config: _reasoning_config,
         context_metrics,
         mut ctrl_rx,
     } = ctx;
@@ -627,6 +624,21 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         0,
                     );
                 }
+                // Pre-execution plan validation to catch invalid tool references early.
+                let validation_warnings = validate_plan(&plan, tool_registry);
+                if !validation_warnings.is_empty() {
+                    tracing::warn!(
+                        warning_count = validation_warnings.len(),
+                        "Plan validation detected issues"
+                    );
+                    for warning in &validation_warnings {
+                        tracing::warn!("{}", warning);
+                        if !silent {
+                            render_sink.warning("plan validation warning", Some(warning));
+                        }
+                    }
+                }
+
                 active_plan = Some(plan);
             }
             Ok(Ok(None)) => {
@@ -710,7 +722,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             );
         }
         // Phase 42: record tool selection metrics.
-        if let Some(ref metrics) = context_metrics {
+        if let Some(metrics) = context_metrics {
             metrics.record_tool_selection(all_tools.len(), selected.len());
         }
         selected
@@ -1079,7 +1091,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         context_pipeline.set_round(round as u32);
         let built_messages = context_pipeline.build_messages();
         // Phase 42: record context assembly metrics.
-        if let Some(ref metrics) = context_metrics {
+        if let Some(metrics) = context_metrics {
             let approx_tokens = built_messages.iter().map(|m| {
                 match &m.content {
                     MessageContent::Text(t) => t.len() / 4,
@@ -2818,6 +2830,39 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     })
 }
 
+/// Validate a plan before execution to catch errors early.
+///
+/// Checks:
+/// - All tools referenced in plan steps exist in the tool registry
+/// - No invalid tool names
+///
+/// Returns list of validation warnings (empty = valid plan).
+fn validate_plan(plan: &ExecutionPlan, tool_registry: &cuervo_tools::ToolRegistry) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Check each step's tool reference.
+    for (idx, step) in plan.steps.iter().enumerate() {
+        if let Some(ref tool_name) = step.tool_name {
+            // Verify tool exists in registry.
+            if tool_registry.get(tool_name).is_none() {
+                warnings.push(format!(
+                    "Step {}: tool '{}' not found in registry ({})",
+                    idx + 1,
+                    tool_name,
+                    step.description
+                ));
+            }
+        }
+    }
+
+    // Check for empty plan (suspicious, but not an error).
+    if plan.steps.is_empty() {
+        warnings.push("Plan has 0 steps — may be a planning failure".to_string());
+    }
+
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2899,7 +2944,6 @@ mod tests {
             orchestrator_config: &*TEST_ORCHESTRATOR_CONFIG,
             tool_selection_enabled: false,
             task_bridge: None,
-            reasoning_config: None,
             context_metrics: None,
             ctrl_rx: None,
         }
@@ -4830,5 +4874,138 @@ mod tests {
         use crate::render::sink::RenderSink;
         let sink = crate::render::sink::SilentSink::new();
         sink.tool_retrying("bash", 2, 3, 500);
+    }
+
+    // === Fix #2: Plan Validation Pre-Execution tests ===
+
+    fn make_validation_plan(steps: Vec<cuervo_core::traits::PlanStep>) -> ExecutionPlan {
+        cuervo_core::traits::ExecutionPlan {
+            plan_id: uuid::Uuid::new_v4(),
+            goal: "Test goal".to_string(),
+            steps,
+            requires_confirmation: false,
+            replan_count: 0,
+            parent_plan_id: None,
+        }
+    }
+
+    #[test]
+    fn validate_plan_all_tools_exist() {
+        let config = cuervo_core::types::ToolsConfig::default();
+        let registry = cuervo_tools::default_registry(&config);
+
+        let plan = make_validation_plan(vec![
+            cuervo_core::traits::PlanStep {
+                description: "Read file".to_string(),
+                tool_name: Some("file_read".to_string()),
+                parallel: false,
+                confidence: 0.9,
+                expected_args: None,
+                outcome: None,
+            },
+            cuervo_core::traits::PlanStep {
+                description: "Run command".to_string(),
+                tool_name: Some("bash".to_string()),
+                parallel: false,
+                confidence: 0.8,
+                expected_args: None,
+                outcome: None,
+            },
+        ]);
+
+        let warnings = validate_plan(&plan, &registry);
+        assert!(warnings.is_empty(), "Valid plan should have no warnings");
+    }
+
+    #[test]
+    fn validate_plan_detects_missing_tool() {
+        let config = cuervo_core::types::ToolsConfig::default();
+        let registry = cuervo_tools::default_registry(&config);
+
+        let plan = make_validation_plan(vec![
+            cuervo_core::traits::PlanStep {
+                description: "Use non-existent tool".to_string(),
+                tool_name: Some("nonexistent_tool".to_string()),
+                parallel: false,
+                confidence: 0.9,
+                expected_args: None,
+                outcome: None,
+            },
+        ]);
+
+        let warnings = validate_plan(&plan, &registry);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("nonexistent_tool"));
+        assert!(warnings[0].contains("not found in registry"));
+    }
+
+    #[test]
+    fn validate_plan_detects_multiple_issues() {
+        let config = cuervo_core::types::ToolsConfig::default();
+        let registry = cuervo_tools::default_registry(&config);
+
+        let plan = make_validation_plan(vec![
+            cuervo_core::traits::PlanStep {
+                description: "First invalid".to_string(),
+                tool_name: Some("tool_one".to_string()),
+                parallel: false,
+                confidence: 0.9,
+                expected_args: None,
+                outcome: None,
+            },
+            cuervo_core::traits::PlanStep {
+                description: "Valid tool".to_string(),
+                tool_name: Some("file_read".to_string()),
+                parallel: false,
+                confidence: 0.8,
+                expected_args: None,
+                outcome: None,
+            },
+            cuervo_core::traits::PlanStep {
+                description: "Second invalid".to_string(),
+                tool_name: Some("tool_two".to_string()),
+                parallel: false,
+                confidence: 0.7,
+                expected_args: None,
+                outcome: None,
+            },
+        ]);
+
+        let warnings = validate_plan(&plan, &registry);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| w.contains("tool_one")));
+        assert!(warnings.iter().any(|w| w.contains("tool_two")));
+    }
+
+    #[test]
+    fn validate_plan_warns_on_empty_steps() {
+        let config = cuervo_core::types::ToolsConfig::default();
+        let registry = cuervo_tools::default_registry(&config);
+
+        let plan = make_validation_plan(vec![]);
+
+        let warnings = validate_plan(&plan, &registry);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("0 steps"));
+    }
+
+    #[test]
+    fn validate_plan_ignores_steps_without_tool() {
+        let config = cuervo_core::types::ToolsConfig::default();
+        let registry = cuervo_tools::default_registry(&config);
+
+        let plan = make_validation_plan(vec![
+            cuervo_core::traits::PlanStep {
+                description: "Think about problem".to_string(),
+                tool_name: None, // No tool specified
+                parallel: false,
+                confidence: 0.9,
+                expected_args: None,
+                outcome: None,
+            },
+        ]);
+
+        let warnings = validate_plan(&plan, &registry);
+        assert!(warnings.is_empty(), "Steps without tools should not generate warnings");
     }
 }

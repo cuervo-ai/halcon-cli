@@ -939,6 +939,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parallel_concurrency_limit_enforced() {
+        let registry = cuervo_tools::default_registry(&Default::default());
+        let (event_tx, _rx) = cuervo_core::event_bus(16);
+        let mut idx = 0u32;
+
+        // Create a large batch (20 tools) with concurrency cap of 10.
+        let batch: Vec<_> = (0..20)
+            .map(|i| make_completed(&format!("t{}", i), "file_read"))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let results = execute_parallel_batch(
+            &batch,
+            &registry,
+            "/tmp",
+            Duration::from_secs(30),
+            &event_tx,
+            None,
+            uuid::Uuid::new_v4(),
+            &mut idx,
+            10, // Concurrency cap of 10
+            &ToolExecutionConfig::default(),
+            &*TEST_SINK,
+        )
+        .await;
+
+        // All 20 tools should complete.
+        assert_eq!(results.len(), 20);
+        // All should have tool_use_ids and results.
+        assert!(results.iter().all(|r| !r.tool_use_id.is_empty()));
+        assert!(results.iter().all(|r| r.tool_name == "file_read"));
+        // Execution should complete (buffer_unordered prevents stall).
+        assert!(start.elapsed().as_secs() < 25);
+    }
+
+    #[tokio::test]
     async fn parallel_concurrency_cap_zero_defaults_to_one() {
         let registry = cuervo_tools::default_registry(&Default::default());
         let (event_tx, _rx) = cuervo_core::event_bus(16);

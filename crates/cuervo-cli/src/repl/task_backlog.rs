@@ -289,7 +289,7 @@ impl TaskBacklog {
                 let all_satisfied = task.depends_on.iter().all(|d| {
                     self.tasks
                         .get(d)
-                        .map_or(false, |t| t.status == StructuredTaskStatus::Completed)
+                        .is_some_and(|t| t.status == StructuredTaskStatus::Completed)
                 });
                 if all_satisfied {
                     if let Some(task) = self.tasks.get_mut(&dep_id) {

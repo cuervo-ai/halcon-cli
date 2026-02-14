@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::orchestrator::OrchestratorConfig;
-use super::reasoning::ReasoningConfig;
 
 /// Severity of a configuration issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,8 +304,6 @@ pub struct AppConfig {
     pub context: ContextConfig,
     #[serde(default)]
     pub task_framework: TaskFrameworkConfig,
-    #[serde(default)]
-    pub reasoning: ReasoningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1614,31 +1611,4 @@ mod tests {
         assert_eq!(config.task_framework.default_max_retries, 2);
     }
 
-    #[test]
-    fn reasoning_config_defaults_in_app_config() {
-        let config = AppConfig::default();
-        assert!(config.reasoning.enabled);
-        assert!((config.reasoning.success_threshold - 0.6).abs() < f64::EPSILON);
-        assert_eq!(config.reasoning.max_retries, 1);
-        assert!(config.reasoning.learning_enabled);
-    }
-
-    #[test]
-    fn reasoning_config_serde_in_app_config() {
-        let mut config = AppConfig::default();
-        config.reasoning.enabled = true;
-        config.reasoning.success_threshold = 0.75;
-        let json = serde_json::to_string(&config.reasoning).unwrap();
-        let roundtrip: super::super::ReasoningConfig = serde_json::from_str(&json).unwrap();
-        assert!(roundtrip.enabled);
-        assert!((roundtrip.success_threshold - 0.75).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn reasoning_config_absent_uses_defaults() {
-        // Simulates loading config TOML that has no [reasoning] section.
-        let config = AppConfig::default();
-        assert!(config.reasoning.enabled);
-        assert!((config.reasoning.exploration_factor - 1.4).abs() < f64::EPSILON);
-    }
 }

@@ -13,7 +13,6 @@ use super::provider_factory;
 /// CLI feature flags that override config.toml settings for a single session.
 #[derive(Debug, Clone, Default)]
 pub struct FeatureFlags {
-    pub reasoning: bool,
     pub orchestrate: bool,
     pub tasks: bool,
     pub reflexion: bool,
@@ -26,9 +25,6 @@ pub struct FeatureFlags {
 impl FeatureFlags {
     /// Apply CLI flag overrides to a mutable config.
     pub fn apply(&self, config: &mut cuervo_core::types::AppConfig) {
-        if self.full || self.reasoning {
-            config.reasoning.enabled = true;
-        }
         if self.full || self.orchestrate {
             config.orchestrator.enabled = true;
         }
@@ -238,25 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn feature_flags_reasoning_ensures_enabled() {
-        let mut config = AppConfig::default();
-        // Default is now true; flag still ensures it stays true.
-        assert!(config.reasoning.enabled);
-        let flags = FeatureFlags { reasoning: true, ..Default::default() };
-        flags.apply(&mut config);
-        assert!(config.reasoning.enabled);
-    }
-
-    #[test]
-    fn feature_flags_reasoning_overrides_disabled_config() {
-        let mut config = AppConfig::default();
-        config.reasoning.enabled = false; // Simulate user disabling in config.toml
-        let flags = FeatureFlags { reasoning: true, ..Default::default() };
-        flags.apply(&mut config);
-        assert!(config.reasoning.enabled, "flag should re-enable reasoning");
-    }
-
-    #[test]
     fn feature_flags_orchestrate_ensures_enabled() {
         let mut config = AppConfig::default();
         assert!(config.orchestrator.enabled);
@@ -288,7 +265,6 @@ mod tests {
         let mut config = AppConfig::default();
         let flags = FeatureFlags { full: true, ..Default::default() };
         flags.apply(&mut config);
-        assert!(config.reasoning.enabled, "full should enable reasoning");
         assert!(config.orchestrator.enabled, "full should enable orchestrator");
         assert!(config.task_framework.enabled, "full should enable task_framework");
         assert!(config.reflexion.enabled, "full should enable reflexion");
@@ -300,7 +276,6 @@ mod tests {
         let orig = config.clone();
         let flags = FeatureFlags::default();
         flags.apply(&mut config);
-        assert_eq!(config.reasoning.enabled, orig.reasoning.enabled);
         assert_eq!(config.orchestrator.enabled, orig.orchestrator.enabled);
         assert_eq!(config.task_framework.enabled, orig.task_framework.enabled);
         assert_eq!(config.reflexion.enabled, orig.reflexion.enabled);

@@ -8,7 +8,6 @@ mod audit;
 mod cache_repo;
 mod checkpoints;
 mod episodes;
-pub mod experience;
 mod memories;
 mod metrics_repo;
 mod plans;

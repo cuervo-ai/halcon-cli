@@ -199,7 +199,6 @@ fn test_ctx<'a>(
         orchestrator_config: &*TEST_ORCH_CONFIG,
         tool_selection_enabled: false,
         task_bridge: None,
-        reasoning_config: None,
         context_metrics: None,
         ctrl_rx: None,
     }

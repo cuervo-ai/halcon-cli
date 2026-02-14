@@ -143,7 +143,6 @@ pub async fn run_replay(
         orchestrator_config: &default_orch_config,
         tool_selection_enabled: false,
         task_bridge: None,
-        reasoning_config: None,
         context_metrics: None,
         ctrl_rx: None,
     };

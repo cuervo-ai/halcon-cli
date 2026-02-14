@@ -540,48 +540,6 @@ impl AsyncDatabase {
             .await
             .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
     }
-
-    // --- Reasoning Experience ---
-
-    pub async fn load_all_experience(
-        &self,
-    ) -> Result<Vec<crate::db::experience::ExperienceRow>> {
-        let db = self.inner.clone();
-        tokio::task::spawn_blocking(move || db.load_all_experience())
-            .await
-            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
-    }
-
-    pub async fn save_experience(
-        &self,
-        task_type: String,
-        strategy: String,
-        avg_score: f64,
-        uses: u32,
-        last_score: f64,
-        last_task_hash: Option<String>,
-    ) -> Result<()> {
-        let db = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
-            db.save_experience(
-                &task_type,
-                &strategy,
-                avg_score,
-                uses,
-                last_score,
-                last_task_hash.as_deref(),
-            )
-        })
-        .await
-        .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
-    }
-
-    pub async fn delete_all_experience(&self) -> Result<u64> {
-        let db = self.inner.clone();
-        tokio::task::spawn_blocking(move || db.delete_all_experience())
-            .await
-            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
-    }
 }
 
 #[cfg(test)]

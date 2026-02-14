@@ -53,7 +53,6 @@ pub mod model_selector;
 pub mod optimizer;
 pub mod orchestrator;
 pub mod permissions;
-pub mod reasoning_engine;
 pub mod planner;
 pub mod planning_source;
 pub mod provenance_tracker;
@@ -67,10 +66,7 @@ pub mod resilience;
 pub mod response_cache;
 pub mod router;
 pub mod speculative;
-pub mod strategy_selector;
-pub mod task_analyzer;
 pub mod task_backlog;
-pub mod task_evaluator;
 pub mod task_bridge;
 pub mod task_scheduler;
 pub mod tool_selector;
@@ -108,8 +104,6 @@ pub struct Repl {
     pub(crate) dry_run_override: Option<cuervo_core::types::DryRunMode>,
     /// Trace step cursor for /step forward/back navigation.
     pub(crate) trace_cursor: Option<(uuid::Uuid, Vec<cuervo_storage::TraceStep>, usize)>,
-    /// Adaptive reasoning engine (enabled by default).
-    pub(crate) reasoning_engine: Option<reasoning_engine::ReasoningEngine>,
     /// Cached execution timeline JSON from the last agent loop (for --timeline flag).
     pub(crate) last_timeline: Option<String>,
     /// Shared context metrics for agent loop observability (Phase 42).
@@ -253,22 +247,6 @@ impl Repl {
             resilience.register_provider(name);
         }
 
-        // Initialize reasoning engine if enabled.
-        let reasoning_engine = if config.reasoning.enabled {
-            let mut engine = reasoning_engine::ReasoningEngine::new(&config.reasoning);
-            // Load experience from DB for cross-session learning.
-            if let Some(ref adb) = async_db {
-                // Use sync inner() since we're in a sync constructor.
-                if let Ok(rows) = adb.inner().load_all_experience() {
-                    let records = reasoning_engine::rows_to_records(rows);
-                    engine.load_experience(records);
-                }
-            }
-            Some(engine)
-        } else {
-            None
-        };
-
         Ok(Self {
             editor,
             prompt,
@@ -290,7 +268,6 @@ impl Repl {
             explicit_model,
             dry_run_override: None,
             trace_cursor: None,
-            reasoning_engine,
             last_timeline: None,
             context_metrics: std::sync::Arc::new(context_metrics::ContextMetrics::default()),
             context_governance: {
@@ -929,27 +906,6 @@ impl Repl {
         // Look up the active provider.
         let provider: Option<Arc<dyn ModelProvider>> = self.registry.get(&self.provider).cloned();
 
-        // Pre-loop reasoning: analyze query and select strategy.
-        let _strategy_plan = if let Some(engine) = &mut self.reasoning_engine {
-            engine.reset_retries();
-            let plan = engine.pre_loop(input);
-            sink.info(&format!(
-                "  [reasoning] strategy: {:?}, planner: {}",
-                plan.kind, if plan.use_planner { "yes" } else { "no" },
-            ));
-            // Phase 43D: Emit reasoning info for TUI panel.
-            if let Some(record) = engine.history().last() {
-                sink.reasoning_update(
-                    &format!("{:?}", record.strategy),
-                    &format!("{:?}", record.analysis.task_type),
-                    &format!("{:?}", record.analysis.complexity),
-                );
-            }
-            Some(plan)
-        } else {
-            None
-        };
-
         match provider {
             Some(p) => {
                 // Build fallback providers from routing config.
@@ -1036,7 +992,6 @@ impl Repl {
                     orchestrator_config: &self.config.orchestrator,
                     tool_selection_enabled: self.config.context.dynamic_tool_selection,
                     task_bridge: task_bridge_inst.as_mut(),
-                    reasoning_config: self.reasoning_engine.as_ref().map(|e| e.config()),
                     context_metrics: Some(&self.context_metrics),
                     // Phase 43: pass control channel receiver from TUI (if present).
                     #[cfg(feature = "tui")]
@@ -1054,33 +1009,6 @@ impl Repl {
 
                 // Cache timeline for --timeline exit hook.
                 self.last_timeline = result.timeline_json.clone();
-
-                // Post-loop reasoning: evaluate result and persist experience.
-                if let Some(engine) = &mut self.reasoning_engine {
-                    let eval = engine.post_loop(&result);
-                    sink.reasoning_status(
-                        &engine.history().last().map(|r| format!("{:?}", r.analysis.task_type)).unwrap_or_default(),
-                        &engine.history().last().map(|r| format!("{:?}", r.analysis.complexity)).unwrap_or_default(),
-                        &engine.history().last().map(|r| format!("{:?}", r.strategy)).unwrap_or_default(),
-                        eval.score,
-                        eval.success,
-                    );
-                    // Persist experience to DB.
-                    if self.config.reasoning.learning_enabled {
-                        if let Some(ref adb) = self.async_db {
-                            for record in engine.experience() {
-                                let _ = adb.inner().save_experience(
-                                    &format!("{:?}", record.task_type),
-                                    &format!("{:?}", record.strategy),
-                                    record.avg_score,
-                                    record.uses,
-                                    record.last_score,
-                                    None,
-                                );
-                            }
-                        }
-                    }
-                }
 
                 // Display result summary via sink.
                 let total_tokens = result.input_tokens + result.output_tokens;
