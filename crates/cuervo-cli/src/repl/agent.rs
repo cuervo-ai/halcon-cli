@@ -28,6 +28,7 @@ use super::permissions::PermissionChecker;
 use super::resilience::{PreInvokeDecision, ResilienceManager};
 use super::response_cache::ResponseCache;
 use super::speculative::SpeculativeInvoker;
+use super::task_analyzer::TaskAnalyzer;
 use crate::render::sink::RenderSink;
 
 // Re-export types that are part of agent's public API.
@@ -534,17 +535,22 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     let mut call_output_tokens: u64 = 0;
     let mut call_cost: f64 = 0.0;
 
+    // Extract user message for task analysis and planning.
+    let user_msg = messages
+        .last()
+        .and_then(|m| match &m.content {
+            MessageContent::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+
+    // Analyze task for reasoning panel (complexity, type).
+    let task_analysis = TaskAnalyzer::analyze(user_msg);
+
     // Adaptive planning: generate plan before entering tool loop.
     let mut active_plan: Option<ExecutionPlan> = None;
     if let Some(planner) = planner {
         let tool_defs = request.tools.clone();
-        let user_msg = messages
-            .last()
-            .and_then(|m| match &m.content {
-                MessageContent::Text(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .unwrap_or("");
 
         // W-4: Skip planning for trivial prompts (saves 1-3s LLM round-trip).
         let word_count = user_msg.split_whitespace().count();
@@ -667,6 +673,22 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 }
             }
         }
+    }
+
+    // Emit reasoning status to TUI panel.
+    if !silent {
+        let strategy = if active_plan.is_some() {
+            "PlanExecuteReflect"
+        } else {
+            "DirectExecution"
+        };
+        let task_type = task_analysis.task_type.as_str();
+        let complexity = match task_analysis.complexity {
+            super::task_analyzer::TaskComplexity::Simple => "Simple",
+            super::task_analyzer::TaskComplexity::Moderate => "Moderate",
+            super::task_analyzer::TaskComplexity::Complex => "Complex",
+        };
+        render_sink.reasoning_update(strategy, task_type, complexity);
     }
 
     // TBAC: if adaptive planning produced a plan, create a task context scoping to planned tools.
