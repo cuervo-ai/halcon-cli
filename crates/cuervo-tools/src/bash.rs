@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+use regex::Regex;
 use serde_json::json;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use cuervo_core::error::{CuervoError, Result};
@@ -7,6 +9,45 @@ use cuervo_core::traits::Tool;
 use cuervo_core::types::{PermissionLevel, SandboxConfig, ToolInput, ToolOutput};
 
 use crate::sandbox;
+
+/// Built-in blacklist of dangerous command patterns.
+///
+/// These patterns block catastrophic commands that could destroy the system:
+/// - `rm -rf /` and variants (root directory deletion)
+/// - Fork bombs (`: (){:|:&};:`)
+/// - Disk formatting (`mkfs.*`)
+/// - Direct disk writes (`dd ... of=/dev/...`)
+/// - Pipe-to-shell exploits (`curl ... | sh`)
+/// - Critical service shutdowns (`systemctl stop sshd`)
+/// - Init process termination (`kill -9 1`)
+///
+/// All patterns are case-insensitive for maximum safety.
+static DEFAULT_BLACKLIST: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        r"(?i)^rm\s+(-[rfivRF]+\s+)+/\s*$",                    // rm -rf /
+        r"(?i)^rm\s+(-[rfivRF]+\s+)+/\*+\s*$",                // rm -rf /*
+        r"(?i)^rm\s+(-[rfivRF]+\s+)+/(bin|etc|usr|var|sys|proc|dev)\b", // rm -rf /etc
+        r":\(\)\{:\|:&\};:",                                   // Fork bomb
+        r"(?i)^mkfs\.",                                        // mkfs.ext4
+        r"(?i)dd\s+.*\s+of=/dev/[sh]d[a-z]",                  // dd to /dev/sda
+        r"(?i)dd\s+.*\s+of=/dev/nvme",                        // dd to nvme
+        r"(?i)(curl|wget)\s+.*\|\s*(ba)?sh\b",                // curl | bash
+        r"(?i)(curl|wget)\s+.*\|\s*python\b",                 // curl | python
+        r"(?i)^chmod\s+(-R\s+)?[0-7]{3,4}\s+/\s*$",          // chmod 777 /
+        r"(?i)^chown\s+(-R\s+)?.*\s+/\s*$",                  // chown -R user /
+        r"(?i)^systemctl\s+stop\s+(sshd|network|NetworkManager)\b", // Stop critical services
+        r"(?i)^kill\s+-9\s+1\b",                              // kill -9 1 (init)
+        r"(?i)^(rm|mod)mod\s+",                               // rmmod/modmod kernel modules
+        r"(?i)>\s*/dev/(null|zero)\s*$",                      // > /dev/null data loss
+    ]
+    .into_iter()
+    .map(|pattern| {
+        Regex::new(pattern).unwrap_or_else(|e| {
+            panic!("Invalid built-in blacklist pattern {}: {}", pattern, e)
+        })
+    })
+    .collect()
+});
 
 /// Apply sandbox rlimits to a command (Unix only, no-op elsewhere).
 #[cfg(unix)]
@@ -21,17 +62,80 @@ fn apply_sandbox_limits(cmd: &mut tokio::process::Command, config: SandboxConfig
 fn apply_sandbox_limits(_cmd: &mut tokio::process::Command, _config: SandboxConfig) {}
 
 /// Execute a bash command.
+#[derive(Debug)]
 pub struct BashTool {
     default_timeout_ms: u64,
     sandbox_config: SandboxConfig,
+    /// Custom user-defined blacklist patterns (regex).
+    custom_blacklist: Vec<Regex>,
+    /// Whether built-in safety blacklist is disabled.
+    builtin_disabled: bool,
 }
 
 impl BashTool {
-    pub fn new(timeout_secs: u64, sandbox_config: SandboxConfig) -> Self {
-        Self {
+    /// Create a new BashTool with command blacklist support.
+    ///
+    /// # Arguments
+    /// - `timeout_secs`: Default timeout for command execution
+    /// - `sandbox_config`: Sandbox limits (memory, CPU, etc.)
+    /// - `custom_patterns`: Additional regex patterns to block (beyond built-in)
+    /// - `disable_builtin`: If true, disables built-in safety blacklist
+    ///
+    /// # Errors
+    /// Returns error if any custom pattern fails to compile.
+    pub fn new(
+        timeout_secs: u64,
+        sandbox_config: SandboxConfig,
+        custom_patterns: Vec<String>,
+        disable_builtin: bool,
+    ) -> Result<Self> {
+        // Compile custom patterns
+        let mut custom_blacklist = Vec::new();
+        for (i, p) in custom_patterns.iter().enumerate() {
+            let regex = Regex::new(p).map_err(|e| {
+                CuervoError::InvalidInput(format!(
+                    "Invalid blacklist pattern at index {}: {} ({})",
+                    i, p, e
+                ))
+            })?;
+            custom_blacklist.push(regex);
+        }
+
+        Ok(Self {
             default_timeout_ms: timeout_secs * 1000,
             sandbox_config,
+            custom_blacklist,
+            builtin_disabled: disable_builtin,
+        })
+    }
+
+    /// Check if a command matches any blacklist pattern.
+    ///
+    /// Returns Some(reason) if blocked, None if allowed.
+    fn is_command_blacklisted(&self, cmd: &str) -> Option<String> {
+        // Check built-in patterns first (unless disabled)
+        if !self.builtin_disabled {
+            for pattern in DEFAULT_BLACKLIST.iter() {
+                if pattern.is_match(cmd) {
+                    return Some(format!(
+                        "Command matches built-in safety pattern: {}",
+                        pattern.as_str()
+                    ));
+                }
+            }
         }
+
+        // Check custom patterns
+        for pattern in &self.custom_blacklist {
+            if pattern.is_match(cmd) {
+                return Some(format!(
+                    "Command matches custom blacklist: {}",
+                    pattern.as_str()
+                ));
+            }
+        }
+
+        None
     }
 }
 
@@ -56,6 +160,19 @@ impl Tool for BashTool {
 
         if command.trim().is_empty() {
             return Err(CuervoError::InvalidInput("bash: command must not be empty".into()));
+        }
+
+        // Blacklist check: block dangerous commands
+        if let Some(reason) = self.is_command_blacklisted(command) {
+            tracing::warn!(
+                command = %command,
+                reason = %reason,
+                "Blocked dangerous bash command"
+            );
+            return Err(CuervoError::InvalidInput(format!(
+                "Dangerous command blocked: {}",
+                reason
+            )));
         }
 
         let timeout_ms = input.arguments["timeout_ms"]
@@ -148,14 +265,14 @@ mod tests {
     use super::*;
 
     fn tool() -> BashTool {
-        BashTool::new(120, SandboxConfig::default())
+        BashTool::new(120, SandboxConfig::default(), vec![], false).unwrap()
     }
 
     fn tool_no_sandbox() -> BashTool {
         BashTool::new(120, SandboxConfig {
             enabled: false,
             ..SandboxConfig::default()
-        })
+        }, vec![], false).unwrap()
     }
 
     fn make_input(args: serde_json::Value) -> ToolInput {
@@ -238,7 +355,7 @@ mod tests {
             enabled: false,
             ..SandboxConfig::default()
         };
-        let t = BashTool::new(120, small_sandbox);
+        let t = BashTool::new(120, small_sandbox, vec![], false).unwrap();
         let input = make_input(json!({ "command": "seq 1 1000" }));
         let output = t.execute(input).await.unwrap();
         // Output should be truncated.

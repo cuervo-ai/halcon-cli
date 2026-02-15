@@ -55,7 +55,15 @@ pub fn full_registry(
     reg.register(Arc::new(file_read::FileReadTool::new(fs.clone())));
     reg.register(Arc::new(file_write::FileWriteTool::new(fs.clone())));
     reg.register(Arc::new(file_edit::FileEditTool::new(fs.clone())));
-    reg.register(Arc::new(bash::BashTool::new(config.timeout_secs, config.sandbox.clone())));
+    reg.register(Arc::new(
+        bash::BashTool::new(
+            config.timeout_secs,
+            config.sandbox.clone(),
+            config.command_blacklist.clone(),
+            config.disable_builtin_blacklist,
+        )
+        .expect("Failed to compile bash blacklist patterns"),
+    ));
     reg.register(Arc::new(glob_tool::GlobTool::new()));
     reg.register(Arc::new(grep::GrepTool::new()));
     reg.register(Arc::new(web_fetch::WebFetchTool::new()));
@@ -105,7 +113,15 @@ mod contract_tests {
             Arc::new(file_read::FileReadTool::new(fs.clone())),
             Arc::new(file_write::FileWriteTool::new(fs.clone())),
             Arc::new(file_edit::FileEditTool::new(fs.clone())),
-            Arc::new(bash::BashTool::new(config.timeout_secs, config.sandbox.clone())),
+            Arc::new(
+                bash::BashTool::new(
+                    config.timeout_secs,
+                    config.sandbox.clone(),
+                    config.command_blacklist.clone(),
+                    config.disable_builtin_blacklist,
+                )
+                .expect("Failed to compile bash blacklist patterns"),
+            ),
             Arc::new(glob_tool::GlobTool::new()),
             Arc::new(grep::GrepTool::new()),
             Arc::new(web_fetch::WebFetchTool::new()),
