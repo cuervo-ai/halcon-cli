@@ -20,6 +20,7 @@ pub mod trace;
 pub use async_db::AsyncDatabase;
 pub use cache::{CacheEntry, CacheStats};
 pub use db::{AgentTaskRow, Database, PlanStepRow, SessionCheckpoint};
+pub use db::reasoning::ReasoningExperience;
 pub use memory::{MemoryEntry, MemoryEntryType, MemoryEpisode, MemoryStats};
 pub use metrics::{InvocationMetric, ModelStats, ProviderWindowedMetrics, SystemMetrics, ToolExecutionMetric, ToolStats};
 pub use resilience::ResilienceEvent;

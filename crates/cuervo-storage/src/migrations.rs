@@ -18,6 +18,7 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
     (14, "agent_state_checkpoint", MIGRATION_014),
     (15, "metrics_composite_index", MIGRATION_015),
     (16, "structured_tasks", MIGRATION_016),
+    (17, "reasoning_experience", MIGRATION_017),
 ];
 
 const MIGRATION_001: &str = r#"
@@ -370,6 +371,22 @@ CREATE INDEX IF NOT EXISTS idx_structured_tasks_status ON structured_tasks(statu
 CREATE INDEX IF NOT EXISTS idx_structured_tasks_plan ON structured_tasks(plan_id);
 "#;
 
+const MIGRATION_017: &str = r#"
+-- Reasoning experience: UCB1 multi-armed bandit learning.
+-- Stores average score and usage count per (task_type, strategy) pair.
+CREATE TABLE IF NOT EXISTS reasoning_experience (
+    task_type TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    avg_score REAL NOT NULL DEFAULT 0.0,
+    uses INTEGER NOT NULL DEFAULT 0,
+    last_score REAL,
+    last_updated INTEGER NOT NULL,
+    PRIMARY KEY (task_type, strategy)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reasoning_exp_updated ON reasoning_experience(last_updated DESC);
+"#;
+
 /// Run all pending migrations.
 pub fn run_migrations(conn: &Connection) -> Result<(), cuervo_core::error::CuervoError> {
     // Ensure migrations table exists
@@ -424,7 +441,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     #[test]
@@ -438,7 +455,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 16);
+        assert_eq!(count, 17);
     }
 
     #[test]

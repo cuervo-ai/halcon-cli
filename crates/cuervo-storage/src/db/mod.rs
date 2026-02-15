@@ -12,6 +12,7 @@ mod memories;
 mod metrics_repo;
 mod plans;
 mod policies;
+pub mod reasoning;
 mod resilience_repo;
 mod sessions;
 pub mod structured_tasks;

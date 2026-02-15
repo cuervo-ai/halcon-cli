@@ -540,6 +540,56 @@ impl AsyncDatabase {
             .await
             .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
     }
+
+    // --- Reasoning Experience ---
+
+    pub async fn save_reasoning_experience(
+        &self,
+        task_type: &str,
+        strategy: &str,
+        score: f64,
+    ) -> Result<()> {
+        let db = self.inner.clone();
+        let task_type = task_type.to_string();
+        let strategy = strategy.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.conn()?;
+            crate::db::reasoning::save_reasoning_experience(&conn, &task_type, &strategy, score)
+                .map_err(|e| CuervoError::DatabaseError(e.to_string()))
+        })
+        .await
+        .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_reasoning_experience(
+        &self,
+        task_type: &str,
+        strategy: &str,
+    ) -> Result<Option<crate::db::reasoning::ReasoningExperience>> {
+        let db = self.inner.clone();
+        let task_type = task_type.to_string();
+        let strategy = strategy.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.conn()?;
+            crate::db::reasoning::load_reasoning_experience(&conn, &task_type, &strategy)
+                .map_err(|e| CuervoError::DatabaseError(e.to_string()))
+        })
+        .await
+        .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_all_reasoning_experiences(
+        &self,
+    ) -> Result<Vec<crate::db::reasoning::ReasoningExperience>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.conn()?;
+            crate::db::reasoning::load_all_reasoning_experiences(&conn)
+                .map_err(|e| CuervoError::DatabaseError(e.to_string()))
+        })
+        .await
+        .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
 }
 
 #[cfg(test)]
