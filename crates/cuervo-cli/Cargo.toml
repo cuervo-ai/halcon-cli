@@ -6,9 +6,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "cuervo_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cuervo"
 path = "src/main.rs"
+
+[[bench]]
+name = "tui_rendering"
+harness = false
+
+[[bench]]
+name = "phase_45_features"
+harness = false
 
 [dependencies]
 cuervo-core = { workspace = true }
@@ -61,3 +73,5 @@ tempfile = { workspace = true }
 wiremock = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+serial_test = "3.2"

@@ -485,6 +485,20 @@ pub struct ToolsConfig {
     /// 0 = no timeout (blocks indefinitely). Default: 30.
     #[serde(default = "default_prompt_timeout")]
     pub prompt_timeout_secs: u64,
+    /// Auto-approve destructive tools when running in CI environments.
+    /// Prevents 30-second hangs on permission prompts in CI/CD pipelines.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub auto_approve_in_ci: bool,
+    /// Custom command blacklist patterns (regex) for bash tool.
+    /// Extends built-in safety blacklist.
+    #[serde(default)]
+    pub command_blacklist: Vec<String>,
+    /// Disable built-in bash command blacklist (dangerous commands like `rm -rf /`).
+    /// Only disable if you fully trust the AI or are in a sandboxed environment.
+    /// Default: false (protection enabled).
+    #[serde(default)]
+    pub disable_builtin_blacklist: bool,
 }
 
 /// Configuration for automatic tool retry on transient failures.
@@ -529,6 +543,9 @@ impl Default for ToolsConfig {
             dry_run: false,
             retry: ToolRetryConfig::default(),
             prompt_timeout_secs: default_prompt_timeout(),
+            auto_approve_in_ci: true,
+            command_blacklist: vec![],
+            disable_builtin_blacklist: false,
         }
     }
 }
@@ -1609,6 +1626,36 @@ mod tests {
         assert!(config.task_framework.enabled);
         assert!(config.task_framework.persist_tasks);
         assert_eq!(config.task_framework.default_max_retries, 2);
+    }
+
+    #[test]
+    fn tools_config_auto_approve_ci_default() {
+        let config = ToolsConfig::default();
+        assert!(config.auto_approve_in_ci);
+    }
+
+    #[test]
+    fn tools_config_auto_approve_ci_serde_roundtrip() {
+        let config = ToolsConfig {
+            auto_approve_in_ci: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtrip: ToolsConfig = serde_json::from_str(&json).unwrap();
+        assert!(!roundtrip.auto_approve_in_ci);
+    }
+
+    #[test]
+    fn tools_config_auto_approve_ci_absent_defaults_true() {
+        // Simulates loading config without auto_approve_in_ci field.
+        let json = r#"{
+            "confirm_destructive": true,
+            "timeout_secs": 120,
+            "allowed_directories": [],
+            "blocked_patterns": []
+        }"#;
+        let config: ToolsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.auto_approve_in_ci);
     }
 
 }
