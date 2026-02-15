@@ -30,12 +30,31 @@ impl ToastLevel {
         }
     }
 
+    /// Get the ratatui Color for this toast level (theme-aware).
+    ///
+    /// Phase 45A: Migrated from hardcoded Color::Cyan/Green/Yellow/Red
+    /// to palette semantic tokens for theme compliance.
     fn color(self) -> Color {
+        let p = &crate::render::theme::active().palette;
+        // Phase 45A Task 2.2: Use cached accessors
         match self {
-            ToastLevel::Info => Color::Cyan,
-            ToastLevel::Success => Color::Green,
-            ToastLevel::Warning => Color::Yellow,
-            ToastLevel::Error => Color::Red,
+            ToastLevel::Info => p.accent_ratatui(),
+            ToastLevel::Success => p.success_ratatui(),
+            ToastLevel::Warning => p.warning_ratatui(),
+            ToastLevel::Error => p.error_ratatui(),
+        }
+    }
+
+    /// Get the ThemeColor for perceptual fade operations.
+    ///
+    /// Phase 45A: Used for OKLCH-aware darkening during toast fade-out.
+    fn theme_color(self) -> crate::render::theme::ThemeColor {
+        let p = &crate::render::theme::active().palette;
+        match self {
+            ToastLevel::Info => p.accent,
+            ToastLevel::Success => p.success,
+            ToastLevel::Warning => p.warning,
+            ToastLevel::Error => p.error,
         }
     }
 }
@@ -181,14 +200,24 @@ impl ToastStack {
             );
 
             let icon = toast.level.icon();
-            let color = toast.level.color();
-            // Fade effect: dim text as it ages.
+
+            // Phase 45A: Perceptual fade using OKLCH darken instead of Modifier::DIM.
+            // Last 700ms (30% of 4s default TTL): fade from full brightness to 30% darker.
             let frac = toast.remaining_fraction();
-            let style = if frac > 0.3 {
-                Style::default().fg(color)
+            let fade_threshold = 0.3;
+
+            let fg_color = if frac > fade_threshold {
+                // Full brightness
+                toast.level.color()
             } else {
-                Style::default().fg(color).add_modifier(Modifier::DIM)
+                // Fade progress: 0.0 (at 30%) → 1.0 (at 0%)
+                let fade_progress = (fade_threshold - frac) / fade_threshold;
+                let base_color = toast.level.theme_color();
+                let faded_color = base_color.darken(fade_progress * 0.3);
+                faded_color.to_ratatui_color()
             };
+
+            let style = Style::default().fg(fg_color);
 
             let line = Line::from(vec![
                 Span::styled(format!(" {icon} "), style.add_modifier(Modifier::BOLD)),
@@ -271,11 +300,14 @@ mod tests {
     }
 
     #[test]
-    fn toast_level_colors() {
-        assert_eq!(ToastLevel::Info.color(), Color::Cyan);
-        assert_eq!(ToastLevel::Success.color(), Color::Green);
-        assert_eq!(ToastLevel::Warning.color(), Color::Yellow);
-        assert_eq!(ToastLevel::Error.color(), Color::Red);
+    fn toast_level_colors_use_palette() {
+        // Phase 45A: Validate colors come from palette, not hardcoded.
+        let p = &crate::render::theme::active().palette;
+
+        assert_eq!(ToastLevel::Info.color(), p.accent_ratatui());
+        assert_eq!(ToastLevel::Success.color(), p.success_ratatui());
+        assert_eq!(ToastLevel::Warning.color(), p.warning_ratatui());
+        assert_eq!(ToastLevel::Error.color(), p.error_ratatui());
     }
 
     #[test]
@@ -332,5 +364,94 @@ mod tests {
         stack.push(Toast::new("error", ToastLevel::Error));
         // Error toasts bypass rate limiting.
         assert_eq!(stack.active_count(), 2);
+    }
+
+    // --- Phase 45A: Theme compliance tests ---
+
+    #[test]
+    fn toast_respects_neon_theme() {
+        // Initialize neon theme
+        crate::render::theme::init("neon", None);
+        let p = &crate::render::theme::active().palette;
+
+        // Validate Info uses accent (cyan in neon)
+        let info_color = ToastLevel::Info.color();
+        assert_eq!(info_color, p.accent_ratatui());
+    }
+
+    #[test]
+    fn toast_respects_minimal_theme() {
+        // Minimal theme has softer colors
+        crate::render::theme::init("minimal", None);
+        let p = &crate::render::theme::active().palette;
+
+        // Validate Success uses success (softer green in minimal)
+        let success_color = ToastLevel::Success.color();
+        assert_eq!(success_color, p.success_ratatui());
+    }
+
+    #[test]
+    fn toast_respects_plain_theme() {
+        // Plain theme has neutral colors
+        crate::render::theme::init("plain", None);
+        let p = &crate::render::theme::active().palette;
+
+        // In plain mode, all semantic colors are neutral
+        let warning_color = ToastLevel::Warning.color();
+        assert_eq!(warning_color, p.warning_ratatui());
+    }
+
+    #[test]
+    fn toast_perceptual_fade_darkens() {
+        // Validate that fade uses darken() not Modifier::DIM
+        let base_color = ToastLevel::Success.theme_color();
+
+        // Simulate fade at 15% remaining (85% through fade window)
+        let fade_progress = 0.85;
+        let faded = base_color.darken(fade_progress * 0.3);
+
+        // Faded color should be darker (lower L in OKLCH)
+        #[cfg(feature = "color-science")]
+        {
+            let base_l = base_color.to_oklch().l;
+            let faded_l = faded.to_oklch().l;
+            assert!(
+                faded_l < base_l,
+                "Faded L ({faded_l:.3}) should be < base L ({base_l:.3})"
+            );
+        }
+
+        // RGB values should be darker
+        let base_rgb = base_color.srgb8();
+        let faded_rgb = faded.srgb8();
+        assert!(
+            faded_rgb[0] <= base_rgb[0] && faded_rgb[1] <= base_rgb[1] && faded_rgb[2] <= base_rgb[2],
+            "Faded RGB should be <= base RGB"
+        );
+    }
+
+    #[cfg(feature = "color-science")]
+    #[test]
+    fn toast_wcag_compliance_against_bg_panel() {
+        use crate::render::color_science::contrast_ratio;
+
+        // Validate all toast levels meet WCAG AA (3.0:1) against bg_panel
+        let p = &crate::render::theme::active().palette;
+        let bg = &p.bg_panel;
+
+        let levels = [
+            ("Info", ToastLevel::Info.theme_color()),
+            ("Success", ToastLevel::Success.theme_color()),
+            ("Warning", ToastLevel::Warning.theme_color()),
+            ("Error", ToastLevel::Error.theme_color()),
+        ];
+
+        for (name, fg) in levels {
+            let ratio = contrast_ratio(&fg, bg);
+            assert!(
+                ratio >= 3.0,
+                "Toast {name}: WCAG ratio {ratio:.2} should be >= 3.0"
+            );
+        }
     }
 }

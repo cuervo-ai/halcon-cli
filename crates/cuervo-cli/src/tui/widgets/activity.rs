@@ -115,15 +115,16 @@ impl ActivityState {
     /// Render the activity zone with scrollbar.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
         let p = &theme::active().palette;
-        let c_success = p.success.to_ratatui_color();
-        let c_accent = p.accent.to_ratatui_color();
-        let c_warning = p.warning.to_ratatui_color();
-        let c_error = p.error.to_ratatui_color();
-        let c_running = p.running.to_ratatui_color();
-        let c_text = p.text.to_ratatui_color();
-        let c_muted = p.muted.to_ratatui_color();
-        let c_border = p.border.to_ratatui_color();
-        let c_spinner = p.spinner_color.to_ratatui_color();
+        // Phase 45A Task 2.2: Use cached ratatui colors (eliminates OKLCH→sRGB conversions)
+        let c_success = p.success_ratatui();
+        let c_accent = p.accent_ratatui();
+        let c_warning = p.warning_ratatui();
+        let c_error = p.error_ratatui();
+        let c_running = p.running_ratatui();
+        let c_text = p.text_ratatui();
+        let c_muted = p.muted_ratatui();
+        let c_border = p.border_ratatui();
+        let c_spinner = p.spinner_color_ratatui();
 
         let border_color =
             if state.focus == super::super::state::FocusZone::Activity {
@@ -859,17 +860,17 @@ mod tests {
         let p = &theme::active().palette;
         render_md_line(
             text,
-            p.text.to_ratatui_color(),
-            p.accent.to_ratatui_color(),
-            p.warning.to_ratatui_color(),
-            p.muted.to_ratatui_color(),
+            p.text_ratatui(),
+            p.accent_ratatui(),
+            p.warning_ratatui(),
+            p.muted_ratatui(),
         )
     }
 
     /// Helper: call parse_md_spans with default palette colors for tests.
     fn test_parse_md_spans(text: &str) -> Vec<Span<'static>> {
         let p = &theme::active().palette;
-        parse_md_spans(text, p.warning.to_ratatui_color())
+        parse_md_spans(text, p.warning_ratatui())
     }
 
     #[test]
@@ -1123,7 +1124,7 @@ mod tests {
     #[test]
     fn md_inline_code_uses_palette() {
         let p = &theme::active().palette;
-        let c_code = p.warning.to_ratatui_color();
+        let c_code = p.warning_ratatui();
         let spans = test_parse_md_spans("run `cargo test` now");
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[1].content.as_ref(), "cargo test");
@@ -1168,7 +1169,7 @@ mod tests {
     #[test]
     fn md_mixed_inline_uses_palette() {
         let p = &theme::active().palette;
-        let c_code = p.warning.to_ratatui_color();
+        let c_code = p.warning_ratatui();
         let spans = test_parse_md_spans("**bold** and `code` here");
         assert!(spans.len() >= 4);
         assert_eq!(spans[0].content.as_ref(), "bold");
@@ -1183,15 +1184,16 @@ mod tests {
         // The palette is used when render() is called. Here we verify
         // the palette can be loaded and colors are valid ratatui Colors.
         let p = &theme::active().palette;
-        let _s = p.success.to_ratatui_color();
-        let _a = p.accent.to_ratatui_color();
-        let _w = p.warning.to_ratatui_color();
-        let _e = p.error.to_ratatui_color();
-        let _r = p.running.to_ratatui_color();
-        let _t = p.text.to_ratatui_color();
-        let _m = p.muted.to_ratatui_color();
-        let _b = p.border.to_ratatui_color();
-        let _sp = p.spinner_color.to_ratatui_color();
+        // Phase 45A Task 2.2: Use cached accessors
+        let _s = p.success_ratatui();
+        let _a = p.accent_ratatui();
+        let _w = p.warning_ratatui();
+        let _e = p.error_ratatui();
+        let _r = p.running_ratatui();
+        let _t = p.text_ratatui();
+        let _m = p.muted_ratatui();
+        let _b = p.border_ratatui();
+        let _sp = p.spinner_color_ratatui();
         // If this compiles and runs without panic, palette integration is working.
     }
 

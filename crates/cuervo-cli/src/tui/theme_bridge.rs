@@ -10,6 +10,9 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::render::theme::{self, ThemeColor};
 
 /// Convert a `ThemeColor` to a `ratatui::style::Color`.
+///
+/// Note: This is for arbitrary ThemeColor instances. For palette colors,
+/// prefer using the cached `*_ratatui()` accessors on Palette directly.
 pub fn color(tc: &ThemeColor) -> Color {
     tc.to_ratatui_color()
 }

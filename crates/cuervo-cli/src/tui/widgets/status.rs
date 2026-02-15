@@ -164,13 +164,14 @@ impl StatusState {
     /// Build the main status line with session, provider, tokens, cost, etc.
     fn render_main_line(&self) -> Line<'static> {
         let p = &theme::active().palette;
-        let c_success = p.success.to_ratatui_color();
-        let c_accent = p.accent.to_ratatui_color();
-        let c_warning = p.warning.to_ratatui_color();
-        let c_running = p.running.to_ratatui_color();
-        let c_text = p.text.to_ratatui_color();
-        let c_muted = p.muted.to_ratatui_color();
-        let c_planning = p.planning.to_ratatui_color();
+        // Phase 45A Task 2.2: Use cached accessors
+        let c_success = p.success_ratatui();
+        let c_accent = p.accent_ratatui();
+        let c_warning = p.warning_ratatui();
+        let c_running = p.running_ratatui();
+        let c_text = p.text_ratatui();
+        let c_muted = p.muted_ratatui();
+        let c_planning = p.planning_ratatui();
 
         let sep = Span::styled(" │ ", Style::default().fg(c_muted));
 
@@ -231,7 +232,7 @@ impl StatusState {
             let (health_icon, health_color) = match &self.provider_health {
                 ProviderHealthStatus::Healthy => (" ●", c_success),
                 ProviderHealthStatus::Degraded { .. } => (" ◐", c_warning),
-                ProviderHealthStatus::Unhealthy { .. } => (" ○", p.error.to_ratatui_color()),
+                ProviderHealthStatus::Unhealthy { .. } => (" ○", p.error_ratatui()),
             };
             spans.push(Span::styled(health_icon, Style::default().fg(health_color)));
             spans.push(sep.clone());
@@ -323,10 +324,10 @@ impl StatusState {
         }
 
         let p = &theme::active().palette;
-        let c_success = p.success.to_ratatui_color();
-        let c_accent = p.accent.to_ratatui_color();
-        let c_warning = p.warning.to_ratatui_color();
-        let c_muted = p.muted.to_ratatui_color();
+        let c_success = p.success_ratatui();
+        let c_accent = p.accent_ratatui();
+        let c_warning = p.warning_ratatui();
+        let c_muted = p.muted_ratatui();
 
         let mut expert_spans = vec![
             Span::styled(" ", Style::default()),
@@ -365,7 +366,7 @@ impl StatusState {
     /// Render the status bar.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let p = &theme::active().palette;
-        let c_border = p.border.to_ratatui_color();
+        let c_border = p.border_ratatui();
 
         let mut lines = vec![self.render_main_line()];
 
@@ -522,14 +523,15 @@ mod tests {
     #[test]
     fn status_uses_palette_colors() {
         let p = &theme::active().palette;
-        let _s = p.success.to_ratatui_color();
-        let _a = p.accent.to_ratatui_color();
-        let _w = p.warning.to_ratatui_color();
-        let _r = p.running.to_ratatui_color();
-        let _t = p.text.to_ratatui_color();
-        let _m = p.muted.to_ratatui_color();
-        let _b = p.border.to_ratatui_color();
-        let _pl = p.planning.to_ratatui_color();
+        // Phase 45A Task 2.2: Use cached accessors
+        let _s = p.success_ratatui();
+        let _a = p.accent_ratatui();
+        let _w = p.warning_ratatui();
+        let _r = p.running_ratatui();
+        let _t = p.text_ratatui();
+        let _m = p.muted_ratatui();
+        let _b = p.border_ratatui();
+        let _pl = p.planning_ratatui();
     }
 
     // --- Phase 43E: Polish tests ---

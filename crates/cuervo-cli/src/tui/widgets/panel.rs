@@ -119,6 +119,16 @@ impl SidePanel {
         if total_tokens > 0 {
             self.context_tiers.l0_pct = ((l0_tokens as f64 / total_tokens as f64) * 100.0).min(100.0) as u8;
             self.context_tiers.l1_pct = ((l1_tokens as f64 / total_tokens as f64) * 100.0).min(100.0) as u8;
+
+            // FIX: Compute L2-L4 percentages based on entry counts
+            // L2-L4 don't have direct token counts, estimate based on entries
+            let l2_estimated = l2_entries as u32 * 200; // ~200 tokens per compressed entry
+            let l3_estimated = l3_entries as u32 * 150; // ~150 tokens per semantic entry
+            let l4_estimated = l4_entries as u32 * 100; // ~100 tokens per archived entry
+
+            self.context_tiers.l2_pct = ((l2_estimated as f64 / total_tokens as f64) * 100.0).min(100.0) as u8;
+            self.context_tiers.l3_pct = ((l3_estimated as f64 / total_tokens as f64) * 100.0).min(100.0) as u8;
+            self.context_tiers.l4_pct = ((l4_estimated as f64 / total_tokens as f64) * 100.0).min(100.0) as u8;
         }
     }
 
@@ -149,13 +159,13 @@ impl SidePanel {
     /// Render the side panel.
     pub fn render(&self, frame: &mut Frame, area: Rect, section: PanelSection) {
         let p = &theme::active().palette;
-        let c_success = p.success.to_ratatui_color();
-        let c_error = p.error.to_ratatui_color();
-        let c_running = p.running.to_ratatui_color();
-        let c_muted = p.muted.to_ratatui_color();
-        let c_border = p.border.to_ratatui_color();
-        let c_text_label = p.text_label.to_ratatui_color();
-        let c_bg_panel = p.bg_panel.to_ratatui_color();
+        let c_success = p.success_ratatui();
+        let c_error = p.error_ratatui();
+        let c_running = p.running_ratatui();
+        let c_muted = p.muted_ratatui();
+        let c_border = p.border_ratatui();
+        let c_text_label = p.text_label_ratatui();
+        let c_bg_panel = p.bg_panel_ratatui();
 
         let mut lines: Vec<Line<'_>> = Vec::new();
 
@@ -236,7 +246,7 @@ impl SidePanel {
                 let (icon, color) = match b.state {
                     CircuitBreakerState::Closed => continue,
                     CircuitBreakerState::Open => ("○ OPEN", c_error),
-                    CircuitBreakerState::HalfOpen => ("◐ HALF", p.warning.to_ratatui_color()),
+                    CircuitBreakerState::HalfOpen => ("◐ HALF", p.warning_ratatui()),
                 };
                 lines.push(Line::from(Span::styled(
                     format!("  {} {} ({})", icon, b.provider, b.failure_count),
@@ -386,13 +396,13 @@ mod tests {
     fn panel_uses_palette_colors() {
         let p = &theme::active().palette;
         // Verify all cockpit tokens used in panel are loadable.
-        let _s = p.success.to_ratatui_color();
-        let _e = p.error.to_ratatui_color();
-        let _r = p.running.to_ratatui_color();
-        let _m = p.muted.to_ratatui_color();
-        let _b = p.border.to_ratatui_color();
-        let _tl = p.text_label.to_ratatui_color();
-        let _bp = p.bg_panel.to_ratatui_color();
+        let _s = p.success_ratatui();
+        let _e = p.error_ratatui();
+        let _r = p.running_ratatui();
+        let _m = p.muted_ratatui();
+        let _b = p.border_ratatui();
+        let _tl = p.text_label_ratatui();
+        let _bp = p.bg_panel_ratatui();
     }
 
     // --- Phase 43D: Live panel data tests ---
@@ -511,5 +521,44 @@ mod tests {
         panel.update_breaker("anthropic".into(), CircuitBreakerState::Open, 5);
         panel.update_breaker("deepseek".into(), CircuitBreakerState::Closed, 0);
         assert_eq!(panel.breakers.len(), 2);
+    }
+
+    // METRICS FIX TEST: Verify L2-L4 percentages are computed
+    #[test]
+    fn panel_context_l2_l4_percentages_computed() {
+        let mut panel = SidePanel::new();
+
+        // L0: 100 tokens, L1: 50 tokens
+        // L2: 10 entries * 200 = 2000 tokens estimated
+        // L3: 5 entries * 150 = 750 tokens estimated
+        // L4: 2 entries * 100 = 200 tokens estimated
+        // Total: 100 + 50 + 2000 + 750 + 200 = 3100 tokens
+        panel.update_context(
+            100,    // l0_tokens
+            500,    // l0_capacity
+            50,     // l1_tokens
+            5,      // l1_entries
+            10,     // l2_entries
+            5,      // l3_entries
+            2,      // l4_entries
+            3100,   // total_tokens
+        );
+
+        // Verify L0 and L1 percentages (existing behavior)
+        assert!(panel.context_tiers.l0_pct > 0, "L0 percentage should be computed");
+        assert!(panel.context_tiers.l1_pct > 0, "L1 percentage should be computed");
+
+        // FIX VERIFICATION: L2-L4 percentages should now be computed (was always 0 before)
+        assert!(panel.context_tiers.l2_pct > 0, "L2 percentage should be computed (FIX)");
+        assert!(panel.context_tiers.l3_pct > 0, "L3 percentage should be computed (FIX)");
+        assert!(panel.context_tiers.l4_pct > 0, "L4 percentage should be computed (FIX)");
+
+        // Verify approximate distribution (L2 should be ~64%, L3 ~24%, L4 ~6%)
+        assert!(panel.context_tiers.l2_pct >= 60 && panel.context_tiers.l2_pct <= 70,
+                "L2 should be ~64% (2000/3100)");
+        assert!(panel.context_tiers.l3_pct >= 20 && panel.context_tiers.l3_pct <= 30,
+                "L3 should be ~24% (750/3100)");
+        assert!(panel.context_tiers.l4_pct >= 5 && panel.context_tiers.l4_pct <= 10,
+                "L4 should be ~6% (200/3100)");
     }
 }
