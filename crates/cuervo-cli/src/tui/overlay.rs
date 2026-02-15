@@ -232,10 +232,10 @@ fn build_help_section<'a>(
 
 pub fn render_help(frame: &mut Frame, area: Rect) {
     let p = &theme::active().palette;
-    let c_border = p.border.to_ratatui_color();
-    let c_accent = p.accent.to_ratatui_color();
-    let c_text = p.text.to_ratatui_color();
-    let c_muted = p.muted.to_ratatui_color();
+    let c_border = p.border_ratatui();
+    let c_accent = p.accent_ratatui();
+    let c_text = p.text_ratatui();
+    let c_muted = p.muted_ratatui();
 
     let rect = centered_rect(area, 60, 70);
     frame.render_widget(Clear, rect);
@@ -291,10 +291,10 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
 /// Render the permission approval overlay.
 pub fn render_permission_prompt(frame: &mut Frame, area: Rect, tool: &str) {
     let p = &theme::active().palette;
-    let c_border = p.border.to_ratatui_color();
-    let c_warning = p.warning.to_ratatui_color();
-    let c_text = p.text.to_ratatui_color();
-    let c_accent = p.accent.to_ratatui_color();
+    let c_border = p.border_ratatui();
+    let c_warning = p.warning_ratatui();
+    let c_text = p.text_ratatui();
+    let c_accent = p.accent_ratatui();
 
     let rect = centered_rect(area, 50, 30);
     frame.render_widget(Clear, rect);
@@ -344,11 +344,11 @@ pub fn render_command_palette(
     selected: usize,
 ) {
     let p = &theme::active().palette;
-    let c_border = p.border.to_ratatui_color();
-    let c_accent = p.accent.to_ratatui_color();
-    let c_text = p.text.to_ratatui_color();
-    let c_muted = p.muted.to_ratatui_color();
-    let c_running = p.running.to_ratatui_color();
+    let c_border = p.border_ratatui();
+    let c_accent = p.accent_ratatui();
+    let c_text = p.text_ratatui();
+    let c_muted = p.muted_ratatui();
+    let c_running = p.running_ratatui();
 
     let rect = centered_rect(area, 60, 50);
     frame.render_widget(Clear, rect);
@@ -399,10 +399,10 @@ pub fn render_command_palette(
 /// Render the search overlay with real match count and current position.
 pub fn render_search(frame: &mut Frame, area: Rect, query: &str, match_count: usize, current: usize) {
     let p = &theme::active().palette;
-    let c_border = p.border.to_ratatui_color();
-    let c_accent = p.accent.to_ratatui_color();
-    let c_text = p.text.to_ratatui_color();
-    let c_muted = p.muted.to_ratatui_color();
+    let c_border = p.border_ratatui();
+    let c_accent = p.accent_ratatui();
+    let c_text = p.text_ratatui();
+    let c_muted = p.muted_ratatui();
 
     // Search bar at the top of the activity area.
     let search_area = Rect::new(area.x + 2, area.y, area.width.saturating_sub(4).min(60), 3);

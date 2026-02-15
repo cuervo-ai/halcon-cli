@@ -95,8 +95,12 @@ pub enum UiEvent {
     CacheStatus { hit: bool, source: String },
     /// Speculative tool execution result.
     SpeculativeResult { tool: String, hit: bool },
-    /// Awaiting permission for tool execution.
-    PermissionAwaiting { tool: String },
+    /// Awaiting permission for tool execution (Phase I-6C: extended with args + risk).
+    PermissionAwaiting {
+        tool: String,
+        args: serde_json::Value,
+        risk_level: String,
+    },
 
     // --- Phase 43C: Feedback completeness events (4 new) ---
 
@@ -106,6 +110,8 @@ pub enum UiEvent {
     ReflectionComplete { analysis: String, score: f64 },
     /// Memory consolidation operation in progress.
     ConsolidationStatus { action: String },
+    /// Memory consolidation operation completed.
+    ConsolidationComplete { merged: usize, pruned: usize, duration_ms: u64 },
     /// Tool retrying after failure.
     ToolRetrying { tool: String, attempt: usize, max_attempts: usize, delay_ms: u64 },
 
@@ -128,6 +134,15 @@ pub enum UiEvent {
         task_type: String,
         complexity: String,
     },
+
+    // --- Phase 44B: Continuous interaction events (Phase 2) ---
+
+    /// Agent started processing a prompt (dequeue from channel).
+    AgentStartedPrompt,
+    /// Agent finished processing a prompt (ready for next).
+    AgentFinishedPrompt,
+    /// Current prompt queue status (how many waiting).
+    PromptQueueStatus(usize),
 
     // --- Phase 44A: Observability events ---
 
@@ -443,8 +458,12 @@ mod tests {
 
     #[test]
     fn permission_awaiting_construction() {
-        let ev = UiEvent::PermissionAwaiting { tool: "bash".into() };
-        assert!(matches!(ev, UiEvent::PermissionAwaiting { ref tool } if tool == "bash"));
+        let ev = UiEvent::PermissionAwaiting {
+            tool: "bash".into(),
+            args: serde_json::json!({"command": "ls"}),
+            risk_level: "Low".into(),
+        };
+        assert!(matches!(ev, UiEvent::PermissionAwaiting { ref tool, .. } if tool == "bash"));
     }
 
     // --- Phase 42D: Control event tests ---

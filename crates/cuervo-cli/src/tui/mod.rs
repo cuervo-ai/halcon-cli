@@ -21,6 +21,8 @@ pub mod state;
 #[cfg(feature = "tui")]
 pub mod overlay;
 #[cfg(feature = "tui")]
+pub mod conversational_overlay;
+#[cfg(feature = "tui")]
 pub mod theme_bridge;
 #[cfg(feature = "tui")]
 pub mod widgets;

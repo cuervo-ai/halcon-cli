@@ -19,6 +19,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use super::constants;
+use super::conversational_overlay::ConversationalOverlay;
 use super::events::{ControlEvent, UiEvent};
 use super::input;
 use super::layout;
@@ -59,6 +60,8 @@ pub struct TuiApp {
     /// `true` = approve, `false` = reject. Dedicated channel ensures the decision
     /// reaches the executor even while the agent loop is blocked on tool execution.
     perm_tx: mpsc::UnboundedSender<bool>,
+    /// Conversational permission overlay instance (Phase I-6C).
+    conversational_overlay: Option<ConversationalOverlay>,
     /// Tracked area of the submit button for mouse click detection.
     submit_button_area: Rect,
     /// Ring buffer of recent events for the Expert inspector panel.
@@ -70,6 +73,10 @@ pub struct TuiApp {
     /// Search state for activity zone search (B4).
     search_matches: Vec<usize>,
     search_current: usize,
+    /// Watchdog: timestamp when agent last started processing (for timeout detection).
+    agent_started_at: Option<Instant>,
+    /// Watchdog: maximum agent duration in seconds before forcing UI unlock (default: 600 = 10 min).
+    max_agent_duration_secs: u64,
 }
 
 impl TuiApp {
@@ -105,12 +112,15 @@ impl TuiApp {
             prompt_tx,
             ctrl_tx,
             perm_tx,
+            conversational_overlay: None,
             submit_button_area: Rect::default(),
             event_log: VecDeque::with_capacity(EVENT_RING_CAPACITY),
             start_time: Instant::now(),
             toasts: ToastStack::new(),
             search_matches: Vec::new(),
             search_current: 0,
+            agent_started_at: None,
+            max_agent_duration_secs: 600, // 10 minutes default watchdog timeout
         }
     }
 
@@ -170,20 +180,31 @@ impl TuiApp {
 
     /// Run the TUI render loop. Blocks until quit.
     pub async fn run(&mut self) -> io::Result<()> {
+        tracing::debug!("TUI run() started");
+
         // Enter alternate screen + raw mode + mouse capture.
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
+        tracing::debug!("Entered alternate screen");
+
         terminal::enable_raw_mode()?;
+        tracing::debug!("Enabled raw mode");
+
         stdout.execute(EnableMouseCapture)?;
+        tracing::debug!("Enabled mouse capture");
 
         // Enable keyboard enhancement to detect Cmd (SUPER) on macOS.
         let _ = stdout.execute(PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
         ));
+        tracing::debug!("Enabled keyboard enhancements");
 
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
+        tracing::debug!("Created terminal");
+
         terminal.clear()?;
+        tracing::debug!("Cleared terminal, entering main loop");
 
         // Spawn a single dedicated thread for crossterm event polling.
         // Phase 44C: Reduced polling interval for snappier keyboard response.
@@ -211,7 +232,15 @@ impl TuiApp {
         let mut last_render = Instant::now();
         let mut needs_render = true;
 
+        tracing::debug!("TUI entering main event loop");
+        let mut loop_iterations = 0;
+
         loop {
+            loop_iterations += 1;
+            if loop_iterations % 100 == 1 {
+                tracing::trace!(iterations = loop_iterations, "TUI loop iteration");
+            }
+
             // Phase F7: Skip render if within minimum frame interval (debounce burst events).
             let since_last = last_render.elapsed();
             if !needs_render && since_last < min_frame_interval {
@@ -226,6 +255,38 @@ impl TuiApp {
                 && self.state.last_keystroke.elapsed() > Duration::from_secs(2)
             {
                 self.state.typing_indicator = false;
+            }
+
+            // Watchdog: force UI unlock if agent is stuck longer than max duration.
+            if let Some(started) = self.agent_started_at {
+                let elapsed_secs = started.elapsed().as_secs();
+                if elapsed_secs > self.max_agent_duration_secs {
+                    tracing::warn!(
+                        elapsed_secs,
+                        max_secs = self.max_agent_duration_secs,
+                        agent_running = self.state.agent_running,
+                        prompts_queued = self.state.prompts_queued,
+                        "WATCHDOG TRIGGERED: Agent timeout exceeded - forcing UI unlock"
+                    );
+
+                    // Force unlock all state
+                    self.state.agent_running = false;
+                    self.state.prompts_queued = 0;
+                    self.state.spinner_active = false;
+                    self.state.focus = FocusZone::Prompt;
+                    self.state.agent_control = crate::tui::state::AgentControl::Running;
+                    self.agent_started_at = None;
+
+                    // Alert user
+                    self.activity.push_warning(
+                        &format!("Agent watchdog triggered after {} seconds - UI unlocked", elapsed_secs),
+                        Some("The agent may have hung. Check logs for details.")
+                    );
+                    self.toasts.push(Toast::new(
+                        format!("Agent timeout ({elapsed_secs}s) - UI force-unlocked"),
+                        ToastLevel::Warning
+                    ));
+                }
             }
 
             // Render frame.
@@ -407,9 +468,14 @@ impl TuiApp {
                         let current = if match_count > 0 { self.search_current + 1 } else { 0 };
                         overlay::render_search(frame, area, &self.state.overlay.input, match_count, current);
                     }
-                    Some(OverlayKind::PermissionPrompt { tool }) => {
-                        let tool_clone = tool.clone();
-                        overlay::render_permission_prompt(frame, area, &tool_clone);
+                    Some(OverlayKind::PermissionPrompt { .. }) => {
+                        // Phase I-6C: Render conversational permission overlay.
+                        if let Some(ref conv_overlay) = self.conversational_overlay {
+                            conv_overlay.render(area, frame.buffer_mut());
+                        } else {
+                            // Fallback to simple prompt (shouldn't happen).
+                            overlay::render_permission_prompt(frame, area, "(unknown)");
+                        }
                     }
                     None => {}
                 }
@@ -470,9 +536,12 @@ impl TuiApp {
             }
 
             if self.state.should_quit {
+                tracing::debug!(iterations = loop_iterations, "TUI loop exiting: should_quit = true");
                 break;
             }
         }
+
+        tracing::debug!(iterations = loop_iterations, "TUI loop completed normally");
 
         // Restore terminal.
         let mut stdout = io::stdout();
@@ -602,26 +671,61 @@ impl TuiApp {
     fn handle_overlay_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
+        // Phase I-6C: Route permission prompt input through conversational overlay.
+        if matches!(self.state.overlay.active, Some(OverlayKind::PermissionPrompt { .. })) {
+            // Special case: Esc always closes.
+            if matches!(key.code, KeyCode::Esc) {
+                self.conversational_overlay = None;
+                self.state.agent_control = AgentControl::Running;
+                self.state.overlay.close();
+                return;
+            }
+
+            // Route all other input through the conversational overlay.
+            if let Some(ref mut conv_overlay) = self.conversational_overlay {
+                let input_char = match key.code {
+                    KeyCode::Enter => '\n',
+                    KeyCode::Backspace => '\x7f',
+                    KeyCode::Char(c) => c,
+                    _ => return, // Ignore other keys
+                };
+
+                if let Some(msg) = conv_overlay.handle_input(input_char) {
+                    // Terminal state reached — convert to boolean and send.
+                    use crate::repl::conversation_protocol::PermissionMessage;
+                    let approved = matches!(msg, PermissionMessage::Approve);
+                    let _ = self.perm_tx.send(approved);
+
+                    let status_msg = if approved {
+                        "[control] Action approved"
+                    } else {
+                        "[control] Action rejected"
+                    };
+                    if approved {
+                        self.activity.push_info(status_msg);
+                    } else {
+                        self.activity.push_warning(status_msg, None);
+                    }
+
+                    self.conversational_overlay = None;
+                    self.state.agent_control = AgentControl::Running;
+                    self.state.overlay.close();
+                }
+            }
+            return;
+        }
+
+        // Non-permission overlays: use original logic.
         match key.code {
             KeyCode::Esc => {
                 if matches!(self.state.overlay.active, Some(OverlayKind::Search)) {
                     self.search_matches.clear();
                     self.search_current = 0;
                 }
-                // Resetear agent_control si se cierra el overlay de permisos
-                if matches!(self.state.overlay.active, Some(OverlayKind::PermissionPrompt { .. })) {
-                    self.state.agent_control = AgentControl::Running;
-                }
                 self.state.overlay.close();
             }
             KeyCode::Enter => {
                 match &self.state.overlay.active {
-                    Some(OverlayKind::PermissionPrompt { .. }) => {
-                        let _ = self.perm_tx.send(true);
-                        self.activity.push_info("[control] Action approved");
-                        self.state.agent_control = AgentControl::Running;
-                        self.state.overlay.close();
-                    }
                     Some(OverlayKind::CommandPalette) => {
                         let action = self.state.overlay.filtered_items
                             .get(self.state.overlay.selected)
@@ -660,28 +764,8 @@ impl TuiApp {
                 self.refilter_palette();
                 self.rerun_search();
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if matches!(self.state.overlay.active, Some(OverlayKind::PermissionPrompt { .. })) {
-                    let _ = self.perm_tx.send(true);
-                    self.activity.push_info("[control] Action approved");
-                    self.state.agent_control = AgentControl::Running;
-                    self.state.overlay.close();
-                } else {
-                    self.state.overlay.type_char('y');
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                if matches!(self.state.overlay.active, Some(OverlayKind::PermissionPrompt { .. })) {
-                    let _ = self.perm_tx.send(false);
-                    self.activity.push_warning("[control] Action rejected", None);
-                    self.state.agent_control = AgentControl::Running;
-                    self.state.overlay.close();
-                } else {
-                    self.state.overlay.type_char('n');
-                }
-            }
             KeyCode::Char(c) => {
-                // Y/N already handled above for permission prompts.
+                // All character input for other overlays.
                 self.state.overlay.type_char(c);
                 self.refilter_palette();
                 self.rerun_search();
@@ -1055,9 +1139,13 @@ impl TuiApp {
                 self.state.prompts_queued = self.state.prompts_queued.saturating_sub(1);
                 self.state.agent_running = true;
 
+                // Start watchdog timer to prevent permanent UI freeze
+                self.agent_started_at = Some(Instant::now());
+
                 tracing::debug!(
                     agent_running = self.state.agent_running,
                     prompts_queued = self.state.prompts_queued,
+                    watchdog_started = true,
                     "Agent dequeued and started processing prompt"
                 );
             }
@@ -1079,22 +1167,46 @@ impl TuiApp {
                 tracing::debug!(queued = count, "Prompt queue status updated");
             }
             UiEvent::AgentDone => {
+                // Capture state BEFORE changes for debugging
+                let before_agent_running = self.state.agent_running;
+                let before_prompts_queued = self.state.prompts_queued;
+                let watchdog_elapsed = self.agent_started_at.map(|t| t.elapsed().as_secs());
+
+                tracing::debug!(
+                    before_agent_running,
+                    before_prompts_queued,
+                    watchdog_elapsed_secs = ?watchdog_elapsed,
+                    "AgentDone event received - transitioning to idle state"
+                );
+
+                // Apply state transitions
                 self.state.agent_running = false;
                 self.state.spinner_active = false;
                 self.state.focus = FocusZone::Prompt;
                 self.state.agent_control = crate::tui::state::AgentControl::Running;
-                // Only show toast if no more prompts queued
-                if self.state.prompts_queued == 0 {
+
+                // Clear watchdog timer
+                self.agent_started_at = None;
+
+                // Validation: warn if prompts still queued (expected if user queued during processing)
+                if self.state.prompts_queued > 0 {
+                    tracing::info!(
+                        prompts_queued = self.state.prompts_queued,
+                        "AgentDone: prompts still queued - agent will process next prompt"
+                    );
+                } else {
+                    // Only show completion toast if queue is empty
                     self.toasts.push(Toast::new("Agent completed", ToastLevel::Success));
                 }
 
-                // Logging de estado después de completar
+                // Log final state AFTER changes
                 tracing::debug!(
-                    agent_running = self.state.agent_running,
-                    prompts_queued = self.state.prompts_queued,
+                    after_agent_running = self.state.agent_running,
+                    after_prompts_queued = self.state.prompts_queued,
                     agent_control = ?self.state.agent_control,
                     focus = ?self.state.focus,
-                    "Agent completed processing"
+                    watchdog_cleared = true,
+                    "AgentDone: state transition complete - UI ready for input"
                 );
             }
             UiEvent::Quit => {
@@ -1165,9 +1277,18 @@ impl TuiApp {
                 let label = if hit { "hit" } else { "miss" };
                 self.activity.push_info(&format!("[speculative {label}] {tool}"));
             }
-            UiEvent::PermissionAwaiting { tool } => {
+            UiEvent::PermissionAwaiting { tool, args, risk_level } => {
                 self.activity.push_info(&format!("[permission] awaiting approval for {tool}"));
                 self.state.agent_control = crate::tui::state::AgentControl::WaitingApproval;
+
+                // Phase I-6C: Create conversational overlay instance.
+                let risk = match risk_level.as_str() {
+                    "High" => crate::repl::adaptive_prompt::RiskLevel::High,
+                    "Medium" => crate::repl::adaptive_prompt::RiskLevel::Medium,
+                    _ => crate::repl::adaptive_prompt::RiskLevel::Low,
+                };
+                self.conversational_overlay = Some(ConversationalOverlay::new(&tool, args.clone(), risk));
+
                 self.state.overlay.open(OverlayKind::PermissionPrompt { tool: tool.clone() });
                 self.toasts.push(Toast::new(
                     format!("Approval needed: {tool}"),
@@ -1184,6 +1305,18 @@ impl TuiApp {
             }
             UiEvent::ConsolidationStatus { action } => {
                 self.activity.push_info(&format!("[memory] {action}"));
+            }
+            UiEvent::ConsolidationComplete { merged, pruned, duration_ms } => {
+                let duration_s = duration_ms as f64 / 1000.0;
+                self.activity.push_info(&format!(
+                    "[memory] consolidation complete: merged={merged}, pruned={pruned}, {duration_s:.2}s"
+                ));
+                tracing::debug!(
+                    merged,
+                    pruned,
+                    duration_ms,
+                    "Memory consolidation completed successfully"
+                );
             }
             UiEvent::ToolRetrying { tool, attempt, max_attempts, delay_ms } => {
                 self.activity.push_warning(
@@ -1404,10 +1537,11 @@ fn event_summary(ev: &UiEvent) -> String {
         UiEvent::CompactionComplete { .. } => constants::EVENT_COMPACTION.into(),
         UiEvent::CacheStatus { hit, .. } => format!("Cache({})", if *hit { "hit" } else { "miss" }),
         UiEvent::SpeculativeResult { tool, hit } => format!("Speculative({tool},{})", if *hit { "hit" } else { "miss" }),
-        UiEvent::PermissionAwaiting { tool } => format!("PermAwait({tool})"),
+        UiEvent::PermissionAwaiting { tool, risk_level, .. } => format!("PermAwait({tool},{risk_level})"),
         UiEvent::ReflectionStarted => constants::EVENT_REFLECTION_START.into(),
         UiEvent::ReflectionComplete { .. } => constants::EVENT_REFLECTION_DONE.into(),
         UiEvent::ConsolidationStatus { .. } => constants::EVENT_CONSOLIDATION.into(),
+        UiEvent::ConsolidationComplete { merged, pruned, .. } => format!("ConsolidationDone(m:{merged},p:{pruned})"),
         UiEvent::ToolRetrying { tool, attempt, .. } => format!("ToolRetry({tool},{attempt})"),
         UiEvent::ContextTierUpdate { .. } => constants::EVENT_CONTEXT_UPDATE.into(),
         UiEvent::ReasoningUpdate { strategy, .. } => format!("Reasoning({strategy})"),
@@ -2090,8 +2224,15 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
         let (perm_tx, mut perm_rx) = mpsc::unbounded_channel();
         let mut app = TuiApp::new(rx, prompt_tx, ctrl_tx, perm_tx);
-        app.state.overlay.open(OverlayKind::PermissionPrompt { tool: "bash".into() });
+        // Phase I-6C: Trigger PermissionAwaiting event to create conversational overlay.
+        app.handle_ui_event(UiEvent::PermissionAwaiting {
+            tool: "bash".into(),
+            args: serde_json::json!({"command": "echo test"}),
+            risk_level: "Low".into(),
+        });
+        // Type 'y' then Enter to approve.
         app.handle_overlay_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        app.handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(perm_rx.try_recv().unwrap(), true);
         assert!(!app.state.overlay.is_active()); // overlay closed
     }
@@ -2104,8 +2245,15 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
         let (perm_tx, mut perm_rx) = mpsc::unbounded_channel();
         let mut app = TuiApp::new(rx, prompt_tx, ctrl_tx, perm_tx);
-        app.state.overlay.open(OverlayKind::PermissionPrompt { tool: "bash".into() });
+        // Phase I-6C: Trigger PermissionAwaiting event to create conversational overlay.
+        app.handle_ui_event(UiEvent::PermissionAwaiting {
+            tool: "bash".into(),
+            args: serde_json::json!({"command": "rm -rf /tmp/*.txt"}),
+            risk_level: "High".into(),
+        });
+        // Type 'n' then Enter to reject.
         app.handle_overlay_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(perm_rx.try_recv().unwrap(), false);
         assert!(!app.state.overlay.is_active());
     }
@@ -2118,7 +2266,16 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
         let (perm_tx, mut perm_rx) = mpsc::unbounded_channel();
         let mut app = TuiApp::new(rx, prompt_tx, ctrl_tx, perm_tx);
-        app.state.overlay.open(OverlayKind::PermissionPrompt { tool: "file_write".into() });
+        // Phase I-6C: Trigger PermissionAwaiting event to create conversational overlay.
+        app.handle_ui_event(UiEvent::PermissionAwaiting {
+            tool: "file_write".into(),
+            args: serde_json::json!({"path": "/tmp/test.txt", "content": "Hello"}),
+            risk_level: "Medium".into(),
+        });
+        // Type 'yes' then Enter to approve.
+        for c in "yes".chars() {
+            app.handle_overlay_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         app.handle_overlay_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(perm_rx.try_recv().unwrap(), true);
     }
@@ -2171,7 +2328,11 @@ mod tests {
     #[test]
     fn permission_awaiting_emits_toast() {
         let mut app = test_app();
-        app.handle_ui_event(UiEvent::PermissionAwaiting { tool: "bash".into() });
+        app.handle_ui_event(UiEvent::PermissionAwaiting {
+            tool: "bash".into(),
+            args: serde_json::json!({"command": "echo test"}),
+            risk_level: "Low".into(),
+        });
         assert!(!app.toasts.is_empty());
     }
 
@@ -2346,7 +2507,7 @@ mod tests {
             UiEvent::CompactionComplete { old_msgs: 10, new_msgs: 5, tokens_saved: 100 },
             UiEvent::CacheStatus { hit: true, source: "s".into() },
             UiEvent::SpeculativeResult { tool: "t".into(), hit: false },
-            UiEvent::PermissionAwaiting { tool: "bash".into() },
+            UiEvent::PermissionAwaiting { tool: "bash".into(), args: serde_json::json!({}), risk_level: "Low".into() },
             UiEvent::ReflectionStarted,
             UiEvent::ReflectionComplete { analysis: "a".into(), score: 0.5 },
             UiEvent::ConsolidationStatus { action: "a".into() },

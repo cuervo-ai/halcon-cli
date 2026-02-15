@@ -1,5 +1,7 @@
 //! UI state management for the TUI application.
 
+use std::time::Instant;
+
 /// Which zone currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusZone {
@@ -103,6 +105,18 @@ pub struct AppState {
     /// Token budget tracking.
     pub token_budget: TokenBudget,
 
+    // Phase 44B: Continuous interaction state
+    /// Number of prompts currently queued in the channel.
+    pub prompts_queued: usize,
+    /// Description of current agent task (for status display).
+    pub current_task: String,
+
+    // Phase 44C: Typing indicator
+    /// Whether user is currently typing in prompt.
+    pub typing_indicator: bool,
+    /// Timestamp of last keystroke for auto-hide.
+    pub last_keystroke: Instant,
+
     // Phase C: Overlay state
     /// Overlay system state (command palette, search, help, permissions).
     pub overlay: super::overlay::OverlayState,
@@ -156,6 +170,10 @@ impl AppState {
             agent_control: AgentControl::Running,
             dry_run_active: false,
             token_budget: TokenBudget::default(),
+            prompts_queued: 0,
+            current_task: String::new(),
+            typing_indicator: false,
+            last_keystroke: Instant::now(),
             overlay: super::overlay::OverlayState::new(),
             agent_state: super::events::AgentState::Idle,
         }
