@@ -25,4 +25,32 @@ pub mod conversational_overlay;
 #[cfg(feature = "tui")]
 pub mod theme_bridge;
 #[cfg(feature = "tui")]
+pub mod input_state;
+#[cfg(feature = "tui")]
+pub mod permission_context;
+#[cfg(feature = "tui")]
+pub mod transition_engine;
+#[cfg(feature = "tui")]
+pub mod highlight;
+#[cfg(feature = "tui")]
 pub mod widgets;
+
+// P0.1A: Core activity types (extracted from legacy activity.rs)
+#[cfg(feature = "tui")]
+pub mod activity_types;
+
+// Phase A1: SOTA Activity Architecture — Modular redesign
+#[cfg(feature = "tui")]
+pub mod activity_model;
+#[cfg(feature = "tui")]
+pub mod activity_navigator;
+#[cfg(feature = "tui")]
+pub mod activity_controller;
+
+// Phase A2: Virtual Scroll Optimization
+#[cfg(feature = "tui")]
+pub mod activity_renderer;
+
+// Phase A3: Clipboard support
+#[cfg(feature = "tui")]
+pub mod clipboard;

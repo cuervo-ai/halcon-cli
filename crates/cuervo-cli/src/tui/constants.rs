@@ -63,8 +63,30 @@ pub const HELP_SECTION_NAVIGATION: &[(&str, &str)] = &[
     ("Ctrl+K", "Clear prompt"),
     ("Ctrl+↑/↓", "Prompt history back/forward"),
     ("Shift+↑/↓", "Scroll activity up/down"),
-    ("PgUp/PgDn", "Scroll activity up/down"),
+    ("PgUp/PgDn", "Scroll activity by page"),
+    ("Home", "Scroll to top"),
     ("End", "Scroll to bottom"),
+];
+
+/// Help section: Activity Zone navigation (when Tab focuses activity).
+/// Phase 2 NAV-001: Jump commands + selection + expand/collapse.
+/// Phase 3 SRCH-001/002: Fuzzy and regex search modes.
+pub const HELP_SECTION_ACTIVITY: &[(&str, &str)] = &[
+    ("J/K", "Select next/previous line (vim-style)"),
+    ("gu", "Jump to next user message"),
+    ("gt", "Jump to next tool execution"),
+    ("ge", "Jump to next error"),
+    ("/", "Enter search mode"),
+    ("n/N", "Next/previous search match (in search mode)"),
+    ("f", "Toggle fuzzy search (typo tolerance, in search mode)"),
+    ("r", "Toggle regex search (pattern matching, in search mode)"),
+    ("Enter", "Expand/collapse selected tool or code block"),
+    ("y", "Copy (yank) selected line to clipboard"),
+    ("i", "Inspect selected tool result"),
+    ("p", "Jump to plan step for selected tool"),
+    ("x", "Expand all tool executions"),
+    ("z", "Collapse all tool executions"),
+    ("Esc", "Clear selection"),
 ];
 
 /// Help section: Panels & Overlays keybindings.
@@ -96,6 +118,7 @@ pub const HELP_SECTION_GENERAL: &[(&str, &str)] = &[
 
 /// Help section headers.
 pub const HELP_HEADER_NAVIGATION: &str = "  Navigation";
+pub const HELP_HEADER_ACTIVITY: &str = "  Activity Zone (when Tab focuses activity)";
 pub const HELP_HEADER_PANELS: &str = "  Panels & Overlays";
 pub const HELP_HEADER_AGENT: &str = "  Agent Control (while agent is running)";
 pub const HELP_HEADER_GENERAL: &str = "  General";

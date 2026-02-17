@@ -45,6 +45,22 @@ pub struct StatusState {
     pub reasoning_strategy: String,
     /// Cache hit rate percentage (Expert mode).
     pub cache_hit_rate: Option<f64>,
+    /// Phase 4B-Lite: Number of prompts currently queued.
+    pub prompts_queued: usize,
+    /// Phase 4B-Lite: Number of agents currently processing.
+    pub agents_active: usize,
+    /// Phase A3: Contextual hints for Activity zone navigation.
+    pub activity_hints: Vec<(&'static str, &'static str)>,
+    /// Context servers count for button display.
+    pub context_servers_count: usize,
+    /// Phase 3 SRCH-003: Search mode active and current mode label.
+    pub search_active: bool,
+    /// Phase 3 SRCH-003: Search mode label ("Exact"/"Fuzzy"/"Regex").
+    pub search_mode: String,
+    /// Phase 3 SRCH-003: Current match position (1-indexed).
+    pub search_current: Option<usize>,
+    /// Phase 3 SRCH-003: Total match count.
+    pub search_total: usize,
 }
 
 impl StatusState {
@@ -68,6 +84,14 @@ impl StatusState {
             ui_mode: UiMode::Standard,
             reasoning_strategy: String::new(),
             cache_hit_rate: None,
+            prompts_queued: 0,
+            agents_active: 0,
+            activity_hints: Vec::new(),
+            context_servers_count: 0,
+            search_active: false, // Phase 3 SRCH-003
+            search_mode: String::new(), // Phase 3 SRCH-003
+            search_current: None, // Phase 3 SRCH-003
+            search_total: 0, // Phase 3 SRCH-003
         }
     }
 
@@ -122,6 +146,12 @@ impl StatusState {
         if let Some(o) = output_tokens {
             self.output_tokens = o;
         }
+    }
+
+    /// Phase 4B-Lite: Update queue status display.
+    pub fn update_queue_status(&mut self, prompts_queued: usize, agents_active: usize) {
+        self.prompts_queued = prompts_queued;
+        self.agents_active = agents_active;
     }
 
     /// Format token count with K suffix for large numbers.
@@ -241,6 +271,24 @@ impl StatusState {
                 format!("R{}", self.round),
                 Style::default().fg(c_warning),
             ));
+
+            // Phase 4B-Lite: Show queue status when prompts are queued
+            if self.prompts_queued > 0 || self.agents_active > 0 {
+                spans.push(Span::styled(" ", Style::default()));
+                if self.agents_active > 0 {
+                    spans.push(Span::styled(
+                        format!("⚙{}", self.agents_active),
+                        Style::default().fg(p.running_ratatui()),
+                    ));
+                }
+                if self.prompts_queued > 0 {
+                    spans.push(Span::styled(
+                        format!(" +{}", self.prompts_queued),
+                        Style::default().fg(c_muted),
+                    ));
+                }
+            }
+
             spans.push(sep.clone());
             // Token breakdown: ↑input ↓output (total)
             spans.push(Span::styled(
@@ -306,10 +354,23 @@ impl StatusState {
 
             // Key hints when paused or step mode
             if matches!(self.agent_control, AgentControl::Paused | AgentControl::StepMode) {
-                spans.push(sep);
+                spans.push(sep.clone());
                 spans.push(Span::styled(
                     "[Space] resume  [N] step  [Esc] cancel",
                     Style::default().fg(c_muted),
+                ));
+            }
+
+            // Context Servers button (always visible on right side)
+            if self.context_servers_count > 0 {
+                spans.push(sep);
+                spans.push(Span::styled(
+                    " [Ctrl+S] ",
+                    Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("⚙ {} servers", self.context_servers_count),
+                    Style::default().fg(c_success),
                 ));
             }
 
@@ -318,6 +379,69 @@ impl StatusState {
     }
 
     /// Build the expert mode line with strategy, cache, UI mode.
+    /// Phase A3: Render contextual hints line for Activity navigation.
+    fn render_hints_line(&self) -> Line<'static> {
+        let p = &theme::active().palette;
+        let c_accent = p.accent_ratatui();
+        let c_muted = p.muted_ratatui();
+
+        let mut spans = vec![
+            Span::styled("  Hints: ", Style::default().fg(c_muted)),
+        ];
+
+        for (i, (key, label)) in self.activity_hints.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" │ ", Style::default().fg(c_muted)));
+            }
+            spans.push(Span::styled(
+                format!("[{}]", key),
+                Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" {}", label),
+                Style::default().fg(c_muted),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
+    /// Phase 3 SRCH-003: Render search mode indicator line.
+    fn render_search_line(&self) -> Line<'static> {
+        let p = &theme::active().palette;
+        let c_accent = p.accent_ratatui();
+        let c_success = p.success_ratatui();
+        let c_muted = p.muted_ratatui();
+
+        let mut spans = vec![
+            Span::styled("  Search: ", Style::default().fg(c_muted)),
+        ];
+
+        // Mode indicator
+        spans.push(Span::styled(
+            format!("[{}]", self.search_mode),
+            Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+        ));
+
+        // Match counter
+        if let Some(current) = self.search_current {
+            spans.push(Span::styled(" │ ", Style::default().fg(c_muted)));
+            spans.push(Span::styled("Match ", Style::default().fg(c_muted)));
+            spans.push(Span::styled(
+                format!("{}/{}", current, self.search_total),
+                Style::default().fg(c_success).add_modifier(Modifier::BOLD),
+            ));
+        } else if self.search_total == 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(c_muted)));
+            spans.push(Span::styled(
+                "No matches",
+                Style::default().fg(c_muted),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
     fn render_expert_line(&self) -> Option<Line<'static>> {
         if self.ui_mode != UiMode::Expert || self.provider.is_empty() {
             return None;
@@ -373,6 +497,16 @@ impl StatusState {
         // Add expert mode line if applicable
         if let Some(expert_line) = self.render_expert_line() {
             lines.push(expert_line);
+        }
+
+        // Phase 3 SRCH-003: Add search indicator when active
+        if self.search_active {
+            lines.push(self.render_search_line());
+        }
+
+        // Phase A3: Add contextual hints when available
+        if !self.activity_hints.is_empty() {
+            lines.push(self.render_hints_line());
         }
 
         let paragraph = Paragraph::new(lines).block(
