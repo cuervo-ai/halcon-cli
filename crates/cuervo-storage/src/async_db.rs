@@ -590,6 +590,137 @@ impl AsyncDatabase {
         .await
         .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
     }
+
+    // --- Permission Rules ---
+
+    pub async fn save_permission_rule(&self, rule: &cuervo_core::types::PermissionRule) -> Result<()> {
+        let db = self.inner.clone();
+        let rule = rule.clone();
+        tokio::task::spawn_blocking(move || db.save_permission_rule(&rule))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn update_permission_rule(&self, rule: &cuervo_core::types::PermissionRule) -> Result<()> {
+        let db = self.inner.clone();
+        let rule = rule.clone();
+        tokio::task::spawn_blocking(move || db.update_permission_rule(&rule))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn delete_permission_rule(&self, rule_id: &str) -> Result<()> {
+        let db = self.inner.clone();
+        let rule_id = rule_id.to_string();
+        tokio::task::spawn_blocking(move || db.delete_permission_rule(&rule_id))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_permission_rule(&self, rule_id: &str) -> Result<Option<cuervo_core::types::PermissionRule>> {
+        let db = self.inner.clone();
+        let rule_id = rule_id.to_string();
+        tokio::task::spawn_blocking(move || db.load_permission_rule(&rule_id))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn find_permission_rules_by_scope(
+        &self,
+        scope: cuervo_core::types::RuleScope,
+    ) -> Result<Vec<cuervo_core::types::PermissionRule>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.find_permission_rules_by_scope(scope))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn find_permission_rules_by_tool(&self, tool_name: &str) -> Result<Vec<cuervo_core::types::PermissionRule>> {
+        let db = self.inner.clone();
+        let tool_name = tool_name.to_string();
+        tokio::task::spawn_blocking(move || db.find_permission_rules_by_tool(&tool_name))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn find_permission_rules_by_scope_value(
+        &self,
+        scope: cuervo_core::types::RuleScope,
+        scope_value: &str,
+    ) -> Result<Vec<cuervo_core::types::PermissionRule>> {
+        let db = self.inner.clone();
+        let scope_value = scope_value.to_string();
+        tokio::task::spawn_blocking(move || db.find_permission_rules_by_scope_value(scope, &scope_value))
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn load_all_permission_rules(&self) -> Result<Vec<cuervo_core::types::PermissionRule>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.load_all_permission_rules())
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    pub async fn cleanup_expired_permission_rules(&self) -> Result<usize> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.cleanup_expired_permission_rules())
+            .await
+            .map_err(|e| CuervoError::Internal(format!("spawn_blocking: {e}")))?
+    }
+
+    // --- Activity Search History (Phase 3 SRCH-004) ---
+
+    pub async fn save_search_history(
+        &self,
+        query: String,
+        search_mode: String,
+        match_count: i32,
+        session_id: Option<String>,
+    ) -> rusqlite::Result<i64> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            db.save_search_history(&query, &search_mode, match_count, session_id.as_deref())
+        })
+        .await
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("spawn_blocking: {e}"),
+        ))))?
+    }
+
+    pub async fn load_search_history(
+        &self,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<crate::db::activity_search::ActivitySearchEntry>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.load_search_history(limit))
+            .await
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn_blocking: {e}"),
+            ))))?
+    }
+
+    pub async fn get_recent_queries(&self, limit: usize) -> rusqlite::Result<Vec<String>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.get_recent_queries(limit))
+            .await
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn_blocking: {e}"),
+            ))))?
+    }
+
+    pub async fn clear_search_history(&self) -> rusqlite::Result<()> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || db.clear_search_history())
+            .await
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn_blocking: {e}"),
+            ))))?
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! Split into domain-specific sub-modules, each adding methods
 //! via `impl Database` blocks.
 
+pub mod activity_search;
 mod agent_tasks;
 mod audit;
 mod cache_repo;
@@ -10,10 +11,12 @@ mod checkpoints;
 mod episodes;
 mod memories;
 mod metrics_repo;
+pub mod permissions;
 mod plans;
 mod policies;
 pub mod reasoning;
 mod resilience_repo;
+mod search;
 mod sessions;
 pub mod structured_tasks;
 mod traces;
@@ -32,6 +35,7 @@ pub use agent_tasks::AgentTaskRow;
 pub use checkpoints::SessionCheckpoint;
 pub use memories::{blob_to_f32_vec, cosine_similarity};
 pub use plans::PlanStepRow;
+pub use search::SearchDocument;
 pub use structured_tasks::StructuredTaskRow;
 
 /// SQLite database handle for Cuervo CLI.
@@ -40,10 +44,22 @@ pub use structured_tasks::StructuredTaskRow;
 /// The connection is synchronous (rusqlite), used from async code
 /// via `tokio::task::spawn_blocking` in callers.
 pub struct Database {
-    pub(crate) conn: Mutex<Connection>,
+    conn: Mutex<Connection>,
     db_path: PathBuf,
     /// Cached last audit hash — eliminates 1 SELECT per audit event insert.
     last_audit_hash: Mutex<String>,
+}
+
+impl Database {
+    /// Execute a closure with access to the underlying connection.
+    /// For use by external crates (cuervo-search) that need direct DB access.
+    pub fn with_connection<F, T>(&self, f: F) -> rusqlite::Result<T>
+    where
+        F: FnOnce(&Connection) -> rusqlite::Result<T>,
+    {
+        let conn = self.conn.lock().unwrap();
+        f(&conn)
+    }
 }
 
 impl Database {

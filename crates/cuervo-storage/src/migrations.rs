@@ -19,6 +19,10 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
     (15, "metrics_composite_index", MIGRATION_015),
     (16, "structured_tasks", MIGRATION_016),
     (17, "reasoning_experience", MIGRATION_017),
+    (18, "permission_rules", MIGRATION_018),
+    (19, "sdlc_context_servers", MIGRATION_019),
+    (20, "native_search_engine", MIGRATION_020),
+    (21, "activity_search_history", MIGRATION_021),
 ];
 
 const MIGRATION_001: &str = r#"
@@ -387,6 +391,479 @@ CREATE TABLE IF NOT EXISTS reasoning_experience (
 CREATE INDEX IF NOT EXISTS idx_reasoning_exp_updated ON reasoning_experience(last_updated DESC);
 "#;
 
+const MIGRATION_018: &str = r#"
+-- Permission rules: persistent authorization decisions with scoping and pattern matching.
+-- Enables contextual permission system:
+--   - Session: temporary rules (expired on exit)
+--   - Directory: scoped to specific working directory
+--   - Repository: scoped to git repository root
+--   - Global: applies everywhere
+CREATE TABLE IF NOT EXISTS permission_rules (
+    rule_id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL CHECK(scope IN ('session', 'directory', 'repository', 'global')),
+    scope_value TEXT NOT NULL,
+    tool_pattern TEXT NOT NULL,
+    tool_pattern_type TEXT NOT NULL CHECK(tool_pattern_type IN ('exact', 'glob', 'regex')),
+    param_pattern TEXT,
+    decision TEXT NOT NULL CHECK(decision IN (
+        'allowed', 'allowed_always', 'allowed_for_directory', 'allowed_for_repository',
+        'allowed_for_pattern', 'allowed_this_session', 'denied', 'denied_for_directory',
+        'denied_for_pattern'
+    )),
+    reason TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    active INTEGER NOT NULL DEFAULT 1
+);
+
+-- Performance indexes for rule matching (O(1) exact → O(D) directory → O(P) pattern → O(1) global)
+CREATE INDEX IF NOT EXISTS idx_permission_rules_lookup
+    ON permission_rules(scope, scope_value, tool_pattern, active)
+    WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_permission_rules_tool
+    ON permission_rules(tool_pattern, active)
+    WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_permission_rules_scope
+    ON permission_rules(scope, active)
+    WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_permission_rules_created
+    ON permission_rules(created_at DESC);
+"#;
+
+const MIGRATION_019: &str = r#"
+-- SDLC Context Servers: persistent state for phase-aware context delivery.
+-- Enables SDLC-aware context system:
+--   - Product requirements (Discovery phase)
+--   - Architecture decisions (Planning phase)
+--   - Code patterns & structure (Implementation phase)
+--   - Test results & coverage (Testing phase)
+--   - Runtime logs & metrics (Monitoring phase)
+--   - Support tickets & incidents (Support phase)
+
+-- Product requirements (Server 1: Requirements & Product)
+CREATE TABLE IF NOT EXISTS product_requirements (
+    req_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('proposed', 'approved', 'in_development', 'completed', 'cancelled')),
+    priority INTEGER NOT NULL CHECK(priority >= 0 AND priority <= 3),
+    dependencies_json TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over requirements
+CREATE VIRTUAL TABLE IF NOT EXISTS product_requirements_fts USING fts5(
+    title, description, content='product_requirements', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS product_requirements_ai AFTER INSERT ON product_requirements BEGIN
+    INSERT INTO product_requirements_fts(rowid, title, description)
+    VALUES (new.rowid, new.title, new.description);
+END;
+
+CREATE TRIGGER IF NOT EXISTS product_requirements_au AFTER UPDATE ON product_requirements BEGIN
+    UPDATE product_requirements_fts SET title = new.title, description = new.description
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS product_requirements_ad AFTER DELETE ON product_requirements BEGIN
+    DELETE FROM product_requirements_fts WHERE rowid = old.rowid;
+END;
+
+-- Architecture documents (Server 2: Architecture & Design)
+CREATE TABLE IF NOT EXISTS architecture_documents (
+    doc_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    doc_type TEXT NOT NULL CHECK(doc_type IN ('ADR', 'Design', 'Diagram', 'Specification', 'RFC')),
+    status TEXT NOT NULL CHECK(status IN ('draft', 'active', 'approved', 'superseded', 'deprecated')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over architecture docs
+CREATE VIRTUAL TABLE IF NOT EXISTS architecture_documents_fts USING fts5(
+    title, content, content='architecture_documents', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS architecture_documents_ai AFTER INSERT ON architecture_documents BEGIN
+    INSERT INTO architecture_documents_fts(rowid, title, content)
+    VALUES (new.rowid, new.title, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS architecture_documents_au AFTER UPDATE ON architecture_documents BEGIN
+    UPDATE architecture_documents_fts SET title = new.title, content = new.content
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS architecture_documents_ad AFTER DELETE ON architecture_documents BEGIN
+    DELETE FROM architecture_documents_fts WHERE rowid = old.rowid;
+END;
+
+-- CI/CD Workflows (Server 4: Workflow & CI/CD)
+CREATE TABLE IF NOT EXISTS ci_workflows (
+    workflow_id TEXT PRIMARY KEY,
+    workflow_name TEXT NOT NULL,
+    workflow_file TEXT NOT NULL,
+    description TEXT NOT NULL,
+    trigger_events TEXT NOT NULL,
+    last_run_status TEXT CHECK(last_run_status IN ('success', 'failure', 'pending', 'cancelled', 'skipped')),
+    last_run_at INTEGER,
+    last_run_duration_ms INTEGER,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over workflows
+CREATE VIRTUAL TABLE IF NOT EXISTS ci_workflows_fts USING fts5(
+    workflow_name, description, workflow_file, content='ci_workflows', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS ci_workflows_ai AFTER INSERT ON ci_workflows BEGIN
+    INSERT INTO ci_workflows_fts(rowid, workflow_name, description, workflow_file)
+    VALUES (new.rowid, new.workflow_name, new.description, new.workflow_file);
+END;
+
+CREATE TRIGGER IF NOT EXISTS ci_workflows_au AFTER UPDATE ON ci_workflows BEGIN
+    UPDATE ci_workflows_fts SET workflow_name = new.workflow_name, description = new.description, workflow_file = new.workflow_file
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS ci_workflows_ad AFTER DELETE ON ci_workflows BEGIN
+    DELETE FROM ci_workflows_fts WHERE rowid = old.rowid;
+END;
+
+-- Test Results (Server 5: Test Coverage & Results)
+CREATE TABLE IF NOT EXISTS test_results (
+    test_id TEXT PRIMARY KEY,
+    test_suite TEXT NOT NULL,
+    test_name TEXT NOT NULL,
+    test_file TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('passed', 'failed', 'skipped', 'error')),
+    duration_ms INTEGER,
+    failure_message TEXT,
+    stack_trace TEXT,
+    coverage_percent REAL,
+    assertions_count INTEGER,
+    run_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over test results
+CREATE VIRTUAL TABLE IF NOT EXISTS test_results_fts USING fts5(
+    test_suite, test_name, test_file, failure_message, content='test_results', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS test_results_ai AFTER INSERT ON test_results BEGIN
+    INSERT INTO test_results_fts(rowid, test_suite, test_name, test_file, failure_message)
+    VALUES (new.rowid, new.test_suite, new.test_name, new.test_file, COALESCE(new.failure_message, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS test_results_au AFTER UPDATE ON test_results BEGIN
+    UPDATE test_results_fts SET test_suite = new.test_suite, test_name = new.test_name, test_file = new.test_file, failure_message = COALESCE(new.failure_message, '')
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS test_results_ad AFTER DELETE ON test_results BEGIN
+    DELETE FROM test_results_fts WHERE rowid = old.rowid;
+END;
+
+-- Runtime Metrics (Server 6: Monitoring & Observability)
+CREATE TABLE IF NOT EXISTS runtime_metrics (
+    metric_id TEXT PRIMARY KEY,
+    metric_name TEXT NOT NULL,
+    metric_type TEXT NOT NULL CHECK(metric_type IN ('counter', 'gauge', 'histogram', 'summary')),
+    metric_value REAL NOT NULL,
+    labels_json TEXT NOT NULL DEFAULT '{}',
+    service_name TEXT NOT NULL,
+    environment TEXT CHECK(environment IN ('dev', 'staging', 'production')),
+    severity TEXT CHECK(severity IN ('info', 'warning', 'error', 'critical')),
+    message TEXT,
+    timestamp INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over runtime metrics
+CREATE VIRTUAL TABLE IF NOT EXISTS runtime_metrics_fts USING fts5(
+    metric_name, service_name, message, content='runtime_metrics', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS runtime_metrics_ai AFTER INSERT ON runtime_metrics BEGIN
+    INSERT INTO runtime_metrics_fts(rowid, metric_name, service_name, message)
+    VALUES (new.rowid, new.metric_name, new.service_name, COALESCE(new.message, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_metrics_au AFTER UPDATE ON runtime_metrics BEGIN
+    UPDATE runtime_metrics_fts SET metric_name = new.metric_name, service_name = new.service_name, message = COALESCE(new.message, '')
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS runtime_metrics_ad AFTER DELETE ON runtime_metrics BEGIN
+    DELETE FROM runtime_metrics_fts WHERE rowid = old.rowid;
+END;
+
+-- Security Findings (Server 7: Security & Compliance)
+CREATE TABLE IF NOT EXISTS security_findings (
+    finding_id TEXT PRIMARY KEY,
+    finding_type TEXT NOT NULL CHECK(finding_type IN ('vulnerability', 'code_smell', 'secret_leak', 'compliance_violation', 'dependency_risk')),
+    severity TEXT NOT NULL CHECK(severity IN ('critical', 'high', 'medium', 'low', 'info')),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    affected_file TEXT,
+    affected_line INTEGER,
+    cve_id TEXT,
+    cvss_score REAL,
+    remediation TEXT,
+    status TEXT NOT NULL CHECK(status IN ('open', 'acknowledged', 'in_progress', 'resolved', 'false_positive', 'wont_fix')),
+    detected_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    created_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over security findings
+CREATE VIRTUAL TABLE IF NOT EXISTS security_findings_fts USING fts5(
+    title, description, affected_file, remediation, content='security_findings', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS security_findings_ai AFTER INSERT ON security_findings BEGIN
+    INSERT INTO security_findings_fts(rowid, title, description, affected_file, remediation)
+    VALUES (new.rowid, new.title, new.description, COALESCE(new.affected_file, ''), COALESCE(new.remediation, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS security_findings_au AFTER UPDATE ON security_findings BEGIN
+    UPDATE security_findings_fts SET title = new.title, description = new.description, affected_file = COALESCE(new.affected_file, ''), remediation = COALESCE(new.remediation, '')
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS security_findings_ad AFTER DELETE ON security_findings BEGIN
+    DELETE FROM security_findings_fts WHERE rowid = old.rowid;
+END;
+
+-- Support Incidents (Server 8: Support & Incidents)
+CREATE TABLE IF NOT EXISTS support_incidents (
+    incident_id TEXT PRIMARY KEY,
+    incident_type TEXT NOT NULL CHECK(incident_type IN ('bug_report', 'feature_request', 'user_feedback', 'crash_report', 'performance_issue', 'question')),
+    priority TEXT NOT NULL CHECK(priority IN ('critical', 'high', 'medium', 'low')),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    reporter TEXT,
+    affected_component TEXT,
+    reproducible BOOLEAN NOT NULL DEFAULT 0,
+    reproduction_steps TEXT,
+    error_message TEXT,
+    stack_trace TEXT,
+    resolution TEXT,
+    status TEXT NOT NULL CHECK(status IN ('new', 'triaged', 'in_progress', 'resolved', 'closed', 'duplicate', 'wont_fix')),
+    reported_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    created_at INTEGER NOT NULL
+);
+
+-- FTS5 index for semantic search over support incidents
+CREATE VIRTUAL TABLE IF NOT EXISTS support_incidents_fts USING fts5(
+    title, description, affected_component, error_message, resolution, content='support_incidents', content_rowid='rowid'
+);
+
+-- Triggers to keep FTS5 index synchronized
+CREATE TRIGGER IF NOT EXISTS support_incidents_ai AFTER INSERT ON support_incidents BEGIN
+    INSERT INTO support_incidents_fts(rowid, title, description, affected_component, error_message, resolution)
+    VALUES (new.rowid, new.title, new.description, COALESCE(new.affected_component, ''), COALESCE(new.error_message, ''), COALESCE(new.resolution, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS support_incidents_au AFTER UPDATE ON support_incidents BEGIN
+    UPDATE support_incidents_fts SET title = new.title, description = new.description, affected_component = COALESCE(new.affected_component, ''), error_message = COALESCE(new.error_message, ''), resolution = COALESCE(new.resolution, '')
+    WHERE rowid = new.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS support_incidents_ad AFTER DELETE ON support_incidents BEGIN
+    DELETE FROM support_incidents_fts WHERE rowid = old.rowid;
+END;
+
+-- SDLC phase history: tracks phase transitions per session
+CREATE TABLE IF NOT EXISTS sdlc_phase_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK(phase IN (
+        'discovery', 'planning', 'implementation', 'testing',
+        'review', 'deployment', 'monitoring', 'support'
+    )),
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    active_servers_json TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sdlc_history_session ON sdlc_phase_history(session_id, started_at DESC);
+
+-- Context server health: tracks operational status
+CREATE TABLE IF NOT EXISTS context_server_health (
+    server_name TEXT PRIMARY KEY,
+    server_type TEXT NOT NULL CHECK(server_type IN (
+        'requirements', 'architecture', 'codebase', 'workflow',
+        'testing', 'runtime', 'security', 'support'
+    )),
+    health_status TEXT NOT NULL CHECK(health_status IN ('healthy', 'degraded', 'unavailable')),
+    last_success_at INTEGER NOT NULL,
+    last_failure_at INTEGER,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER,
+    error_rate REAL NOT NULL DEFAULT 0.0,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_server_health_status
+    ON context_server_health(health_status, server_type);
+"#;
+
+const MIGRATION_020: &str = r#"
+-- Native Search Engine: local crawling, indexing, and retrieval.
+-- Eliminates dependency on external search APIs (Brave, Google).
+
+-- Documents store with zstd compression
+CREATE TABLE IF NOT EXISTS search_documents (
+    id BLOB PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    domain TEXT NOT NULL,
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    html_compressed BLOB,
+    indexed_at TEXT NOT NULL,
+    last_crawled TEXT,
+    pagerank REAL NOT NULL DEFAULT 0.0,
+    freshness_score REAL NOT NULL DEFAULT 1.0,
+    outlink_count INTEGER NOT NULL DEFAULT 0,
+    language TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_documents_domain ON search_documents(domain);
+CREATE INDEX IF NOT EXISTS idx_search_documents_indexed ON search_documents(indexed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_search_documents_pagerank ON search_documents(pagerank DESC);
+CREATE INDEX IF NOT EXISTS idx_search_documents_url ON search_documents(url);
+
+-- FTS5 full-text search index
+CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+    title,
+    text,
+    content='search_documents',
+    content_rowid='rowid',
+    tokenize='porter unicode61'
+);
+
+-- Triggers to keep FTS5 in sync
+CREATE TRIGGER IF NOT EXISTS search_documents_ai AFTER INSERT ON search_documents BEGIN
+    INSERT INTO search_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_documents_ad AFTER DELETE ON search_documents BEGIN
+    DELETE FROM search_fts WHERE rowid = old.rowid;
+END;
+
+CREATE TRIGGER IF NOT EXISTS search_documents_au AFTER UPDATE ON search_documents BEGIN
+    UPDATE search_fts SET title = new.title, text = new.text WHERE rowid = new.rowid;
+END;
+
+-- Metadata store (structured data from HTML)
+CREATE TABLE IF NOT EXISTS search_metadata (
+    doc_id BLOB PRIMARY KEY REFERENCES search_documents(id) ON DELETE CASCADE,
+    description TEXT,
+    author TEXT,
+    published_at TEXT,
+    modified_at TEXT,
+    keywords TEXT,
+    structured_data TEXT,
+    og_image TEXT,
+    canonical_url TEXT
+);
+
+-- Outlinks graph (for PageRank computation)
+CREATE TABLE IF NOT EXISTS search_links (
+    source_id BLOB NOT NULL REFERENCES search_documents(id) ON DELETE CASCADE,
+    target_url TEXT NOT NULL,
+    anchor_text TEXT,
+    PRIMARY KEY (source_id, target_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_links_target ON search_links(target_url);
+
+-- Crawl queue / URL frontier (priority queue)
+CREATE TABLE IF NOT EXISTS search_crawl_queue (
+    url TEXT PRIMARY KEY,
+    depth INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    discovered_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'crawled', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_crawl_priority ON search_crawl_queue(priority DESC, depth ASC);
+CREATE INDEX IF NOT EXISTS idx_search_crawl_status ON search_crawl_queue(status);
+
+-- Crawl history (deduplication + ETag caching)
+CREATE TABLE IF NOT EXISTS search_crawl_history (
+    url TEXT PRIMARY KEY,
+    url_hash TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_crawled TEXT,
+    crawl_count INTEGER NOT NULL DEFAULT 0,
+    last_status INTEGER,
+    etag TEXT,
+    last_modified TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_crawl_history_hash ON search_crawl_history(url_hash);
+CREATE INDEX IF NOT EXISTS idx_search_crawl_history_last ON search_crawl_history(last_crawled DESC);
+
+-- Result cache (LRU with TTL)
+CREATE TABLE IF NOT EXISTS search_result_cache (
+    query_hash TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    results BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_cache_created ON search_result_cache(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_search_cache_expires ON search_result_cache(expires_at);
+"#;
+
+const MIGRATION_021: &str = r#"
+-- Activity Search History: stores search queries for TUI activity zone.
+-- Used for Up/Down arrow navigation in search overlay.
+-- Phase 3 SRCH-004: Search history persistence.
+CREATE TABLE IF NOT EXISTS activity_search_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    search_mode TEXT NOT NULL CHECK(search_mode IN ('exact', 'fuzzy', 'regex')),
+    match_count INTEGER NOT NULL DEFAULT 0,
+    searched_at TEXT NOT NULL,
+    session_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_search_history_time ON activity_search_history(searched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_search_history_session ON activity_search_history(session_id, searched_at DESC);
+
+-- Limit table size to last 1000 queries (rolling window).
+-- Trigger auto-deletes old entries when limit exceeded.
+CREATE TRIGGER IF NOT EXISTS activity_search_history_cleanup AFTER INSERT ON activity_search_history BEGIN
+    DELETE FROM activity_search_history WHERE id IN (
+        SELECT id FROM activity_search_history ORDER BY searched_at DESC LIMIT -1 OFFSET 1000
+    );
+END;
+"#;
+
 /// Run all pending migrations.
 pub fn run_migrations(conn: &Connection) -> Result<(), cuervo_core::error::CuervoError> {
     // Ensure migrations table exists
@@ -441,7 +918,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, 21);
     }
 
     #[test]
@@ -455,7 +932,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 17);
+        assert_eq!(count, 21);
     }
 
     #[test]
@@ -999,5 +1476,139 @@ mod tests {
             .unwrap();
         assert_eq!(title, "Read file");
         assert_eq!(status, "Ready");
+    }
+
+    #[test]
+    fn migration_017_creates_reasoning_experience_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Verify reasoning_experience table exists.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='reasoning_experience'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists, "reasoning_experience table should exist");
+
+        // Insert an experience record.
+        conn.execute(
+            "INSERT INTO reasoning_experience (task_type, strategy, avg_score, uses, last_updated)
+             VALUES ('CodeGeneration', 'DirectExecution', 0.85, 5, 1234567890)",
+            [],
+        )
+        .unwrap();
+
+        let (avg, uses): (f64, u32) = conn
+            .query_row(
+                "SELECT avg_score, uses FROM reasoning_experience WHERE task_type = 'CodeGeneration'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!((avg - 0.85).abs() < 0.001);
+        assert_eq!(uses, 5);
+    }
+
+    #[test]
+    fn migration_018_creates_permission_rules_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Verify permission_rules table exists.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='permission_rules'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists, "permission_rules table should exist");
+
+        // Verify indexes exist.
+        let idx_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_permission_rules_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 4, "should have 4 permission_rules indexes");
+
+        // Insert a permission rule.
+        conn.execute(
+            "INSERT INTO permission_rules (rule_id, scope, scope_value, tool_pattern, tool_pattern_type, decision, metadata_json, created_at, active)
+             VALUES ('rule-1', 'directory', '/tmp', 'bash', 'exact', 'allowed_for_directory', '{}', '2026-02-15T00:00:00Z', 1)",
+            [],
+        )
+        .unwrap();
+
+        let (scope, tool, decision): (String, String, String) = conn
+            .query_row(
+                "SELECT scope, tool_pattern, decision FROM permission_rules WHERE rule_id = 'rule-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(scope, "directory");
+        assert_eq!(tool, "bash");
+        assert_eq!(decision, "allowed_for_directory");
+    }
+
+    #[test]
+    fn migration_021_creates_activity_search_history_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Verify activity_search_history table exists
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='activity_search_history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists, "activity_search_history table should exist");
+
+        // Verify indexes exist
+        let idx_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_activity_search_history_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 2, "should have 2 activity_search_history indexes");
+
+        // Verify trigger exists
+        let trigger_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='trigger' AND name='activity_search_history_cleanup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(trigger_exists, "cleanup trigger should exist");
+
+        // Insert a search query
+        conn.execute(
+            "INSERT INTO activity_search_history (query, search_mode, match_count, searched_at, session_id)
+             VALUES ('hello world', 'exact', 5, '2026-02-17T10:00:00Z', 'session-123')",
+            [],
+        )
+        .unwrap();
+
+        let (query, mode, count): (String, String, i32) = conn
+            .query_row(
+                "SELECT query, search_mode, match_count FROM activity_search_history WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(query, "hello world");
+        assert_eq!(mode, "exact");
+        assert_eq!(count, 5);
     }
 }
