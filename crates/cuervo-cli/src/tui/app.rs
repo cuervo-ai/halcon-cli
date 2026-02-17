@@ -1135,6 +1135,9 @@ impl TuiApp {
             // Jump to first match if any.
             if let Some(&line_idx) = self.search_matches.first() {
                 self.activity_model.scroll_to_line(line_idx);
+                // Phase 3 SRCH-003: Highlight first match on search entry
+                let palette = &crate::render::theme::active().palette;
+                self.highlights.start_medium(&format!("search_{}", line_idx), palette.accent);
             }
         }
     }
@@ -3579,6 +3582,24 @@ mod tests {
         // (This would be tested in integration, here we verify the pattern)
         let search_matches: Vec<usize> = Vec::new();
         assert!(search_matches.is_empty(), "Empty search should be safe");
+    }
+
+    #[test]
+    fn rerun_search_highlights_first_match() {
+        let mut app = test_app();
+        app.activity_model.push_info("first match");
+        app.activity_model.push_info("other");
+        app.activity_model.push_info("second match");
+
+        // Open search overlay and enter query
+        app.state.overlay.open(OverlayKind::Search);
+        app.state.overlay.input = "match".into();
+        app.rerun_search();
+
+        // Verify first match (line 0) is highlighted
+        let highlight_key = "search_0";
+        assert!(app.highlights.is_pulsing(highlight_key),
+                "First match should be highlighted after search entry");
     }
 
     // Phase B4: Hover Effect Tests
