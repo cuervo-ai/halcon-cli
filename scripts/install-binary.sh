@@ -15,22 +15,51 @@ readonly BINARY_NAME="halcon"
 readonly INSTALL_DIR="${HALCON_INSTALL_DIR:-$HOME/.local/bin}"
 readonly GITHUB_API="https://api.github.com"
 readonly GITHUB_DOWNLOAD="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download"
+# Optional: set HALCON_GITHUB_TOKEN for private repo access, or HALCON_VERSION to pin a version
+readonly HALCON_VERSION="${HALCON_VERSION:-}"
+readonly HALCON_GITHUB_TOKEN="${HALCON_GITHUB_TOKEN:-}"
 
 get_latest_version() {
+    # Allow pinning a specific version via env var (also works for private repos without token)
+    if [ -n "$HALCON_VERSION" ]; then
+        echo "$HALCON_VERSION"
+        return 0
+    fi
+
+    local auth_header=""
+    if [ -n "$HALCON_GITHUB_TOKEN" ]; then
+        auth_header="Authorization: Bearer ${HALCON_GITHUB_TOKEN}"
+    fi
+
     local version
     if has curl; then
-        version="$(curl --proto '=https' --tlsv1.2 -fsSL \
-            "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
-            | grep '"tag_name"' | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        if [ -n "$auth_header" ]; then
+            version="$(curl --proto '=https' --tlsv1.2 -fsSL \
+                -H "$auth_header" \
+                "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
+                | grep '"tag_name"' | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        else
+            version="$(curl --proto '=https' --tlsv1.2 -fsSL \
+                "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
+                | grep '"tag_name"' | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        fi
     elif has wget; then
-        version="$(wget --https-only -qO- \
-            "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
-            | grep '"tag_name"' | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        if [ -n "$auth_header" ]; then
+            version="$(wget --https-only -qO- \
+                --header="$auth_header" \
+                "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
+                | grep '"tag_name"' | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        else
+            version="$(wget --https-only -qO- \
+                "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" \
+                | grep '"tag_name"' | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        fi
     else
         error "Neither curl nor wget found."
     fi
+
     if [ -z "$version" ]; then
-        error "Failed to determine latest release version from GitHub API"
+        error "Failed to determine latest release version. Try setting HALCON_VERSION=x.y.z or HALCON_GITHUB_TOKEN=<token>"
     fi
     echo "$version"
 }
@@ -175,6 +204,66 @@ download_file() {
     fi
 }
 
+# For private GitHub repos, the browser download URL doesn't work — must use the API.
+# Finds the asset by name in the releases/latest response, downloads via asset endpoint.
+download_github_asset() {
+    local asset_name="$1"
+    local output="$2"
+
+    if [ -z "$HALCON_GITHUB_TOKEN" ]; then
+        # Public repo: use browser download URL directly
+        local url="${GITHUB_DOWNLOAD}/${asset_name}"
+        download_file "$url" "$output"
+        return $?
+    fi
+
+    # Private repo: resolve asset API URL, then stream with Accept: application/octet-stream
+    info "Resolving asset via GitHub API..."
+    local release_json asset_url
+
+    if has curl; then
+        release_json="$(curl --proto '=https' --tlsv1.2 -fsSL \
+            -H "Authorization: Bearer ${HALCON_GITHUB_TOKEN}" \
+            "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest")"
+    elif has wget; then
+        release_json="$(wget --https-only -qO- \
+            --header="Authorization: Bearer ${HALCON_GITHUB_TOKEN}" \
+            "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest")"
+    fi
+
+    # Use python3 (available on macOS/Linux) to extract the asset API URL by name
+    if has python3; then
+        asset_url="$(echo "$release_json" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for a in data.get('assets', []):
+    if a.get('name') == '${asset_name}':
+        print(a.get('url', ''))
+        break
+")"
+    else
+        # Fallback: awk-based extraction (url field is in assets array before name field)
+        asset_url="$(echo "$release_json" | tr ',' '\n' | grep -E '"url":"https://api.github.com.*assets' | sed 's/.*"url":"\([^"]*\)".*/\1/' | head -1)"
+    fi
+
+    if [ -z "$asset_url" ]; then
+        warn "Asset '$asset_name' not found in latest release"
+        return 1
+    fi
+
+    if has curl; then
+        curl --proto '=https' --tlsv1.2 -fsSL \
+            -H "Authorization: Bearer ${HALCON_GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "$asset_url" -o "$output"
+    elif has wget; then
+        wget --https-only --secure-protocol=TLSv1_2 -q \
+            --header="Authorization: Bearer ${HALCON_GITHUB_TOKEN}" \
+            --header="Accept: application/octet-stream" \
+            -O "$output" "$asset_url"
+    fi
+}
+
 verify_checksum() {
     local file="$1"
     local checksum_file="$2"
@@ -314,7 +403,7 @@ try_cargo_install() {
     warn "No precompiled binary available for your platform."
     info "Falling back to cargo install (this will compile from source, may take 2-5 minutes)..."
 
-    if cargo install --git "https://github.com/${REPO_OWNER}/${REPO_NAME}" --locked halcon-cli; then
+    if cargo install --git "https://github.com/${REPO_OWNER}/${REPO_NAME}" --locked --no-default-features halcon-cli; then
         success "Installed via cargo install"
         return 0
     else
@@ -359,21 +448,20 @@ EOF
     success "Latest version: $version"
 
     local archive_name="${BINARY_NAME}-${version}-${target}.${archive_ext}"
-    local archive_url="${GITHUB_DOWNLOAD}/${archive_name}"
-    local checksum_url="${GITHUB_DOWNLOAD}/${archive_name}.sha256"
+    local checksum_name="${archive_name}.sha256"
 
     info "Asset:    $archive_name"
-    info "URL:      $archive_url"
 
-    local tmp_dir
-    tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    # Use a global var so the EXIT trap can reference it (local vars are out of scope in traps)
+    _HALCON_TMP="$(mktemp -d)"
+    trap 'rm -rf "${_HALCON_TMP:-}"' EXIT
+    local tmp_dir="$_HALCON_TMP"
 
     cd "$tmp_dir"
 
     header "Downloading binary"
 
-    if ! download_file "$archive_url" "$archive_name"; then
+    if ! download_github_asset "$archive_name" "$archive_name"; then
         warn "Failed to download precompiled binary for $target"
 
         if try_cargo_binstall; then
@@ -389,8 +477,8 @@ EOF
 
     header "Verifying integrity"
 
-    if download_file "$checksum_url" "${archive_name}.sha256" 2>/dev/null; then
-        verify_checksum "$archive_name" "${archive_name}.sha256"
+    if download_github_asset "$checksum_name" "$checksum_name" 2>/dev/null; then
+        verify_checksum "$archive_name" "$checksum_name"
     else
         warn "Checksum file not available, skipping verification"
     fi
