@@ -177,3 +177,6 @@ scripts/seed_search_index.sh
 
 # Workers directory
 workers/
+img/hero.mov
+img/*.mov
+img/*.mp4
