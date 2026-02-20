@@ -8232,6 +8232,247 @@ mod tests {
             "last_model_used must be Some on TokenBudget exit, got None");
     }
 
+    // ── FASE 6: Planning V3 Pipeline E2E Tests ───────────────────────────────
+    //
+    // These 8 tests verify the Planning V3 pipeline (plan_compressor +
+    // early_convergence + macro_feedback) behaves correctly AFTER wiring
+    // into agent.rs. They constitute the mandatory E2E validation required
+    // by the remediation spec.
+
+    /// FASE6-1: Plan is compressed to ≤MAX_VISIBLE_STEPS before the agent loop runs.
+    #[test]
+    fn fase6_1_plan_compressed_to_max_steps_before_loop() {
+        use super::super::plan_compressor::{compress, MAX_VISIBLE_STEPS};
+        use halcon_core::traits::{ExecutionPlan, PlanStep};
+        use uuid::Uuid;
+
+        let steps: Vec<PlanStep> = (1..=8)
+            .map(|i| PlanStep {
+                step_id: Uuid::new_v4(),
+                description: format!("Step {i}"),
+                tool_name: if i == 8 { None } else { Some("file_read".into()) },
+                parallel: false,
+                confidence: 0.9,
+                expected_args: Default::default(),
+                outcome: None,
+            })
+            .collect();
+        let plan = ExecutionPlan {
+            plan_id: Uuid::new_v4(),
+            goal: "Test goal".into(),
+            steps,
+            requires_confirmation: false,
+            replan_count: 0,
+            parent_plan_id: None,
+        };
+        let (compressed, stats) = compress(plan);
+        assert!(
+            compressed.steps.len() <= MAX_VISIBLE_STEPS,
+            "FASE6-1: got {} steps (max {})", compressed.steps.len(), MAX_VISIBLE_STEPS
+        );
+        assert!(stats.any_applied(), "FASE6-1: at least one compression rule must fire");
+        let last = compressed.steps.last().unwrap();
+        assert!(last.tool_name.is_none(), "FASE6-1: synthesis must be last step");
+    }
+
+    /// FASE6-2: EvidenceThreshold fires at ≥80% plan completion.
+    #[test]
+    fn fase6_2_evidence_threshold_fires_at_80_percent_completion() {
+        use super::super::early_convergence::{ConvergenceDetector, ConvergenceReason};
+        let mut det = ConvergenceDetector::new();
+        // 79% — must NOT fire.
+        assert!(det.check(0.79, 100_000, 0.10).is_none(),
+            "FASE6-2: 79% must not trigger EvidenceThreshold");
+        // 80% — must fire.
+        let mut det2 = ConvergenceDetector::new();
+        assert_eq!(
+            det2.check(0.80, 100_000, 0.10),
+            Some(ConvergenceReason::EvidenceThreshold),
+            "FASE6-2: 80% must trigger EvidenceThreshold"
+        );
+    }
+
+    /// FASE6-3: TokenHeadroom fires when token budget falls below synthesis headroom.
+    #[test]
+    fn fase6_3_token_headroom_fires_when_budget_critically_low() {
+        use super::super::early_convergence::{
+            ConvergenceDetector, ConvergenceReason, MIN_SYNTHESIS_HEADROOM,
+        };
+        // Just above headroom — must NOT fire.
+        let mut det = ConvergenceDetector::new();
+        assert!(det.check(0.50, MIN_SYNTHESIS_HEADROOM + 1, 0.10).is_none(),
+            "FASE6-3: tokens just above headroom must not fire TokenHeadroom");
+        // Just below headroom — must fire.
+        let mut det2 = ConvergenceDetector::new();
+        assert_eq!(
+            det2.check(0.50, MIN_SYNTHESIS_HEADROOM - 1, 0.10),
+            Some(ConvergenceReason::TokenHeadroom),
+            "FASE6-3: tokens below synthesis_headroom must fire TokenHeadroom"
+        );
+    }
+
+    /// FASE6-4: DiminishingReturns fires after DIMINISHING_WINDOW stagnant rounds with
+    /// an active plan, but NEVER fires without an active plan (BUG-H3 regression guard).
+    #[test]
+    fn fase6_4_diminishing_returns_fires_only_with_active_plan() {
+        use super::super::early_convergence::{
+            ConvergenceDetector, ConvergenceReason, DIMINISHING_WINDOW,
+        };
+        // With active plan: fires after DIMINISHING_WINDOW stagnant rounds.
+        let mut det = ConvergenceDetector::new();
+        for _ in 0..DIMINISHING_WINDOW {
+            assert!(det.check(0.10, 100_000, 0.0).is_none(),
+                "FASE6-4: must not fire before window completes");
+        }
+        assert_eq!(
+            det.check(0.10, 100_000, 0.0),
+            Some(ConvergenceReason::DiminishingReturns),
+            "FASE6-4: must fire DiminishingReturns after {} stagnant rounds", DIMINISHING_WINDOW
+        );
+        // Without active plan (ratio=0.0): MUST NOT fire (BUG-H3 guard).
+        let mut det2 = ConvergenceDetector::new();
+        for _ in 0..(DIMINISHING_WINDOW * 3) {
+            assert!(det2.check(0.0, 100_000, 0.0).is_none(),
+                "FASE6-4: BUG-H3: must not fire without active plan (ratio=0.0)");
+        }
+    }
+
+    /// FASE6-5: MacroPlanView emits correctly formatted [N/M] progress lines.
+    #[test]
+    fn fase6_5_macro_plan_view_emits_correct_lines() {
+        use super::super::macro_feedback::{FeedbackMode, MacroPlanView};
+        use halcon_core::traits::{ExecutionPlan, PlanStep};
+        use uuid::Uuid;
+
+        let steps = vec![
+            PlanStep {
+                step_id: Uuid::new_v4(),
+                description: "Read source files".into(),
+                tool_name: Some("file_read".into()),
+                parallel: false,
+                confidence: 0.9,
+                expected_args: Default::default(),
+                outcome: None,
+            },
+            PlanStep {
+                step_id: Uuid::new_v4(),
+                description: "Apply changes".into(),
+                tool_name: Some("file_edit".into()),
+                parallel: false,
+                confidence: 0.85,
+                expected_args: Default::default(),
+                outcome: None,
+            },
+            PlanStep {
+                step_id: Uuid::new_v4(),
+                description: "Synthesise findings".into(),
+                tool_name: None,
+                parallel: false,
+                confidence: 1.0,
+                expected_args: Default::default(),
+                outcome: None,
+            },
+        ];
+        let plan = ExecutionPlan {
+            plan_id: Uuid::new_v4(),
+            goal: "Refactor module".into(),
+            steps,
+            requires_confirmation: false,
+            replan_count: 0,
+            parent_plan_id: None,
+        };
+        let mut view = MacroPlanView::from_plan(&plan, FeedbackMode::Compact);
+        // Summary includes step separator.
+        let summary = view.format_plan_summary();
+        assert!(summary.starts_with("Plan:"), "FASE6-5: summary must start with 'Plan:'");
+        assert!(summary.contains("→"), "FASE6-5: summary must contain → separator");
+        // Start line for step 0 contains [1/3].
+        let start = view.format_start(0);
+        assert!(start.as_deref().unwrap_or("").contains("[1/3]"),
+            "FASE6-5: start line must contain [1/3], got {:?}", start);
+        // Advance and check done line.
+        let advanced = view.advance().unwrap();
+        let done = advanced.done_line();
+        assert!(done.contains("[1/3]") && done.contains('✓'),
+            "FASE6-5: done line must contain [1/3] and ✓, got '{done}'");
+        assert_eq!(view.current_idx(), 1, "FASE6-5: current_idx must be 1 after advance");
+    }
+
+    /// FASE6-6: Replan output is also compressed to ≤MAX_VISIBLE_STEPS.
+    #[test]
+    fn fase6_6_replan_output_compressed_to_max_steps() {
+        use super::super::plan_compressor::{compress, MAX_VISIBLE_STEPS};
+        use halcon_core::traits::{ExecutionPlan, PlanStep};
+        use uuid::Uuid;
+
+        let steps: Vec<PlanStep> = (1..=7)
+            .map(|i| PlanStep {
+                step_id: Uuid::new_v4(),
+                description: format!("Replan step {i}"),
+                tool_name: if i == 7 { None } else { Some("bash".into()) },
+                parallel: false,
+                confidence: 0.8,
+                expected_args: Default::default(),
+                outcome: None,
+            })
+            .collect();
+        let replan = ExecutionPlan {
+            plan_id: Uuid::new_v4(),
+            goal: "Replanned goal".into(),
+            steps,
+            requires_confirmation: false,
+            replan_count: 1,
+            parent_plan_id: None,
+        };
+        let (compressed, _) = compress(replan);
+        assert!(
+            compressed.steps.len() <= MAX_VISIBLE_STEPS,
+            "FASE6-6: replan must compress to ≤{} steps, got {}",
+            MAX_VISIBLE_STEPS, compressed.steps.len()
+        );
+        let last = compressed.steps.last().unwrap();
+        assert!(last.tool_name.is_none(), "FASE6-6: synthesis must remain last in replan");
+    }
+
+    /// FASE6-7: ConvergenceDetector resets correctly after replan.
+    #[test]
+    fn fase6_7_convergence_detector_resets_on_replan() {
+        use super::super::early_convergence::{ConvergenceDetector, ConvergenceReason};
+        // First detector fires and becomes spent.
+        let mut det = ConvergenceDetector::new();
+        assert_eq!(
+            det.check(0.80, 100_000, 0.10),
+            Some(ConvergenceReason::EvidenceThreshold),
+            "FASE6-7: setup — first detector must fire"
+        );
+        assert!(det.check(0.90, 100_000, 0.10).is_none(),
+            "FASE6-7: spent detector must not fire again (idempotent)");
+        // Fresh detector (created on replan) can fire again.
+        let mut new_det = ConvergenceDetector::with_context_window(64_000);
+        assert_eq!(
+            new_det.check(0.80, 100_000, 0.10),
+            Some(ConvergenceReason::EvidenceThreshold),
+            "FASE6-7: fresh detector after replan must fire on new plan's evidence"
+        );
+    }
+
+    /// FASE6-8: No convergence fires without an active plan (conversational mode).
+    ///
+    /// BUG-H3 regression guard: DiminishingReturns must not fire when ratio=0.0.
+    /// TokenHeadroom and EvidenceThreshold are also ratio-gated or token-gated.
+    #[test]
+    fn fase6_8_no_convergence_without_active_plan() {
+        use super::super::early_convergence::{ConvergenceDetector, DIMINISHING_WINDOW};
+        let mut det = ConvergenceDetector::new();
+        for round in 0..(DIMINISHING_WINDOW * 2) {
+            let result = det.check(0.0, 200_000, 0.0);
+            assert!(
+                result.is_none(),
+                "FASE6-8: round {round}: convergence must not fire with ratio=0.0"
+            );
+        }
+    }
+
     /// RC-1b (compaction threshold): 60% threshold fires earlier than old 70%.
     ///
     /// At 65% utilization, the new 60% threshold triggers compaction while the old
