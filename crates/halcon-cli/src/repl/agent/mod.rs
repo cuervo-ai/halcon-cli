@@ -1295,6 +1295,50 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // Track the model used in the last agent round for post-loop quality recording (Phase 4).
     let mut last_round_model_name = request.model.clone();
 
+    // FIX: Pre-loop synthesis guard — clear all tools when only synthesis steps remain.
+    //
+    // Root cause (vucem3-qa benchmark): after sub-agents completed list_directory + grep,
+    // the coordinator's Round 1 had ALL tools available. deepseek-chat, instead of
+    // synthesizing the sub-agent results directly, output a `<halcon::tool_call>` XML
+    // fragment embedded in `end_turn` text (stop_reason=end_turn, NOT tool_use).
+    // This text tool call is never executed — it is only rendered as text in the TUI
+    // activity panel — causing the synthesis step to remain Pending and the session to
+    // end at 2/3 plan steps completed.
+    //
+    // fix_post_batch already applies set_force_next() AFTER round 1, but that is too late.
+    // The synthesis step fires in round 1 (the first and only coordinator round), so we
+    // must strip tools PRE-LOOP before LoopState.cached_tools is populated.
+    //
+    // By clearing cached_tools here, the coordinator makes its API call with tools=[]
+    // and is forced into pure text-synthesis mode — cannot produce XML tool calls even
+    // if the model hallucinates, because there are no tool definitions to reference.
+    if let Some(ref tracker) = execution_tracker {
+        let plan = tracker.plan();
+        let has_pending = plan.steps.iter().any(|s| s.outcome.is_none());
+        let all_pending_synthesis = plan.steps.iter()
+            .filter(|s| s.outcome.is_none())
+            .all(|s| s.tool_name.is_none());
+
+        if has_pending && all_pending_synthesis {
+            let removed = cached_tools.len();
+            cached_tools.clear();
+            if removed > 0 {
+                tracing::info!(
+                    removed_tools = removed,
+                    "Pre-loop synthesis guard: all pending steps are synthesis-only — \
+                     clearing coordinator tool list to force pure-text synthesis mode"
+                );
+                if !silent {
+                    render_sink.info(&format!(
+                        "[synthesis] coordinator tool list cleared ({} tools removed) — \
+                         all remaining steps are synthesis-only",
+                        removed
+                    ));
+                }
+            }
+        }
+    }
+
     // ── Bundle all owned mutable state into LoopState ─────────────────────
     // From here, the loop and post-loop sections access owned state via `state.xxx`.
     // Borrowed infrastructure (provider, session, limits, render_sink, etc.) remain
