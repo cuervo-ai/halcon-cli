@@ -381,6 +381,33 @@ pub(super) async fn run(
                 state.loop_guard.force_synthesis();
             }
 
+            // FIX: When all remaining non-terminal steps have no tool_name (i.e. only
+            // synthesis/confirmation steps remain), force no-tools for the next round.
+            // Without this, the coordinator makes an API call with all tools available
+            // and the model may hallucinate a tool call (e.g. re-calling file_write)
+            // instead of just synthesizing. This saves one full API round (~131s for
+            // large file generation tasks like the Minecraft benchmark).
+            {
+                let plan = tracker.plan();
+                let pending_are_all_synthesis = plan.steps.iter()
+                    .enumerate()
+                    .filter(|(_, s)| {
+                        // A step is still "active" if its outcome is None (not yet completed).
+                        s.outcome.is_none()
+                    })
+                    .all(|(_, s)| s.tool_name.is_none());
+
+                if pending_are_all_synthesis && !plan.steps.is_empty()
+                    && plan.steps.iter().any(|s| s.outcome.is_none())
+                {
+                    tracing::info!(
+                        "All remaining plan steps are synthesis-only (no tool_name) — \
+                         suppressing tools for coordinator synthesis round"
+                    );
+                    state.tool_decision.set_force_next();
+                }
+            }
+
             // Planning V3: Early convergence check after each tool round.
             // Computes progress_delta vs previous round to detect diminishing returns.
             let (completed, total, _) = tracker.progress();

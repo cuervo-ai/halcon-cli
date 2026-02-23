@@ -655,7 +655,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // Conversational intent (greetings, simple Q&A) returns vec![] — the model responds
     // directly in 1 round without any tool call overhead.
     let is_conversational_intent;
-    let cached_tools = {
+    let mut cached_tools = {
         let all_tools = request.tools.clone();
         let tool_selector = super::tool_selector::ToolSelector::new(
             tool_selection_enabled,
@@ -939,13 +939,49 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     })
                     .collect();
 
+                // Collect tools successfully executed by sub-agents before injection.
+                // Used below to (1) add an anti-re-delegation warning and (2) remove those
+                // tools from the coordinator's cached_tools so the model cannot call them
+                // again even if it hallucinates — root cause of the 131s wasted R2 round.
+                let delegated_ok_tools: Vec<String> = orch_result.sub_results
+                    .iter()
+                    .filter(|r| r.success)
+                    .flat_map(|r| r.agent_result.tools_used.iter().cloned())
+                    .collect();
+
                 if !sub_outputs.is_empty() {
                     render_sink.loop_guard_action(
                         "sub_agent_results",
                         &format!("{} sub-agent outputs collected — injecting into coordinator context", sub_outputs.len()),
                     );
+
+                    // FIX: When destructive tools (file_write, bash) were already executed by
+                    // sub-agents, inject a strong directive so the coordinator does NOT re-execute
+                    // them. Without this, deepseek-chat hallucinates a second file_write call
+                    // containing the full file content (~6K tokens, ~131s) even after the
+                    // sub-agent already wrote the file. This was the #1 source of wasted time
+                    // (176s = 51% of total session duration in the Minecraft benchmark).
+                    let anti_redo_note = if delegated_ok_tools.iter().any(|t| {
+                        matches!(t.as_str(), "file_write" | "bash" | "shell" | "patch_apply")
+                    }) {
+                        format!(
+                            "\n⚠️  CRITICAL: The following tools were already executed by sub-agents \
+                             and must NOT be called again: [{}]. \
+                             Your ONLY task now is to synthesize the results and confirm to the user \
+                             what was created. Do NOT regenerate or re-write any files.\n",
+                            delegated_ok_tools
+                                .iter()
+                                .filter(|t| matches!(t.as_str(), "file_write" | "bash" | "shell" | "patch_apply"))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    } else {
+                        String::new()
+                    };
+
                     let results_context = format!(
-                        "[Sub-Agent Results — please synthesize these into your final response]\n\n{}\n",
+                        "[Sub-Agent Results — please synthesize these into your final response]{anti_redo_note}\n\n{}\n",
                         sub_outputs.join("\n\n")
                     );
                     messages.push(ChatMessage {
@@ -986,6 +1022,39 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     tracker.tracked_steps(),
                     elapsed,
                 );
+
+                // FIX: Remove delegation-completed tools from coordinator's cached_tools.
+                // Prevents the coordinator from calling a tool (e.g. file_write) that a
+                // sub-agent already executed. In the Minecraft benchmark, deepseek-chat
+                // ignored the "don't redo" injection and called file_write a second time
+                // (131s wasted API + 45s permission timeout = 176s = 51% of total time).
+                // By removing the tool from the tool list, the model physically cannot
+                // call it — eliminating the hallucination at the protocol level.
+                if !delegated_ok_tools.is_empty() {
+                    let before = cached_tools.len();
+                    cached_tools.retain(|t| !delegated_ok_tools.contains(&t.name));
+                    let removed = before - cached_tools.len();
+                    if removed > 0 {
+                        tracing::info!(
+                            removed_tools = ?delegated_ok_tools,
+                            removed_count = removed,
+                            remaining_tools = cached_tools.len(),
+                            "Post-delegation: removed completed tools from coordinator tool list"
+                        );
+                        if !silent {
+                            render_sink.info(&format!(
+                                "[post-delegation] removed {} completed tool(s) from coordinator list: [{}]",
+                                removed,
+                                delegated_ok_tools
+                                    .iter()
+                                    .filter(|n| !cached_tools.iter().any(|ct| &ct.name == *n))
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                    }
+                }
 
                 let delegated_count = matched.len();
                 if delegated_count > 0 {
