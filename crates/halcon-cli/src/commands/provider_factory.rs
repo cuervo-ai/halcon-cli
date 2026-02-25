@@ -4,8 +4,8 @@ use anyhow::Result;
 use halcon_core::traits::ModelProvider;
 use halcon_core::types::{AppConfig, HttpConfig, McpConfig, ModelInfo};
 use halcon_providers::{
-    AnthropicProvider, DeepSeekProvider, EchoProvider, GeminiProvider, OllamaProvider,
-    OpenAICompatibleProvider, OpenAIProvider, ProviderRegistry,
+    AnthropicProvider, ClaudeCodeProvider, DeepSeekProvider, EchoProvider, GeminiProvider,
+    OllamaProvider, OpenAICompatibleProvider, OpenAIProvider, ProviderRegistry,
 };
 use halcon_tools::ToolRegistry;
 use serde::Deserialize;
@@ -114,6 +114,35 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
         }
     }
 
+    // Register ClaudeCode if enabled and the claude binary is available.
+    if let Some(provider_cfg) = config.models.providers.get("claude_code") {
+        if provider_cfg.enabled {
+            use halcon_providers::claude_code::ClaudeCodeConfig;
+
+            let cc_config = ClaudeCodeConfig::from_provider_extra(&provider_cfg.extra);
+            // Use file-existence check instead of subprocess invocation:
+            // - avoids nested-session / sudo errors when run inside Claude Code
+            // - avoids PATH lookup issues for absolute-path binaries
+            let available = std::path::Path::new(&cc_config.command).exists()
+                || std::process::Command::new(&cc_config.command)
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+            if available {
+                let cmd = cc_config.command.clone();
+                registry.register(Arc::new(ClaudeCodeProvider::new(cc_config)));
+                tracing::info!(command = %cmd, "Registered claude_code provider");
+            } else {
+                tracing::warn!(
+                    command = %cc_config.command,
+                    "claude_code enabled but binary not found — skipping registration"
+                );
+            }
+        }
+    }
+
     // P0.3: Load dynamic providers from ~/.halcon/providers.d/*.toml
     if let Some(providers_dir) = dirs::home_dir()
         .map(|h| h.join(".halcon").join("providers.d"))
@@ -164,14 +193,24 @@ pub async fn precheck_providers(
             let resolved_model = if p.validate_model(model).is_ok() {
                 model.to_string()
             } else {
-                let best = p
-                    .supported_models()
+                // Find the FIRST model with the highest context_window that supports tools.
+                // Using max_by_key alone returns the LAST model on equal keys (Rust iterator
+                // semantics), which can pick a low-priority fallback (e.g. command-path alias)
+                // when all models have the same context window.
+                let supported = p.supported_models();
+                let max_ctx = supported
                     .iter()
                     .filter(|m| m.supports_tools)
-                    .max_by_key(|m| m.context_window)
+                    .map(|m| m.context_window)
+                    .max()
+                    .unwrap_or(0);
+                let best = supported
+                    .iter()
+                    .filter(|m| m.supports_tools && m.context_window >= max_ctx)
+                    .next() // first model wins on ties (order = priority in supported_models())
                     .map(|m| m.id.clone())
                     .unwrap_or_else(|| {
-                        p.supported_models()
+                        supported
                             .first()
                             .map(|m| m.id.clone())
                             .unwrap_or_else(|| model.to_string())

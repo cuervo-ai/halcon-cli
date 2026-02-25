@@ -16,3 +16,7 @@ pub mod repl;
 
 // Re-export commonly used types for convenience
 pub use render::theme;
+
+#[cfg(feature = "headless")]
+#[path = "agent_bridge/mod.rs"]
+pub mod agent_bridge;

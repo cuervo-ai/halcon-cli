@@ -8,6 +8,9 @@ mod render;
 mod repl;
 mod tui;
 
+#[cfg(feature = "headless")]
+mod agent_bridge;
+
 /// Build version string with git hash and build date (leaked to 'static).
 fn build_version() -> &'static str {
     let s = format!(

@@ -43,15 +43,19 @@ halcon-runtime = { workspace = true }
 halcon-api = { workspace = true, features = ["server"] }
 halcon-search = { path = "../halcon-search" }
 halcon-multimodal = { workspace = true }
+halcon-agent-core = { workspace = true, optional = true }
 
 async-trait = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+dashmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 futures = { workspace = true }
@@ -87,7 +91,28 @@ png = { version = "0.17", optional = true }     # PNG encoding for clipboard ima
 [features]
 default = ["color-science", "tui"]
 color-science = ["momoto-core", "momoto-metrics", "momoto-intelligence"]
-tui = ["ratatui", "tui-textarea", "arboard", "png"]
+headless = []
+tui = ["headless", "ratatui", "tui-textarea", "arboard", "png"]
+# ── Phase 2: optional architectural additions (all off by default) ─────────
+## Enables the CompletionValidator trait and KeywordCompletionValidator.
+## When enabled, a semantic completion check is logged after convergence.
+## No existing return path is altered.
+completion-validator = []
+## Enables the typed ProviderHandle newtype for routing comparisons.
+## Adds handle() to ModelProvider default impl. String-based routing still works.
+typed-provider-id = []
+## Enables the IntentGraph for tool selection.
+## When enabled, IntentGraph is consulted before the existing keyword matcher.
+intent-graph = []
+## Enables the RepairEngine triggered when InLoopCritic signals Terminate.
+## When enabled, one repair attempt is made before synthesis injection.
+repair-loop = []
+## Enables GDEM as the primary agent loop (experimental, Phase 4).
+## When enabled, agent_bridge uses halcon-agent-core's loop_driver instead of
+## the REPL loop. Preserve REPL loop as "legacy-repl" (on by default).
+gdem-primary = ["halcon-agent-core"]
+## Keep REPL loop as fallback. Default true until gdem-primary is stable.
+legacy-repl = []
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

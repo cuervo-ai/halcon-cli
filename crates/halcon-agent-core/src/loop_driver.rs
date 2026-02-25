@@ -520,7 +520,9 @@ fn build_user_context(evidence: &Evidence, current_step: &str, round: u32) -> St
         .rev()
         .map(|(tool, output)| {
             let display = if output.len() > 2000 {
-                format!("{}...[truncated]...{}", &output[..800], &output[output.len()-400..])
+                let head = { let mut _fcb = (800).min(output.len()); while _fcb > 0 && !output.is_char_boundary(_fcb) { _fcb -= 1; } _fcb };
+                let tail = { let mut _ccb = (output.len().saturating_sub(400)).min(output.len()); while _ccb < output.len() && !output.is_char_boundary(_ccb) { _ccb += 1; } _ccb };
+                format!("{}...[truncated]...{}", &output[..head], &output[tail..])
             } else {
                 output.clone()
             };
