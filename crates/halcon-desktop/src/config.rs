@@ -97,7 +97,6 @@ impl AppConfig {
     }
 
     /// Save config to `~/.halcon/desktop.toml`.
-    #[allow(dead_code)]
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::config_path().ok_or("could not determine config path")?;
         if let Some(parent) = path.parent() {

@@ -175,8 +175,8 @@ scripts/seed_search_index.sh
 # Cache directories
 .fastembed_cache/
 
-# Workers directory
-workers/
+# Workers directory (root-level only — crates/*/src/workers/ are committed)
+/workers/
 img/hero.mov
 img/*.mov
 img/*.mp4
@@ -194,3 +194,10 @@ BUDGET_ALIGNMENT_REPORT.md
 CRITIC_ALIGNMENT_REPORT.md
 RUNTIME_FAILURE_ANALYSIS.md
 TOKEN_AUDIT_REPORT.md
+
+# Dev session scratch/prototype files
+game.js
+index.html
+output.html
+style.css
+HALCON_DESKTOP_INTEGRATION_PLAN.md

@@ -19,9 +19,11 @@ fn main() -> eframe::Result<()> {
         )
         .init();
 
-    // Create channels for UI <-> backend communication.
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+    // Create bounded channels for UI <-> backend communication.
+    // cmd: 256-slot — UI commands never flood; at 60fps × few clicks = safe margin.
+    // msg: 1024-slot — backend messages including token bursts; provides backpressure.
+    let (cmd_tx, cmd_rx) = mpsc::channel(256);
+    let (msg_tx, msg_rx) = mpsc::channel(1024);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

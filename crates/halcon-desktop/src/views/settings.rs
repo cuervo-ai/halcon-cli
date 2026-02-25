@@ -11,7 +11,7 @@ pub fn render(
     ui: &mut Ui,
     state: &mut AppState,
     config: &mut AppConfig,
-    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    cmd_tx: &mpsc::Sender<UiCommand>,
 ) {
     ui.heading("Settings");
     ui.separator();
@@ -82,12 +82,12 @@ pub fn render(
                 if save_btn.clicked() {
                     if let Some(ref cfg) = state.runtime_config {
                         let update = build_update_request(cfg);
-                        let _ = cmd_tx.send(UiCommand::UpdateConfig(Box::new(update)));
+                        let _ = cmd_tx.try_send(UiCommand::UpdateConfig(Box::new(update)));
                     }
                 }
 
                 if ui.button("Reload").clicked() {
-                    let _ = cmd_tx.send(UiCommand::RefreshConfig);
+                    let _ = cmd_tx.try_send(UiCommand::RefreshConfig);
                 }
 
                 if state.config_dirty {
@@ -127,7 +127,7 @@ pub fn render(
             .button(RichText::new("Shutdown Runtime").color(HalconTheme::ERROR))
             .clicked()
         {
-            let _ = cmd_tx.send(UiCommand::Shutdown { graceful: true });
+            let _ = cmd_tx.try_send(UiCommand::Shutdown { graceful: true });
         }
     });
 }
@@ -137,7 +137,7 @@ pub fn render(
 fn render_desktop_settings(
     ui: &mut Ui,
     config: &mut AppConfig,
-    cmd_tx: &mpsc::UnboundedSender<UiCommand>,
+    cmd_tx: &mpsc::Sender<UiCommand>,
 ) {
     ui.horizontal(|ui| {
         ui.label("Server URL:");
@@ -149,13 +149,18 @@ fn render_desktop_settings(
     });
     ui.horizontal(|ui| {
         if ui.button("Connect").clicked() {
-            let _ = cmd_tx.send(UiCommand::Connect {
+            let _ = cmd_tx.try_send(UiCommand::Connect {
                 url: config.server_url.clone(),
                 token: config.auth_token.clone(),
             });
         }
         if ui.button("Disconnect").clicked() {
-            let _ = cmd_tx.send(UiCommand::Disconnect);
+            let _ = cmd_tx.try_send(UiCommand::Disconnect);
+        }
+        if ui.button("Save").on_hover_text("Save URL + token to ~/.halcon/desktop.toml").clicked() {
+            if let Err(e) = config.save() {
+                tracing::warn!(error = %e, "failed to save desktop config");
+            }
         }
     });
 

@@ -7,3 +7,4 @@ pub mod protocols;
 pub mod settings;
 pub mod tasks;
 pub mod tools;
+pub mod chat;

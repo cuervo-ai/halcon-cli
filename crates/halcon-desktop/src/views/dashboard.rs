@@ -78,28 +78,22 @@ pub fn render(ui: &mut Ui, state: &AppState) {
 
     ui.add_space(8.0);
 
-    // Recent events.
+    // Live activity feed — delegates to the reusable activity_panel widget.
     ui.group(|ui| {
-        ui.label(RichText::new("Recent Events").strong());
-        let recent: Vec<_> = state.events.iter().rev().take(20).collect();
-        if recent.is_empty() {
-            ui.label(RichText::new("No events yet").color(HalconTheme::TEXT_MUTED));
-        } else {
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for event in &recent {
-                        let text = format_event(event);
-                        ui.label(
-                            RichText::new(text)
-                                .monospace()
-                                .size(11.0)
-                                .color(HalconTheme::TEXT_SECONDARY),
-                        );
-                    }
-                });
-        }
+        ui.set_max_height(200.0);
+        crate::widgets::activity_panel::show(ui, &state.events, Some("Live Activity"));
     });
+
+    ui.add_space(8.0);
+
+    // Recent logs — compact embedded log feed.
+    if !state.logs.is_empty() {
+        ui.group(|ui| {
+            ui.label(RichText::new("Recent Logs").strong());
+            crate::widgets::log_viewer::render_log_viewer(ui, &state.logs, 30);
+        });
+        ui.add_space(8.0);
+    }
 
     // Metrics summary.
     if let Some(ref m) = state.metrics {
@@ -129,28 +123,3 @@ fn summary_card(ui: &mut Ui, label: &str, value: usize, color: egui::Color32) {
     });
 }
 
-fn format_event(event: &halcon_api::types::ws::WsServerEvent) -> String {
-    use halcon_api::types::ws::WsServerEvent::*;
-    match event {
-        AgentRegistered { agent } => format!("+ Agent registered: {}", agent.name),
-        AgentDeregistered { id } => format!("- Agent deregistered: {}", &id.to_string()[..8]),
-        AgentHealthChanged { id, health } => {
-            format!("~ Agent {} health: {:?}", &id.to_string()[..8], health)
-        }
-        AgentInvoked { id, .. } => format!("> Agent {} invoked", &id.to_string()[..8]),
-        AgentCompleted { id, success, .. } => {
-            format!("< Agent {} completed (ok={})", &id.to_string()[..8], success)
-        }
-        TaskSubmitted { execution_id, node_count } => {
-            format!("+ Task {} submitted ({} nodes)", &execution_id.to_string()[..8], node_count)
-        }
-        TaskCompleted { execution_id, success, .. } => {
-            format!("< Task {} completed (ok={})", &execution_id.to_string()[..8], success)
-        }
-        ToolExecuted { name, duration_ms, success, .. } => {
-            format!("  Tool {} ({success}) {duration_ms}ms", name)
-        }
-        Log(entry) => format!("[{:?}] {}", entry.level, entry.message),
-        _ => format!("{:?}", std::mem::discriminant(event)),
-    }
-}

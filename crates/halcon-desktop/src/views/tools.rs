@@ -5,12 +5,12 @@ use crate::state::AppState;
 use crate::theme::HalconTheme;
 use crate::workers::UiCommand;
 
-pub fn render(ui: &mut Ui, state: &AppState, cmd_tx: &mpsc::UnboundedSender<UiCommand>) {
+pub fn render(ui: &mut Ui, state: &AppState, cmd_tx: &mpsc::Sender<UiCommand>) {
     ui.horizontal(|ui| {
         ui.heading("Tools");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Refresh").clicked() {
-                let _ = cmd_tx.send(UiCommand::RefreshTools);
+                let _ = cmd_tx.try_send(UiCommand::RefreshTools);
             }
         });
     });
@@ -62,7 +62,7 @@ pub fn render(ui: &mut Ui, state: &AppState, cmd_tx: &mpsc::UnboundedSender<UiCo
                     ui.horizontal(|ui| {
                         let label = if tool.enabled { "Disable" } else { "Enable" };
                         if ui.small_button(label).clicked() {
-                            let _ = cmd_tx.send(UiCommand::ToggleTool {
+                            let _ = cmd_tx.try_send(UiCommand::ToggleTool {
                                 name: tool.name.clone(),
                                 enabled: !tool.enabled,
                             });
