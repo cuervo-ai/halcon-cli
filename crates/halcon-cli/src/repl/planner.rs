@@ -268,7 +268,7 @@ impl LlmPlanner {
                 content: MessageContent::Text(prompt),
             }],
             tools: vec![],
-            max_tokens: Some(2048),
+            max_tokens: Some(4096),
             temperature: Some(0.0),
             // System prompt anchors the model to pure plan generation.
             // Prevents goal hallucination from tool description examples (e.g., **/*.rs).

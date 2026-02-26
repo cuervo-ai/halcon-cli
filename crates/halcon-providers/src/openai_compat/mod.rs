@@ -27,6 +27,23 @@ use types::{
     OpenAITool, OpenAIToolCall, OpenAIFunctionCall, StreamOptions,
 };
 
+/// Normalize a JSON Schema for OpenAI compatibility.
+///
+/// OpenAI requires that every parameter schema with `"type": "object"` also
+/// includes a `"properties"` key (even if empty). MCP servers and other sources
+/// sometimes emit bare `{"type": "object"}` without `properties`, which causes
+/// OpenAI to return HTTP 400 `invalid_function_parameters`.
+fn normalize_schema_for_openai(mut schema: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = schema.as_object_mut() {
+        if obj.get("type").and_then(|t| t.as_str()) == Some("object")
+            && !obj.contains_key("properties")
+        {
+            obj.insert("properties".to_string(), serde_json::json!({}));
+        }
+    }
+    schema
+}
+
 /// A provider that speaks the OpenAI Chat Completions protocol.
 ///
 /// Parameterized by name, URL, key, and model list so it can serve
@@ -229,7 +246,7 @@ impl OpenAICompatibleProvider {
                 function: OpenAIFunctionDef {
                     name: t.name.clone(),
                     description: t.description.clone(),
-                    parameters: t.input_schema.clone(),
+                    parameters: normalize_schema_for_openai(t.input_schema.clone()),
                 },
             })
             .collect();
