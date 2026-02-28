@@ -114,6 +114,14 @@ impl ModelProvider for DeepSeekProvider {
     fn estimate_cost(&self, request: &ModelRequest) -> TokenCost {
         self.inner.estimate_cost(request)
     }
+
+    fn tool_format(&self) -> halcon_core::types::ToolFormat {
+        halcon_core::types::ToolFormat::OpenAIFunctionObject
+    }
+
+    fn tokenizer_hint(&self) -> halcon_core::types::TokenizerHint {
+        halcon_core::types::TokenizerHint::DeepSeekBpe
+    }
 }
 
 #[cfg(test)]

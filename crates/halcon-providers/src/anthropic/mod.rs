@@ -613,6 +613,14 @@ impl ModelProvider for AnthropicProvider {
             estimated_cost_usd: estimated_tokens as f64 * cost_per_input,
         }
     }
+
+    fn tool_format(&self) -> halcon_core::types::ToolFormat {
+        halcon_core::types::ToolFormat::AnthropicInputSchema
+    }
+
+    fn tokenizer_hint(&self) -> halcon_core::types::TokenizerHint {
+        halcon_core::types::TokenizerHint::ClaudeBpe
+    }
 }
 
 #[cfg(test)]

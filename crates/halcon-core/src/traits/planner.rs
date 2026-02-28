@@ -56,6 +56,15 @@ impl Default for PlanStep {
     }
 }
 
+/// Execution mode inferred from plan structure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    PlanExecuteReflect,
+    DirectExecution,
+}
+
 /// An execution plan generated before tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionPlan {
@@ -74,6 +83,31 @@ pub struct ExecutionPlan {
     /// Original plan ID if this is a replan.
     #[serde(default)]
     pub parent_plan_id: Option<uuid::Uuid>,
+    /// Inferred execution mode (set post-parse, not by LLM).
+    #[serde(default)]
+    pub mode: ExecutionMode,
+    /// True if plan requires at least one content-read tool.
+    #[serde(default)]
+    pub requires_evidence: bool,
+    /// Tools explicitly blocked for this plan (propagated from session).
+    #[serde(default)]
+    pub blocked_tools: Vec<String>,
+}
+
+impl Default for ExecutionPlan {
+    fn default() -> Self {
+        Self {
+            goal: String::new(),
+            steps: vec![],
+            requires_confirmation: false,
+            plan_id: uuid::Uuid::new_v4(),
+            replan_count: 0,
+            parent_plan_id: None,
+            mode: ExecutionMode::PlanExecuteReflect,
+            requires_evidence: false,
+            blocked_tools: vec![],
+        }
+    }
 }
 
 impl ExecutionPlan {
@@ -231,10 +265,7 @@ mod tests {
         ExecutionPlan {
             goal: "test goal".into(),
             steps,
-            requires_confirmation: false,
-            plan_id: uuid::Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         }
     }
 

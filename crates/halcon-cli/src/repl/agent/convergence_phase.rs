@@ -669,14 +669,31 @@ pub(super) async fn run(
                                 "hinting model to synthesize",
                             );
                         }
-                        let synth_msg = ChatMessage {
-                            role: Role::User,
-                            content: MessageContent::Text(
+                        // EBS-R1 (LoopGuardInjectSynthesis): enforce evidence boundary on soft hint.
+                        // Gate fires when content-read tools ran but returned insufficient text.
+                        let synth_text_loopguard = {
+                            use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                            if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                                &mut state.evidence_bundle,
+                            ) {
+                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                tracing::warn!(
+                                    session_id = %state.session_id,
+                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                    min_threshold = MIN_EVIDENCE_BYTES,
+                                    "EvidenceGate FIRED (LoopGuardInjectSynthesis): hint replaced with limitation report"
+                                );
+                                gate_msg
+                            } else {
                                 "[System: You have been calling tools for several state.rounds. \
                                  Consider whether you already have enough information to respond. \
                                  If so, respond directly to the user instead of calling more tools.]"
-                                    .into(),
-                            ),
+                                    .to_string()
+                            }
+                        };
+                        let synth_msg = ChatMessage {
+                            role: Role::User,
+                            content: MessageContent::Text(synth_text_loopguard.into()),
                         };
                         state.messages.push(synth_msg.clone());
                         state.context_pipeline.add_message(synth_msg.clone());
@@ -717,14 +734,33 @@ pub(super) async fn run(
                                 Some("Agent replanned repeatedly without convergence; falling back to direct response"),
                             );
                         }
-                        let synth_msg = ChatMessage {
-                            role: Role::User,
-                            content: MessageContent::Text(
+                        // EBS-R1 (ReplanBudgetExhausted): enforce evidence boundary before
+                        // synthesis injection. Gate fires when content-read tools ran but
+                        // extracted < MIN_EVIDENCE_BYTES — prevents fabrication on unreadable files.
+                        let synth_text_replan_budget = {
+                            use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                            if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                                &mut state.evidence_bundle,
+                            ) {
+                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                tracing::warn!(
+                                    session_id = %state.session_id,
+                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                    min_threshold = MIN_EVIDENCE_BYTES,
+                                    "EvidenceGate FIRED (ReplanBudgetExhausted): synthesis replaced with limitation report"
+                                );
+                                gate_msg
+                            } else {
+                                state.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
                                 "[System: Maximum replanning attempts reached without convergence. \
                                  Synthesize all information gathered so far and respond to the user directly. \
                                  Do NOT call any more tools.]"
-                                    .into(),
-                            ),
+                                    .to_string()
+                            }
+                        };
+                        let synth_msg = ChatMessage {
+                            role: Role::User,
+                            content: MessageContent::Text(synth_text_replan_budget.into()),
                         };
                         state.messages.push(synth_msg.clone());
                         state.context_pipeline.add_message(synth_msg.clone());
@@ -786,9 +822,25 @@ pub(super) async fn run(
                         }
                     };
 
+                    // BRECHA-C: Inject blocked tools so the planner avoids retry loops.
+                    let blocked_tools_note = if state.blocked_tools.is_empty() {
+                        String::new()
+                    } else {
+                        let tools_list = state.blocked_tools
+                            .iter()
+                            .map(|(name, reason)| format!("  - `{name}`: {reason}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "\n\nCRITICAL CONSTRAINTS — These tools were BLOCKED by security guardrails \
+                             and MUST NOT be used in the new plan:\n{tools_list}\n\
+                             Generate a plan that achieves the goal WITHOUT using these blocked tools.",
+                        )
+                    };
+
                     let replan_prompt = format!(
                         "The current approach has stalled (read-only tools used repeatedly with no progress). \
-                         Based on the information gathered so far:\n\n{context_summary}\n\n\
+                         Based on the information gathered so far:\n\n{context_summary}{blocked_tools_note}\n\n\
                          Generate a NEW plan with a DIFFERENT strategy to achieve the original goal: {}\n\n\
                          Focus on actionable steps that make progress toward the goal.",
                         state.user_msg
@@ -804,18 +856,38 @@ pub(super) async fn run(
                         if !state.silent {
                             render_sink.warning("No planner available", Some("Falling back to synthesis."));
                         }
-                        let synth_msg = ChatMessage {
-                            role: Role::User,
-                            content: MessageContent::Text(
+                        // EBS-R1 (ReplanNoPlannerAvailable): enforce evidence boundary before synthesis.
+                        let synth_text_no_planner = {
+                            use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                            if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                                &mut state.evidence_bundle,
+                            ) {
+                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                tracing::warn!(
+                                    session_id = %state.session_id,
+                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                    min_threshold = MIN_EVIDENCE_BYTES,
+                                    "EvidenceGate FIRED (ReplanNoPlannerAvailable): synthesis replaced with limitation report"
+                                );
+                                gate_msg
+                            } else {
+                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                 "[System: Cannot regenerate plan (no planner). \
                                  Synthesize your findings and respond to the user.]"
-                                    .into(),
-                            ),
+                                    .to_string()
+                            }
+                        };
+                        let synth_msg = ChatMessage {
+                            role: Role::User,
+                            content: MessageContent::Text(synth_text_no_planner.into()),
                         };
                         state.messages.push(synth_msg.clone());
                         state.context_pipeline.add_message(synth_msg.clone());
                         session.add_message(synth_msg);
-                        state.tool_decision.set_force_next();
+                        // P2-A fix (2026-02-27): No planner available is a structural oracle-level
+                        // constraint — promote to ForcedByOracle (was set_force_next). The planner
+                        // is either not configured or was exhausted; this is not a transient heuristic.
+                        state.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         return Ok(PhaseOutcome::NextRound);
                     };
 
@@ -909,18 +981,38 @@ pub(super) async fn run(
                                     Some("Synthesizing findings from gathered information."),
                                 );
                             }
-                            let synth_msg = ChatMessage {
-                                role: Role::User,
-                                content: MessageContent::Text(
+                            // EBS-R1 (ReplanEmptyPlan): enforce evidence boundary before synthesis.
+                            let synth_text_empty_plan = {
+                                use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                                if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                                    &mut state.evidence_bundle,
+                                ) {
+                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    tracing::warn!(
+                                        session_id = %state.session_id,
+                                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                        min_threshold = MIN_EVIDENCE_BYTES,
+                                        "EvidenceGate FIRED (ReplanEmptyPlan): synthesis replaced with limitation report"
+                                    );
+                                    gate_msg
+                                } else {
+                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     "[System: Plan regeneration did not succeed. \
                                      Synthesize the information you have gathered and respond to the user.]"
-                                        .into(),
-                                ),
+                                        .to_string()
+                                }
+                            };
+                            let synth_msg = ChatMessage {
+                                role: Role::User,
+                                content: MessageContent::Text(synth_text_empty_plan.into()),
                             };
                             state.messages.push(synth_msg.clone());
                             state.context_pipeline.add_message(synth_msg.clone());
                             session.add_message(synth_msg);
-                            state.tool_decision.set_force_next();
+                            // P2-B fix (2026-02-27): Replan produced empty/no plan is a structural
+                            // oracle-level failure — promote to ForcedByOracle (was set_force_next).
+                            // Prevents subsequent heuristics from downgrading the synthesis directive.
+                            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         }
                         Ok(Err(e)) => {
                             tracing::error!(error = %e, "Replan failed — falling back to synthesis");
@@ -930,18 +1022,37 @@ pub(super) async fn run(
                                     Some("Synthesizing findings from gathered information."),
                                 );
                             }
-                            let synth_msg = ChatMessage {
-                                role: Role::User,
-                                content: MessageContent::Text(
+                            // EBS-R1 (ReplanError): enforce evidence boundary before synthesis.
+                            let synth_text_replan_err = {
+                                use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                                if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                                    &mut state.evidence_bundle,
+                                ) {
+                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    tracing::warn!(
+                                        session_id = %state.session_id,
+                                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                        min_threshold = MIN_EVIDENCE_BYTES,
+                                        "EvidenceGate FIRED (ReplanError): synthesis replaced with limitation report"
+                                    );
+                                    gate_msg
+                                } else {
+                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     "[System: Plan regeneration failed. \
                                      Synthesize the information you have gathered and respond to the user.]"
-                                        .into(),
-                                ),
+                                        .to_string()
+                                }
+                            };
+                            let synth_msg = ChatMessage {
+                                role: Role::User,
+                                content: MessageContent::Text(synth_text_replan_err.into()),
                             };
                             state.messages.push(synth_msg.clone());
                             state.context_pipeline.add_message(synth_msg.clone());
                             session.add_message(synth_msg);
-                            state.tool_decision.set_force_next();
+                            // P2-C fix (2026-02-27): Replan error is a hard structural failure —
+                            // promote to ForcedByOracle. Planner returning Err is definitive.
+                            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         }
                         Err(_timeout) => {
                             tracing::error!(
@@ -954,18 +1065,37 @@ pub(super) async fn run(
                                     Some("Synthesizing findings from gathered information."),
                                 );
                             }
-                            let synth_msg = ChatMessage {
-                                role: Role::User,
-                                content: MessageContent::Text(
+                            // EBS-R1 (ReplanTimeout): enforce evidence boundary before synthesis.
+                            let synth_text_replan_timeout = {
+                                use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                                if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                                    &mut state.evidence_bundle,
+                                ) {
+                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    tracing::warn!(
+                                        session_id = %state.session_id,
+                                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                        min_threshold = MIN_EVIDENCE_BYTES,
+                                        "EvidenceGate FIRED (ReplanTimeout): synthesis replaced with limitation report"
+                                    );
+                                    gate_msg
+                                } else {
+                                    state.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
                                     "[System: Plan regeneration timed out. \
                                      Synthesize the information you have gathered and respond to the user.]"
-                                        .into(),
-                                ),
+                                        .to_string()
+                                }
+                            };
+                            let synth_msg = ChatMessage {
+                                role: Role::User,
+                                content: MessageContent::Text(synth_text_replan_timeout.into()),
                             };
                             state.messages.push(synth_msg.clone());
                             state.context_pipeline.add_message(synth_msg.clone());
                             session.add_message(synth_msg);
-                            state.tool_decision.set_force_next();
+                            // P2-D fix (2026-02-27): Replan timeout is deterministic and structural —
+                            // promote to ForcedByOracle. Timeout will recur if heuristics allow retry.
+                            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         }
                     }
                 }
@@ -981,14 +1111,30 @@ pub(super) async fn run(
             if !state.silent {
                 render_sink.loop_guard_action("force_no_tools", "removing tools for next round");
             }
-            let synth_msg = ChatMessage {
-                role: Role::User,
-                content: MessageContent::Text(
+            // EBS-R1 (ForceNoToolsOracle): enforce evidence boundary before synthesis injection.
+            let synth_text_force_no_tools = {
+                use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+                if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
+                    &mut state.evidence_bundle,
+                ) {
+                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                    tracing::warn!(
+                        session_id = %state.session_id,
+                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                        min_threshold = MIN_EVIDENCE_BYTES,
+                        "EvidenceGate FIRED (ForceNoToolsOracle): synthesis replaced with limitation report"
+                    );
+                    gate_msg
+                } else {
                     "[System: You have gathered sufficient information across multiple tool state.rounds. \
                      SYNTHESIZE your findings and respond directly to the user. \
                      Do NOT call any more tools unless absolutely necessary for NEW information.]"
-                        .into(),
-                ),
+                        .to_string()
+                }
+            };
+            let synth_msg = ChatMessage {
+                role: Role::User,
+                content: MessageContent::Text(synth_text_force_no_tools.into()),
             };
             state.messages.push(synth_msg.clone());
             state.context_pipeline.add_message(synth_msg.clone());

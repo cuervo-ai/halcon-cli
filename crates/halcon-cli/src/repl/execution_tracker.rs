@@ -167,6 +167,10 @@ impl ExecutionTracker {
     }
 
     /// Whether all steps are in a terminal state.
+    // FUTURE: granular retry hook — when `is_complete()` returns true but some
+    // steps have `status == Failed`, allow per-step retry instead of full
+    // agent loop re-execution. Track `retryable_failures()` and expose to
+    // the orchestrator for selective re-dispatch.
     pub fn is_complete(&self) -> bool {
         self.steps.iter().all(|s| s.status.is_terminal())
     }
@@ -260,6 +264,38 @@ impl ExecutionTracker {
     #[allow(dead_code)]
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self.to_timeline()).unwrap_or_default()
+    }
+
+    /// Mark the last synthesis step (no tool_name) as Completed.
+    ///
+    /// Called after the coordinator finishes its synthesis round so the plan JSON
+    /// reports 100% completion. Only marks the step if it has no `tool_name`
+    /// (synthesis steps are tool-less) and is not already in a terminal state.
+    pub fn mark_synthesis_complete(&mut self, step_index: usize, round: usize) {
+        if let Some(tracked) = self.steps.get_mut(step_index) {
+            if tracked.step.tool_name.is_none() && !tracked.status.is_terminal() {
+                let now = Utc::now();
+                if tracked.status == TaskStatus::Pending {
+                    tracked.started_at = Some(now);
+                }
+                tracked.status = TaskStatus::Completed;
+                tracked.finished_at = Some(now);
+                tracked.duration_ms = tracked
+                    .started_at
+                    .map(|start| (now - start).num_milliseconds().max(0) as u64);
+                tracked.round = Some(round);
+                let outcome = StepOutcome::Success {
+                    summary: "synthesis complete".to_string(),
+                };
+                tracked.step.outcome = Some(outcome.clone());
+                self.plan.steps[step_index].outcome = Some(outcome);
+                let _ = self.event_tx.send(DomainEvent::new(EventPayload::PlanStepCompleted {
+                    plan_id: self.plan.plan_id,
+                    step_index,
+                    outcome: "success".to_string(),
+                }));
+            }
+        }
     }
 
     /// Record delegation of a step to a sub-agent.
@@ -497,6 +533,7 @@ mod tests {
             plan_id: Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 
@@ -866,6 +903,8 @@ mod tests {
             latency_ms: 200,
             rounds: 1,
             error: None,
+            evidence_verified: false,
+            content_read_attempts: 0,
         };
 
         let matched = tracker.record_delegation_results(&[result], 1);
@@ -900,6 +939,8 @@ mod tests {
             latency_ms: 100,
             rounds: 1,
             error: Some("exit code 1".into()),
+            evidence_verified: false,
+            content_read_attempts: 0,
         };
 
         let matched = tracker.record_delegation_results(&[result], 1);
@@ -929,6 +970,8 @@ mod tests {
             latency_ms: 50,
             rounds: 1,
             error: None,
+            evidence_verified: false,
+            content_read_attempts: 0,
         };
 
         let matched = tracker.record_delegation_results(&[result], 1);
@@ -972,6 +1015,8 @@ mod tests {
                 latency_ms: 300,
                 rounds: 1,
                 error: None,
+                evidence_verified: false,
+                content_read_attempts: 0,
             },
             halcon_core::types::SubAgentResult {
                 task_id: task_id_2,
@@ -989,6 +1034,8 @@ mod tests {
                 latency_ms: 500,
                 rounds: 1,
                 error: None,
+                evidence_verified: false,
+                content_read_attempts: 0,
             },
         ];
 
@@ -1033,6 +1080,8 @@ mod tests {
             latency_ms: 50,
             rounds: 1,
             error: None,
+            evidence_verified: false,
+            content_read_attempts: 0,
         };
         tracker.record_delegation_results(&[result], 1);
 

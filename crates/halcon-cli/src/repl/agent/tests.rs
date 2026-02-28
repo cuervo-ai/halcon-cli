@@ -112,6 +112,7 @@
             critic_model: None,
             plugin_registry: None,
             is_sub_agent: false,
+            requested_provider: None,
         }
     }
 
@@ -1043,6 +1044,7 @@
             plan_id: uuid::Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let formatted = format_plan_for_prompt(&plan, 1);
         assert!(formatted.contains(PLAN_SECTION_START));
@@ -1065,6 +1067,7 @@
             plan_id: uuid::Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let formatted = format_plan_for_prompt(&plan, 0);
         assert!(formatted.contains("All steps completed."));
@@ -1088,6 +1091,7 @@
             plan_id: uuid::Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let formatted = format_plan_for_prompt(&plan, 0);
         assert!(formatted.contains("CURRENT"));
@@ -1129,6 +1133,7 @@
             plan_id: uuid::Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 
@@ -2077,6 +2082,7 @@
             requires_confirmation: false,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 
@@ -3264,6 +3270,7 @@
             oscillation_penalty: 0.0,
             plan_completion_ratio: 0.5,
             plugin_snapshots: vec![],
+            critic_unavailable: false,
         };
         let reward = compute_reward(&signals);
         assert!((reward.breakdown.stop_score - 0.15).abs() < 1e-9,
@@ -3546,6 +3553,7 @@
             requires_confirmation: false,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let (compressed, stats) = compress(plan);
         assert!(
@@ -3665,6 +3673,7 @@
             requires_confirmation: false,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let mut view = MacroPlanView::from_plan(&plan, FeedbackMode::Compact);
         // Summary includes step separator.
@@ -3708,6 +3717,7 @@
             requires_confirmation: false,
             replan_count: 1,
             parent_plan_id: None,
+            ..Default::default()
         };
         let (compressed, _) = compress(replan);
         assert!(

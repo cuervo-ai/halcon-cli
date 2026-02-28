@@ -206,6 +206,7 @@ impl PlaybookPlanner {
             plan_id: uuid::Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 
@@ -232,6 +233,7 @@ impl PlaybookPlanner {
             plan_id: uuid::Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 
@@ -582,6 +584,7 @@ mod tests {
             plan_id: uuid::Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let result = p.replan(&plan, 0, "error", &[]).await.unwrap();
         assert!(result.is_none());

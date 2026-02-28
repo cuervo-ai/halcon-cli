@@ -153,6 +153,7 @@ pub async fn run_replay(
         critic_model: None,
         plugin_registry: None,
         is_sub_agent: false,
+        requested_provider: None,
     };
 
     let result = agent::run_agent_loop(ctx).await?;

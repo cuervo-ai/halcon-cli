@@ -18,95 +18,22 @@
 //! | Gemini            | `parameters`        | `{ functionDeclarations: […] }` | all tools in one wrapper |
 //! | Ollama            | N/A (system prompt) | N/A                     | XML `<tool_call>` emulation |
 
-use halcon_core::types::ToolDefinition;
+use halcon_core::types::{ToolDefinition, ToolFormat};
 
 // ── ProviderToolFormat ────────────────────────────────────────────────────────
 
-/// Canonical description of a provider's tool wire format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ProviderToolFormat {
-    /// Anthropic Claude — `input_schema` field, no wrapper struct.
-    AnthropicInputSchema,
+/// Backward-compatible alias — all logic now lives in `halcon_core::types::ToolFormat`.
+pub(crate) type ProviderToolFormat = ToolFormat;
 
-    /// OpenAI-compatible (OpenAI, DeepSeek) — `parameters` field, each tool wrapped in
-    /// `{ "type": "function", "function": { … } }`.
-    OpenAIFunctionObject,
-
-    /// Google Gemini — `parameters` field, **all** tools merged into a single
-    /// `{ "functionDeclarations": [ … ] }` wrapper sent in the `tools` array.
-    GeminiFunctionDeclarations,
-
-    /// Ollama local models — tools are **not** sent as a JSON `tools` field; instead the
-    /// tool catalog is injected into the system prompt as `<tool_call>` XML instructions and
-    /// the model's XML responses are parsed back into `ToolUseStart`/`Done(ToolUse)` chunks.
-    OllamaXmlEmulation,
-
-    /// Unknown / custom provider — format cannot be determined statically.
-    /// The adapter treats this conservatively: no warnings are emitted and no assumptions
-    /// are made.
-    Unknown,
-}
-
-impl ProviderToolFormat {
-    /// Detect the wire format from a provider's `name()` string.
-    ///
-    /// This covers every first-party halcon provider.  Third-party / custom providers fall
-    /// through to [`ProviderToolFormat::Unknown`].
-    pub(crate) fn detect(provider_name: &str) -> Self {
-        match provider_name {
-            "anthropic" => Self::AnthropicInputSchema,
-            // openai_compat returns the provider_name it was constructed with.
-            "openai" | "deepseek" => Self::OpenAIFunctionObject,
-            "gemini" => Self::GeminiFunctionDeclarations,
-            "ollama" => Self::OllamaXmlEmulation,
-            // echo / replay / test providers — no real API call.
-            _ => Self::Unknown,
-        }
-    }
-
-    /// Name of the JSON field used for the input schema in this format.
-    ///
-    /// Returns `"n/a"` for formats that use system-prompt injection instead.
-    pub(crate) fn schema_field_name(self) -> &'static str {
-        match self {
-            Self::AnthropicInputSchema => "input_schema",
-            Self::OpenAIFunctionObject | Self::GeminiFunctionDeclarations => "parameters",
-            Self::OllamaXmlEmulation => "n/a (system-prompt injection)",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// Whether tools are injected into the system prompt rather than sent in a `tools` field.
-    ///
-    /// When `true`, the provider crate converts `ToolDefinition`s to XML instructions that are
-    /// appended to `round_request.system`.  The `tools` field of the outgoing HTTP request is
-    /// left empty.
-    pub(crate) fn uses_system_prompt_injection(self) -> bool {
-        matches!(self, Self::OllamaXmlEmulation)
-    }
-
-    /// Whether the format wraps each tool in an outer function object (OpenAI-compat style).
-    pub(crate) fn uses_function_wrapper(self) -> bool {
-        matches!(
-            self,
-            Self::OpenAIFunctionObject | Self::GeminiFunctionDeclarations
-        )
-    }
-
-    /// Whether all tools are collected into a single wrapper (Gemini style).
-    pub(crate) fn uses_batch_wrapper(self) -> bool {
-        matches!(self, Self::GeminiFunctionDeclarations)
-    }
-
-    /// Short human-readable label for tracing / UI.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::AnthropicInputSchema => "anthropic/input_schema",
-            Self::OpenAIFunctionObject => "openai/function_object",
-            Self::GeminiFunctionDeclarations => "gemini/function_declarations",
-            Self::OllamaXmlEmulation => "ollama/xml_emulation",
-            Self::Unknown => "unknown",
-        }
+/// String-based detection for backward compat with callers that don't have a
+/// `&dyn ModelProvider` reference. Prefer `provider.tool_format()` when available.
+pub(crate) fn detect_tool_format(provider_name: &str) -> ToolFormat {
+    match provider_name {
+        "anthropic" | "claude_code" => ToolFormat::AnthropicInputSchema,
+        "openai" | "deepseek" => ToolFormat::OpenAIFunctionObject,
+        "gemini" => ToolFormat::GeminiFunctionDeclarations,
+        "ollama" => ToolFormat::OllamaXmlEmulation,
+        _ => ToolFormat::Unknown,
     }
 }
 
@@ -221,7 +148,7 @@ impl ProviderNormalizationAdapter {
     /// Build an adapter for the given provider `name()`.
     pub(crate) fn for_provider(provider_name: &str) -> Self {
         Self {
-            format: ProviderToolFormat::detect(provider_name),
+            format: detect_tool_format(provider_name),
             provider_name: provider_name.to_owned(),
         }
     }
@@ -356,7 +283,7 @@ mod tests {
     #[test]
     fn detect_anthropic() {
         assert_eq!(
-            ProviderToolFormat::detect("anthropic"),
+            detect_tool_format("anthropic"),
             ProviderToolFormat::AnthropicInputSchema
         );
     }
@@ -364,7 +291,7 @@ mod tests {
     #[test]
     fn detect_openai() {
         assert_eq!(
-            ProviderToolFormat::detect("openai"),
+            detect_tool_format("openai"),
             ProviderToolFormat::OpenAIFunctionObject
         );
     }
@@ -372,7 +299,7 @@ mod tests {
     #[test]
     fn detect_deepseek() {
         assert_eq!(
-            ProviderToolFormat::detect("deepseek"),
+            detect_tool_format("deepseek"),
             ProviderToolFormat::OpenAIFunctionObject
         );
     }
@@ -380,7 +307,7 @@ mod tests {
     #[test]
     fn detect_gemini() {
         assert_eq!(
-            ProviderToolFormat::detect("gemini"),
+            detect_tool_format("gemini"),
             ProviderToolFormat::GeminiFunctionDeclarations
         );
     }
@@ -388,7 +315,7 @@ mod tests {
     #[test]
     fn detect_ollama() {
         assert_eq!(
-            ProviderToolFormat::detect("ollama"),
+            detect_tool_format("ollama"),
             ProviderToolFormat::OllamaXmlEmulation
         );
     }
@@ -396,14 +323,14 @@ mod tests {
     #[test]
     fn detect_unknown_provider_falls_through() {
         assert_eq!(
-            ProviderToolFormat::detect("my-custom-provider"),
+            detect_tool_format("my-custom-provider"),
             ProviderToolFormat::Unknown
         );
     }
 
     #[test]
     fn detect_echo_is_unknown() {
-        assert_eq!(ProviderToolFormat::detect("echo"), ProviderToolFormat::Unknown);
+        assert_eq!(detect_tool_format("echo"), ProviderToolFormat::Unknown);
     }
 
     // ── ProviderToolFormat property methods ───────────────────────────────────

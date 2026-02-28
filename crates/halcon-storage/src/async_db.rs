@@ -1284,6 +1284,7 @@ mod tests {
             plan_id: Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
 
         // Should succeed without error.
@@ -1318,6 +1319,7 @@ mod tests {
             plan_id,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
 
         adb.save_plan_steps(&session_id, &plan).await.unwrap();

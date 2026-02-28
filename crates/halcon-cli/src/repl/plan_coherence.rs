@@ -131,6 +131,7 @@ mod tests {
             replan_count: 0,
             parent_plan_id: None,
             requires_confirmation: false,
+            ..Default::default()
         }
     }
 

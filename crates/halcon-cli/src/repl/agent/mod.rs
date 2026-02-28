@@ -147,6 +147,14 @@ pub struct AgentContext<'a> {
     /// instead of the intent-profile-derived controller.  Set to `false` for all top-level
     /// agents (main REPL loop, retry loop, replay runner).
     pub is_sub_agent: bool,
+    /// Provider originally requested by the user (e.g. CLI `-p` arg).
+    ///
+    /// When `Some` and different from `provider.name()`, a startup fallback occurred in
+    /// `provider_factory.rs` before the TUI was initialised — the warning was printed to
+    /// stderr and was therefore invisible in TUI mode. `run_agent_loop` re-emits the event
+    /// through `render_sink.provider_fallback()` so TUI users see the warning.
+    /// `None` disables the check (sub-agents, replay runner, agent bridge).
+    pub requested_provider: Option<String>,
 }
 
 /// Action determined by checking the control channel.
@@ -241,11 +249,28 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         critic_model,
         plugin_registry,
         is_sub_agent,
+        requested_provider,
     } = ctx;
 
     let silent = render_sink.is_silent();
+
+    // BRECHA-B (startup provider fallback): provider_factory.rs emits a warning to stderr
+    // before the TUI initialises — TUI users never see it. Re-emit through the render sink
+    // so the TUI can display a visible warning banner.
+    if let Some(ref requested) = requested_provider {
+        if requested != provider.name() && !silent {
+            render_sink.provider_fallback(
+                requested,
+                provider.name(),
+                "requested provider unavailable — fallback at startup",
+            );
+        }
+    }
+
     // Phase L: token attribution accumulators (filled before LoopState is created).
     let mut pre_loop_tokens_subagents: u64 = 0;
+    // BRECHA-R1 + FASE 5: structured failed step context (filled before LoopState is created).
+    let mut pre_loop_failed_steps: Vec<crate::repl::agent_types::FailedStepContext> = Vec::new();
 
     let tool_exec_config = executor::ToolExecutionConfig {
         dry_run_mode: phase14.dry_run_mode,
@@ -530,11 +555,6 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 // Keeps the active plan focused and prevents context bloat from verbose steps.
                 let (plan, _compression_stats) = super::plan_compressor::compress(plan);
 
-                // Send plan to UI (TUI panel + classic rendering)
-                if !silent {
-                    render_sink.plan_progress(&plan.goal, &plan.steps, 0);
-                }
-
                 active_plan = Some(plan);
                 // Note: Plan hash will be updated on first round iteration (loop_guard doesn't exist yet)
             }
@@ -730,15 +750,6 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         if let Some(ref mut sys) = cached_system {
             update_plan_in_system(sys, &plan_section);
         }
-        // Emit initial plan progress with timing.
-        let (_, _, elapsed) = tracker.progress();
-        render_sink.plan_progress_with_timing(
-            &plan.goal,
-            &plan.steps,
-            tracker.current_step(),
-            tracker.tracked_steps(),
-            elapsed,
-        );
     }
 
     // Phase 37: Attempt delegation of eligible plan steps to sub-agents.
@@ -778,13 +789,18 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 // Use the same step_idx that task_id_to_step will return for this task
                 // so that sub_agent_completed can find the spawned line (step_index must match).
                 let step_idx = task_id_to_step.get(&task.task_id).copied().unwrap_or(0);
-                // Use agent_type as the label — the raw instruction is verbose and contains
-                // "IMPORTANT: Call the `tool` NOW to..." which leaks into the activity panel.
-                let agent_label = format!("{:?} [{}/{}]", task.agent_type, step_idx, task_count);
+                // Use the plan step description (truncated) instead of the verbose instruction.
+                let step_desc: String = tracker.plan().steps
+                    .get(step_idx)
+                    .map(|s| {
+                        let desc: String = s.description.chars().take(50).collect();
+                        format!("{:?} [{}]", task.agent_type, desc)
+                    })
+                    .unwrap_or_else(|| format!("{:?} [{}/{}]", task.agent_type, step_idx, task_count));
                 render_sink.sub_agent_spawned(
                     step_idx,
                     task_count,
-                    &agent_label,
+                    &step_desc,
                     &format!("{:?}", task.agent_type),
                 );
             }
@@ -879,27 +895,41 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 // before injecting into coordinator context. Rejects meta-questions, missing
                 // synthesis, and outputs with no file references for analysis steps.
                 //
-                // BUG FIX (tool-only sub-agents): Previously filtered `r.output_text.is_empty()`,
-                // which excluded sub-agents that ONLY executed a tool (e.g. file_write) and
-                // produced no text output (common for file-creation tasks). The coordinator then
-                // had NO context that the task was completed, so it tried to re-execute the tool
-                // itself (visible as ToolMarker(file_write) at coordinator step 2). Fix: include
-                // tool-only sub-agents with a synthetic completion message derived from tools_used.
+                // RC-5 FIX (2026-02-28): Include ALL sub-agents in sub_outputs — even those
+                // with empty output and no tools (error/timeout/empty-surface failures).
+                // Previously these were filtered out, making the failure invisible to the
+                // coordinator. The coordinator would synthesize without knowing a step was
+                // missing, producing placeholder text that triggers unnecessary retries.
+                //
+                // Invariant: sub_outputs.len() == orch_result.sub_results.len()
                 let sub_outputs: Vec<String> = orch_result.sub_results.iter()
-                    .filter(|r| !r.output_text.is_empty() || !r.agent_result.tools_used.is_empty())
                     .enumerate()
                     .map(|(i, r)| {
                         let status = if r.success { "success" } else { "failed" };
 
-                        // When the sub-agent executed tools but produced no text output
-                        // (e.g. file_write completed silently), synthesize a completion message
-                        // so the coordinator knows the task was done. Without this, the coordinator
-                        // would attempt to redo the same work, causing duplicate tool calls.
+                        // Construct effective_output based on what the sub-agent produced:
+                        // 1. Tool-only (no text, tools executed): synthetic completion message
+                        // 2. Empty failure (no text, no tools): explicit failure notice
+                        // 3. Normal: use output_text as-is
                         let effective_output = if r.output_text.is_empty() && !r.agent_result.tools_used.is_empty() {
                             format!(
                                 "Task completed via tool execution: {}. The operation was performed successfully.",
                                 r.agent_result.tools_used.join(", ")
                             )
+                        } else if r.output_text.is_empty() && r.agent_result.tools_used.is_empty() {
+                            // RC-5: Sub-agent produced nothing (error, timeout, or empty tool surface).
+                            // Expose the failure explicitly so the coordinator can acknowledge it.
+                            if let Some(ref err) = r.error {
+                                format!(
+                                    "SUB-AGENT FAILED: {}. This task was NOT completed. \
+                                     Do NOT fabricate results for this step.",
+                                    err.chars().take(200).collect::<String>()
+                                )
+                            } else {
+                                "SUB-AGENT FAILED: produced no output and executed no tools. \
+                                 This task was NOT completed. Do NOT fabricate results for this step."
+                                    .to_string()
+                            }
                         } else {
                             r.output_text.clone()
                         };
@@ -957,7 +987,14 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                                 )
                             }
                         };
-                        format!("**Sub-agent {} ({}):**\n{}", i + 1, status, text)
+                        // BRECHA-S1: append unverified note when sub-agent produced no
+                        // content-read evidence — coordinator is warned the output may be hallucinated.
+                        let unverified_note = if !r.evidence_verified && r.content_read_attempts == 0 {
+                            "\n[Note: this sub-agent did not read any files — claims may be unverified]"
+                        } else {
+                            ""
+                        };
+                        format!("**Sub-agent {} ({}):**\n{}{}", i + 1, status, text, unverified_note)
                     })
                     .collect();
 
@@ -971,39 +1008,64 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     .flat_map(|r| r.agent_result.tools_used.iter().cloned())
                     .collect();
 
+                // BRECHA-R1 + FASE 5: Collect structured failed step context.
+                // These are propagated to AgentLoopResult and injected into the critic
+                // retry message with error categories so the planner can reason about
+                // WHY steps failed, not just WHAT failed.
+                for r in &orch_result.sub_results {
+                    if !r.success {
+                        let step_index = task_id_to_step.get(&r.task_id).copied().unwrap_or(0);
+                        let plan = tracker.plan();
+                        if let Some(step) = plan.steps.get(step_index) {
+                            let desc: String = step.description.chars().take(120).collect();
+                            if !pre_loop_failed_steps.iter().any(|s| s.description == desc) {
+                                let error_msg = r.error.as_deref().unwrap_or("unknown error");
+                                let error_category = crate::repl::agent_types::FailedStepErrorCategory::from_error_string(error_msg);
+                                pre_loop_failed_steps.push(crate::repl::agent_types::FailedStepContext {
+                                    description: desc,
+                                    error_category,
+                                    error_message: error_msg.chars().take(200).collect(),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 if !sub_outputs.is_empty() {
                     render_sink.loop_guard_action(
                         "sub_agent_results",
                         &format!("{} sub-agent outputs collected — injecting into coordinator context", sub_outputs.len()),
                     );
 
-                    // FIX: When destructive tools (file_write, bash) were already executed by
-                    // sub-agents, inject a strong directive so the coordinator does NOT re-execute
-                    // them. Without this, deepseek-chat hallucinates a second file_write call
-                    // containing the full file content (~6K tokens, ~131s) even after the
-                    // sub-agent already wrote the file. This was the #1 source of wasted time
-                    // (176s = 51% of total session duration in the Minecraft benchmark).
-                    let anti_redo_note = if delegated_ok_tools.iter().any(|t| {
-                        matches!(t.as_str(), "file_write" | "bash" | "shell" | "patch_apply")
-                    }) {
-                        format!(
-                            "\n⚠️  CRITICAL: The following tools were already executed by sub-agents \
-                             and must NOT be called again: [{}]. \
-                             Your ONLY task now is to synthesize the results and confirm to the user \
-                             what was created. Do NOT regenerate or re-write any files.\n",
-                            delegated_ok_tools
-                                .iter()
-                                .filter(|t| matches!(t.as_str(), "file_write" | "bash" | "shell" | "patch_apply"))
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    } else {
+                    // FASE 7: Use QuirkRegistry for provider-specific post-delegation injections.
+                    // Replaces hardcoded anti-redo logic with composable quirks (AntiRedoQuirk, etc.).
+                    let quirk_ctx = crate::repl::model_quirks::QuirkContext {
+                        provider_name: provider.name(),
+                        model: &request.model,
+                        delegated_ok_tools: &delegated_ok_tools,
+                        has_tools_in_request: !cached_tools.is_empty(),
+                    };
+                    let quirk_registry = {
+                        let mut r = crate::repl::model_quirks::QuirkRegistry::new();
+                        r.register(Box::new(crate::repl::model_quirks::AntiRedoQuirk));
+                        r.register(Box::new(crate::repl::model_quirks::XmlArtifactFilterQuirk));
+                        r
+                    };
+                    let injections = quirk_registry.post_delegation_injections(&quirk_ctx);
+                    let anti_redo_note = if injections.is_empty() {
                         String::new()
+                    } else {
+                        injections.join("")
                     };
 
                     let results_context = format!(
-                        "[Sub-Agent Results — please synthesize these into your final response]{anti_redo_note}\n\n{}\n",
+                        "[Sub-Agent Results]\n\
+                         SYNTHESIS RULES:\n\
+                         • Do NOT repeat or quote sub-agent outputs verbatim.\n\
+                         • Do NOT re-state findings already shown above.\n\
+                         • Your role: validate coherence, add your own analysis, and provide ONE unified answer.\n\
+                         • If results are self-evident, confirm briefly without repeating them.{anti_redo_note}\n\n\
+                         {}\n",
                         sub_outputs.join("\n\n")
                     );
                     messages.push(ChatMessage {
@@ -1109,6 +1171,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         latency_ms: 0,
                         rounds: 0,
                         error: Some(format!("orchestrator failed: {err_str}")),
+                        evidence_verified: false,
+                        content_read_attempts: 0,
                     })
                     .collect();
                 tracker.record_delegation_results(&failure_results, rounds);
@@ -1489,7 +1553,10 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         l4_archive_path: l4_archive_path.clone(),
         strategy_context: strategy_context.clone(),
         tools_executed: Vec::new(),
+        blocked_tools: Vec::new(),
+        failed_sub_agent_steps: pre_loop_failed_steps,
         evidence_bundle: Default::default(),
+        deterministic_boundary_enforced: false,
         tokens_planning: 0,
         tokens_subagents: pre_loop_tokens_subagents,
         tokens_critic: 0,
@@ -1569,6 +1636,12 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         .and_then(|arc_pr| arc_pr.lock().ok().map(|pr| pr.cost_snapshot()))
                         .unwrap_or_default(),
                     tools_executed: state.tools_executed,
+                    evidence_verified: !state.evidence_bundle.evidence_gate_fires(),
+                    content_read_attempts: state.evidence_bundle.content_read_attempts,
+                    last_provider_used: None,
+                    blocked_tools: state.blocked_tools,
+                    failed_sub_agent_steps: state.failed_sub_agent_steps,
+                    critic_unavailable: false,
                 });
             }
             round_setup::RoundSetupOutcome::Continue(out) => out,
@@ -1629,6 +1702,12 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         .and_then(|arc_pr| arc_pr.lock().ok().map(|pr| pr.cost_snapshot()))
                         .unwrap_or_default(),
                     tools_executed: state.tools_executed,
+                    evidence_verified: !state.evidence_bundle.evidence_gate_fires(),
+                    content_read_attempts: state.evidence_bundle.content_read_attempts,
+                    last_provider_used: None,
+                    blocked_tools: state.blocked_tools,
+                    failed_sub_agent_steps: state.failed_sub_agent_steps,
+                    critic_unavailable: false,
                 });
             }
             provider_round::ProviderRoundOutcome::ToolUse(out) => out,
@@ -1731,6 +1810,18 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 loop_events::LoopEvent::CheckpointSaved { round },
                 trace_db,
             );
+        }
+    }
+
+    // P6: Mark the last synthesis step as Completed so plan JSON shows 100% completion.
+    // The synthesis step is tool-less (tool_name == None) and is never matched by
+    // record_tool_results (which matches by tool_name). Without this, the plan tracker
+    // reports the last step as Pending even after the coordinator finishes synthesis.
+    if let Some(ref mut tracker) = state.execution_tracker {
+        let plan = tracker.plan();
+        let last_idx = plan.steps.len().saturating_sub(1);
+        if plan.steps.get(last_idx).map_or(false, |s| s.tool_name.is_none()) {
+            tracker.mark_synthesis_complete(last_idx, state.rounds);
         }
     }
 

@@ -59,6 +59,12 @@ pub struct SubAgentResult {
     /// Error message if the sub-agent failed.
     #[serde(default)]
     pub error: Option<String>,
+    /// Whether the sub-agent produced verified evidence (evidence gate did not fire).
+    #[serde(default)]
+    pub evidence_verified: bool,
+    /// Number of content-read tool attempts made by the sub-agent.
+    #[serde(default)]
+    pub content_read_attempts: usize,
 }
 
 /// Aggregated result from a complete orchestrator run.
@@ -256,12 +262,35 @@ mod tests {
             latency_ms: 500,
             rounds: 2,
             error: None,
+            evidence_verified: true,
+            content_read_attempts: 1,
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: SubAgentResult = serde_json::from_str(&json).unwrap();
         assert!(parsed.success);
         assert_eq!(parsed.output_text, "Done");
         assert_eq!(parsed.rounds, 2);
+        assert!(parsed.evidence_verified);
+        assert_eq!(parsed.content_read_attempts, 1);
+    }
+
+    #[test]
+    fn sub_agent_result_evidence_fields_default_to_false_zero() {
+        // Backward compatibility: old JSON without evidence fields deserializes with defaults.
+        let old_json = r#"{
+            "task_id": "00000000-0000-0000-0000-000000000001",
+            "success": true,
+            "output_text": "done",
+            "agent_result": {"success": true, "summary": "ok", "files_modified": [], "tools_used": []},
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "rounds": 0
+        }"#;
+        let parsed: SubAgentResult = serde_json::from_str(old_json).unwrap();
+        assert!(!parsed.evidence_verified, "default evidence_verified must be false");
+        assert_eq!(parsed.content_read_attempts, 0, "default content_read_attempts must be 0");
     }
 
     #[test]
@@ -284,6 +313,8 @@ mod tests {
                 latency_ms: 500,
                 rounds: 1,
                 error: None,
+                evidence_verified: true,
+                content_read_attempts: 2,
             },
             SubAgentResult {
                 task_id: Uuid::new_v4(),
@@ -301,6 +332,8 @@ mod tests {
                 latency_ms: 1000,
                 rounds: 3,
                 error: Some("timeout".to_string()),
+                evidence_verified: false,
+                content_read_attempts: 0,
             },
         ];
 

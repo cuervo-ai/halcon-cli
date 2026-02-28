@@ -58,75 +58,9 @@ use super::super::agent_types::StopCondition;
 // The filter is applied ONLY to non-tool-use rounds (synthesis path) to avoid
 // accidentally stripping valid tool output from tool-use rounds.
 
-/// Strip XML tool-call artifacts from synthesis round text.
-///
-/// Returns the sanitized text.  If no artifacts are found, returns the input
-/// unchanged without any allocation.
-fn strip_tool_xml_artifacts(text: &str) -> std::borrow::Cow<'_, str> {
-    // Fast path: avoid regex / allocation when no XML markers present.
-    if !text.contains("<function_calls>")
-        && !text.contains("<invoke ")
-        && !text.contains("<halcon::tool_call>")
-    {
-        return std::borrow::Cow::Borrowed(text);
-    }
-
-    let mut result = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut stripped = false;
-
-    // Patterns to strip (open-tag, close-tag pairs).
-    // Process outer containers first — stripping <function_calls> also removes inner <invoke>.
-    const PATTERNS: &[(&str, &str)] = &[
-        ("<function_calls>", "</function_calls>"),
-        ("<halcon::tool_call>", "</halcon::tool_call>"),
-        ("<invoke ", "</invoke>"),
-    ];
-
-    // Simple single-pass linear scan.  We advance `rest` through the string,
-    // copying non-artifact spans to `result` and skipping artifact spans.
-    'outer: loop {
-        for (open, close) in PATTERNS {
-            if let Some(start) = rest.find(open) {
-                // Copy text before the opening tag.
-                result.push_str(&rest[..start]);
-                rest = &rest[start..];
-                // Find and skip to end of closing tag.
-                if let Some(end_rel) = rest.find(close) {
-                    let end_abs = end_rel + close.len();
-                    rest = &rest[end_abs..];
-                    stripped = true;
-                    continue 'outer;
-                } else {
-                    // No closing tag found — strip from open tag to end of string.
-                    stripped = true;
-                    rest = "";
-                    break 'outer;
-                }
-            }
-        }
-        // No more artifact markers found — copy remainder and exit.
-        result.push_str(rest);
-        break;
-    }
-
-    if stripped {
-        // Trim any leading/trailing blank lines produced by the removal.
-        let trimmed = result.trim_matches('\n');
-        std::borrow::Cow::Owned(trimmed.to_string())
-    } else {
-        std::borrow::Cow::Borrowed(text)
-    }
-}
-
-/// Returns `true` if the text contains XML tool-call artifacts.
-///
-/// Used to decide whether to skip response caching for a synthesis round.
-fn contains_tool_xml_artifacts(text: &str) -> bool {
-    text.contains("<function_calls>")
-        || text.contains("<invoke ")
-        || text.contains("<halcon::tool_call>")
-}
+// FASE 7: XML artifact functions moved to `model_quirks` module.
+// Aliases for backward-compat within this file.
+use super::super::model_quirks::contains_tool_xml_artifacts;
 
 
 /// Plain-data struct for early returns from the provider round phase.
@@ -287,9 +221,84 @@ pub(super) async fn run(
             }
             state.synthesis_origin = Some(SynthesisOrigin::CacheCorruption);
             state.forced_synthesis_detected = true;
+            // EBS-R1 (OutputHeadroomCritical): if evidence gate fires, override origin to
+            // SupervisorFailure so reward pipeline applies synthesis penalty.
+            if state.evidence_bundle.evidence_gate_fires() {
+                state.evidence_bundle.synthesis_blocked = true;
+                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                tracing::warn!(
+                    session_id = %state.session_id,
+                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                    "EvidenceGate FIRED (OutputHeadroomCritical): origin overridden to SupervisorFailure"
+                );
+            }
             return Ok(ProviderRoundOutcome::BreakLoop);
         }
     }
+
+    // ── EBS-B2: Deterministic Pre-Invocation Synthesis Gate (BRECHA-2 fix) ─────────────────
+    //
+    // Target: model-initiated EndTurn synthesis on evidence-failing sessions.
+    //
+    // Scenario: coordinator called read_file (or similar) on files that turned out to be
+    // binary (PDF, images) or empty → EvidenceBundle.text_bytes_extracted < MIN_EVIDENCE_BYTES
+    // → convergence oracle may have already fired EBS-1/EBS-2 and set synthesis_blocked, OR
+    // the model may EndTurn on its own without the oracle forcing synthesis (BRECHA-2).
+    //
+    // When ALL of these hold:
+    //   (a) This is a synthesis/text round: round_request.tools.is_empty()
+    //   (b) Evidence gate fires: content-read tools ran but extracted < threshold
+    //   (c) Gate not already handled: synthesis_blocked == false
+    //       (EBS-1/EBS-2/EBS-R1 set synthesis_blocked when they fire — skip double-intercept)
+    //
+    // Action: skip the LLM call entirely. Produce the limitation notice directly and
+    // return BreakLoop. The model never sees the synthesis request; no token cost; no
+    // streaming. This is deterministic: evidence-anchoring cannot be bypassed by
+    // model-initiated EndTurn even when the convergence oracle chose not to force synthesis.
+    //
+    // NOT a dependency on LoopCritic (probabilistic). LoopCritic remains as second line.
+    if round_request.tools.is_empty()
+        && state.evidence_bundle.evidence_gate_fires()
+        && !state.evidence_bundle.synthesis_blocked
+    {
+        use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
+        let gate_msg = state.evidence_bundle.gate_message();
+        state.evidence_bundle.synthesis_blocked = true;
+        state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+        state.deterministic_boundary_enforced = true;
+        state.forced_synthesis_detected = true;
+        tracing::warn!(
+            session_id = %state.session_id,
+            round,
+            text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+            content_read_attempts = state.evidence_bundle.content_read_attempts,
+            binary_file_count = state.evidence_bundle.binary_file_count,
+            min_threshold = MIN_EVIDENCE_BYTES,
+            "EBS-B2: Pre-invocation synthesis gate fired — LLM call skipped, \
+             limitation notice injected directly (BRECHA-2 deterministic fix)"
+        );
+        if !state.silent {
+            render_sink.warning(
+                "[evidence-gate] synthesis blocked before LLM invocation — files returned no readable text",
+                Some("Files appear to be binary (PDF) or inaccessible. \
+                      Limitation notice generated without model call."),
+            );
+            render_sink.stream_text(&gate_msg);
+            render_sink.stream_done();
+        }
+        state.full_text.push_str(&gate_msg);
+        let msg = ChatMessage {
+            role: Role::Assistant,
+            content: MessageContent::Text(gate_msg.clone()),
+        };
+        state.messages.push(msg.clone());
+        state.context_pipeline.add_message(msg.clone());
+        session.add_message(msg);
+        state.rounds = round + 1;
+        session.agent_rounds += 1;
+        return Ok(ProviderRoundOutcome::BreakLoop);
+    }
+    // ── End EBS-B2 ───────────────────────────────────────────────────────────────────────────
 
     // Show spinner during model inference (appears after 200ms delay).
     if !state.silent {
@@ -994,7 +1003,7 @@ pub(super) async fn run(
     // Note: `round_request.tools` reflects the tool list sent to the provider this round.
     // When tools=[], any XML tool syntax in the response is spurious.
     let round_text_clean: std::borrow::Cow<'_, str> = if round_request.tools.is_empty() {
-        let filtered = strip_tool_xml_artifacts(&round_text);
+        let filtered = super::super::model_quirks::strip_tool_xml_artifacts(&round_text);
         if matches!(filtered, std::borrow::Cow::Owned(_)) {
             tracing::warn!(
                 round,
@@ -1178,6 +1187,18 @@ pub(super) async fn run(
             render_sink.warning("[loop-guard] cross-type Tool↔Text oscillation — forcing synthesis", None);
             state.synthesis_origin = Some(SynthesisOrigin::OscillationDetected);
             state.forced_synthesis_detected = true;
+            // EBS-R1 (CrossTypeOscillationDetected): if evidence gate fires, override origin to
+            // SupervisorFailure so reward pipeline applies synthesis penalty on unreadable files.
+            if state.evidence_bundle.evidence_gate_fires() {
+                state.evidence_bundle.synthesis_blocked = true;
+                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                tracing::warn!(
+                    session_id = %state.session_id,
+                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                    "EvidenceGate FIRED (CrossTypeOscillationDetected): \
+                     origin overridden to SupervisorFailure"
+                );
+            }
             return Ok(ProviderRoundOutcome::BreakLoop);
         }
 

@@ -249,6 +249,8 @@ pub async fn run_orchestrator(
                     latency_ms: 0,
                     rounds: 0,
                     error: Some("cyclic dependency".to_string()),
+                    evidence_verified: false,
+                    content_read_attempts: 0,
                 });
             }
         }
@@ -312,6 +314,8 @@ pub async fn run_orchestrator(
                         latency_ms: 0,
                         rounds: 0,
                         error: Some(detail),
+                        evidence_verified: false,
+                        content_read_attempts: 0,
                     });
                     false
                 } else {
@@ -405,7 +409,30 @@ pub async fn run_orchestrator(
                     // SOTA 2026: Filter tool surface to only task-appropriate tools.
                     // Sub-agents with allowed_tools set should not see the full 60+ tool set —
                     // narrowing the surface reduces model confusion and speeds up tool selection.
-                    let tool_defs = if !allowed_tools.is_empty() {
+                    //
+                    // P1-A fix (2026-02-27 — Delegation Boundary hardening):
+                    // Before filtering, validate that each tool in allowed_tools is actually
+                    // registered. An unregistered name (e.g. deepseek plan generates a novel
+                    // tool name) silently produces empty tool_defs after filtering, causing
+                    // the sub-agent to run with 0 tools — the original cotización bug pattern.
+                    // Emit a structured WARN per unknown tool so the path is observable.
+                    let available_tool_names: std::collections::HashSet<String> = tool_registry
+                        .tool_definitions()
+                        .iter()
+                        .map(|t| t.name.clone())
+                        .collect();
+                    for tool_name in &allowed_tools {
+                        if !available_tool_names.contains(tool_name.as_str()) {
+                            tracing::warn!(
+                                unregistered_tool = %tool_name,
+                                allowed_tools = ?allowed_tools,
+                                "AUDIT P1-A: allowed_tools contains unregistered tool — \
+                                 will be silently dropped by filter, risking empty tool surface. \
+                                 Check delegation.rs:classify_step() and tool registry registration."
+                            );
+                        }
+                    }
+                    let tool_defs: Vec<_> = if !allowed_tools.is_empty() {
                         tool_registry
                             .tool_definitions()
                             .into_iter()
@@ -414,6 +441,50 @@ pub async fn run_orchestrator(
                     } else {
                         tool_registry.tool_definitions()
                     };
+                    // FASE 3 SECURITY: Abort sub-agent when empty tool surface detected.
+                    // A sub-agent with non-empty allowed_tools that resolves to 0 tool_defs
+                    // means ALL requested tools are unregistered. Rather than silently falling
+                    // back to the full tool registry (which masks planner bugs and risks
+                    // fabrication with an overwhelming 60+ tool surface), we abort immediately.
+                    // BRECHA-R1 propagates the failure to the retry planner so it generates
+                    // correct tool names on the next attempt.
+                    if !allowed_tools.is_empty() && tool_defs.is_empty() {
+                        tracing::error!(
+                            allowed_tools = ?allowed_tools,
+                            "PHASE-3 SECURITY: Sub-agent aborted — empty tool surface. \
+                             All allowed_tools are unregistered. Returning failure so \
+                             BRECHA-R1 retry planner can generate valid tool names."
+                        );
+                        return SubAgentResult {
+                            task_id: task.task_id,
+                            success: false,
+                            output_text: String::new(),
+                            agent_result: AgentResult {
+                                success: false,
+                                summary: format!(
+                                    "Sub-agent aborted: empty tool surface. Requested tools {:?} \
+                                     are not registered. Planner must use valid tool names.",
+                                    allowed_tools
+                                ),
+                                files_modified: vec![],
+                                tools_used: vec![],
+                            },
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cost_usd: 0.0,
+                            latency_ms: 0,
+                            rounds: 0,
+                            error: Some(format!(
+                                "Empty tool surface: all allowed_tools {:?} are unregistered",
+                                allowed_tools
+                            )),
+                            evidence_verified: false,
+                            content_read_attempts: 0,
+                        };
+                    }
+                    // Dynamic max_tokens: use provider-reported model limit, falling back
+                    // to conservative 8192 cap (deepseek-chat hard API limit).
+                    let sub_agent_max_tokens = provider.model_max_output_tokens(&model).unwrap_or(8192);
                     let request = ModelRequest {
                         model,
                         messages: vec![ChatMessage {
@@ -421,12 +492,7 @@ pub async fn run_orchestrator(
                             content: MessageContent::Text(instruction.clone()),
                         }],
                         tools: tool_defs,
-                        // 8192 tokens: deepseek-chat hard API limit (returns HTTP 400 if exceeded).
-                        // Other providers (Anthropic, OpenAI) support more, but the sub-agent
-                        // ModelRequest is built with the active provider — use the conservative
-                        // universal cap. Large file content should be written via tool calls
-                        // (file_write), not emitted as raw text output.
-                        max_tokens: Some(8192),
+                        max_tokens: Some(sub_agent_max_tokens),
                         temperature: Some(0.0),
                         system: system_prompt,
                         stream: true,
@@ -519,6 +585,7 @@ pub async fn run_orchestrator(
                         // Signal to agent loop: use sub-agent ConvergenceController
                         // (tight limits + multilingual keyword extraction).
                         is_sub_agent: true,
+                        requested_provider: None,
                     };
 
                     let loop_result = tokio::time::timeout(timeout_dur, agent::run_agent_loop(ctx)).await;
@@ -549,7 +616,217 @@ pub async fn run_orchestrator(
                             let produced_output = !result.full_text.is_empty();
                             let clean_exit = result.stop_condition == agent::StopCondition::EndTurn;
                             let executed_tools = !result.tools_executed.is_empty();
-                            let success = produced_output || clean_exit || executed_tools;
+                            // P1-B fix (2026-02-27): For investigation sub-agents (those with a
+                            // non-empty allowed_tools set), require at least one tool to have been
+                            // executed. If the sub-agent ran with tools available but executed none,
+                            // marking it successful allows fabricated text responses to propagate.
+                            //
+                            // Logic:
+                            //  - allowed_tools.is_empty() → coordinator task (no narrowing) → use
+                            //    original criterion (produced_output || clean_exit || executed_tools)
+                            //  - allowed_tools non-empty → delegated investigative sub-agent →
+                            //    REQUIRE executed_tools=true to prevent text-only fabrication.
+                            //    Exception: if tool surface is empty (all unregistered), fall back
+                            //    to original criterion (error already logged by P1-A fix above).
+                            let has_narrowed_surface = !allowed_tools.is_empty();
+                            let has_real_tool_surface = !request.tools.is_empty();
+                            let p1b_text_only = has_narrowed_surface
+                                && has_real_tool_surface
+                                && !executed_tools
+                                && (produced_output || clean_exit);
+                            let success = if has_narrowed_surface && has_real_tool_surface {
+                                // Delegated sub-agent: require tool execution, not just text output.
+                                let verdict = executed_tools || (!produced_output && clean_exit);
+                                if p1b_text_only {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        produced_output,
+                                        clean_exit,
+                                        rounds = result.rounds,
+                                        "P1-B: Investigation sub-agent produced text+clean_exit \
+                                         but executed 0 tools — attempting intra-orchestrator retry."
+                                    );
+                                }
+                                verdict
+                            } else {
+                                // Non-delegated coordinator task: original criterion.
+                                produced_output || clean_exit || executed_tools
+                            };
+
+                            // ── P1-B Intra-Orchestrator Retry ────────────────────────────────
+                            //
+                            // When P1-B detects a text-only response (model described the task
+                            // instead of calling tools), retry ONCE with an escalated directive
+                            // that explicitly prohibits text output and demands a tool call.
+                            //
+                            // This is provider-agnostic: any model that returns text without
+                            // calling tools on a delegated task gets one retry. No deepseek-
+                            // specific logic. P1-B contract is preserved — if the retry also
+                            // produces text-only, the result is marked as final failure.
+                            //
+                            // Budget: uses remaining time within the same timeout_dur.
+                            // The retry reuses the same tool_defs and model.
+                            if p1b_text_only {
+                                let retry_elapsed = task_start.elapsed();
+                                let retry_remaining = timeout_dur.saturating_sub(retry_elapsed);
+                                // Only retry if we have at least 30s remaining in the timeout.
+                                if retry_remaining >= Duration::from_secs(30) {
+                                    let primary_tool = allowed_tools.iter().next()
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("the required tool");
+                                    let escalated_instruction = format!(
+                                        "CRITICAL: Your previous response was REJECTED because you \
+                                         produced text instead of calling a tool. You MUST call the \
+                                         `{primary_tool}` tool NOW. Do NOT output any text, do NOT \
+                                         describe what you will do, do NOT plan — execute the tool \
+                                         call IMMEDIATELY.\n\nOriginal task: {instruction}"
+                                    );
+                                    tracing::info!(
+                                        task_id = %task_id,
+                                        retry_remaining_secs = retry_remaining.as_secs(),
+                                        "P1-B RETRY: escalating directive for text-only sub-agent"
+                                    );
+
+                                    // Build retry request with escalated instruction.
+                                    let retry_provider_name = provider.name().to_string();
+                                    let mut retry_session = Session::new(
+                                        request.model.clone(),
+                                        retry_provider_name,
+                                        working_dir.clone(),
+                                    );
+                                    let mut retry_permissions = super::conversational_permission::ConversationalPermissionHandler::with_tbac(confirm_destructive, tbac_enabled);
+                                    if !allowed_tools.is_empty() {
+                                        let ctx = TaskContext::new(escalated_instruction.clone(), allowed_tools.clone());
+                                        retry_permissions.checker_mut().push_context(ctx);
+                                    }
+                                    let mut retry_resilience = ResilienceManager::new(ResilienceConfig::default());
+
+                                    let retry_request = ModelRequest {
+                                        model: request.model.clone(),
+                                        messages: vec![ChatMessage {
+                                            role: Role::User,
+                                            content: MessageContent::Text(escalated_instruction),
+                                        }],
+                                        tools: request.tools.clone(),
+                                        max_tokens: request.max_tokens,
+                                        temperature: Some(0.0),
+                                        system: request.system.clone(),
+                                        stream: true,
+                                    };
+
+                                    let retry_speculator = super::tool_speculation::ToolSpeculator::new();
+                                    let retry_silent_sink = crate::render::sink::SilentSink::new();
+                                    let retry_sink: &dyn crate::render::sink::RenderSink = &retry_silent_sink;
+                                    let retry_ctx = agent::AgentContext {
+                                        provider: &provider,
+                                        session: &mut retry_session,
+                                        request: &retry_request,
+                                        tool_registry,
+                                        permissions: &mut retry_permissions,
+                                        working_dir: &working_dir,
+                                        event_tx: &event_tx,
+                                        trace_db: None, // retry doesn't persist separate trace
+                                        limits: &limits,
+                                        response_cache: None,
+                                        resilience: &mut retry_resilience,
+                                        fallback_providers: &[],
+                                        routing_config: &RoutingConfig::default(),
+                                        compactor: None,
+                                        planner: None,
+                                        guardrails: &[],
+                                        reflector: None,
+                                        render_sink: retry_sink,
+                                        replay_tool_executor: None,
+                                        phase14: halcon_core::types::Phase14Context::default(),
+                                        model_selector: None,
+                                        registry: None,
+                                        episode_id: None,
+                                        planning_config: &halcon_core::types::PlanningConfig::default(),
+                                        orchestrator_config: &OrchestratorConfig::default(),
+                                        tool_selection_enabled: false,
+                                        task_bridge: None,
+                                        context_metrics: None,
+                                        context_manager: None,
+                                        ctrl_rx: None,
+                                        speculator: &retry_speculator,
+                                        security_config: &halcon_core::types::SecurityConfig::default(),
+                                        strategy_context: None,
+                                        critic_provider: None,
+                                        critic_model: None,
+                                        plugin_registry: None,
+                                        is_sub_agent: true,
+                                        requested_provider: None,
+                                    };
+
+                                    let retry_loop = tokio::time::timeout(
+                                        retry_remaining,
+                                        agent::run_agent_loop(retry_ctx),
+                                    ).await;
+
+                                    let total_latency = task_start.elapsed().as_millis() as u64;
+
+                                    match retry_loop {
+                                        Ok(Ok(retry_result)) => {
+                                            let retry_executed = !retry_result.tools_executed.is_empty();
+                                            if retry_executed {
+                                                tracing::info!(
+                                                    task_id = %task_id,
+                                                    tools = ?retry_result.tools_executed,
+                                                    "P1-B RETRY SUCCESS: sub-agent executed tools on second attempt"
+                                                );
+                                                return SubAgentResult {
+                                                    task_id,
+                                                    success: true,
+                                                    output_text: retry_result.full_text,
+                                                    agent_result: AgentResult {
+                                                        success: true,
+                                                        summary: format!(
+                                                            "{} rounds (retry), {:?}",
+                                                            retry_result.rounds, retry_result.stop_condition
+                                                        ),
+                                                        files_modified: vec![],
+                                                        tools_used: retry_result.tools_executed,
+                                                    },
+                                                    input_tokens: result.input_tokens + retry_result.input_tokens,
+                                                    output_tokens: result.output_tokens + retry_result.output_tokens,
+                                                    cost_usd: result.cost_usd + retry_result.cost_usd,
+                                                    latency_ms: total_latency,
+                                                    rounds: result.rounds + retry_result.rounds,
+                                                    error: None,
+                                                    evidence_verified: retry_result.evidence_verified,
+                                                    content_read_attempts: retry_result.content_read_attempts,
+                                                };
+                                            }
+                                            // Retry also produced text-only → final failure
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                "P1-B RETRY FAILED: second attempt also text-only — marking final failure"
+                                            );
+                                        }
+                                        Ok(Err(e)) => {
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                error = %e,
+                                                "P1-B RETRY ERROR: agent loop error on retry"
+                                            );
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                "P1-B RETRY TIMEOUT: retry exceeded remaining budget"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        task_id = %task_id,
+                                        remaining_secs = retry_remaining.as_secs(),
+                                        "P1-B RETRY SKIPPED: insufficient time remaining (<30s)"
+                                    );
+                                }
+                            }
+                            // ── End P1-B Intra-Orchestrator Retry ─────────────────────────────
+
                             SubAgentResult {
                             task_id,
                             success,
@@ -566,6 +843,8 @@ pub async fn run_orchestrator(
                             latency_ms,
                             rounds: result.rounds,
                             error: None,
+                            evidence_verified: result.evidence_verified,
+                            content_read_attempts: result.content_read_attempts,
                         }},
                         Ok(Err(e)) => SubAgentResult {
                             task_id,
@@ -583,6 +862,8 @@ pub async fn run_orchestrator(
                             latency_ms,
                             rounds: 0,
                             error: Some(format!("{e}")),
+                            evidence_verified: false,
+                            content_read_attempts: 0,
                         },
                         Err(_) => {
                             let timeout_secs = timeout_dur.as_secs();
@@ -606,6 +887,8 @@ pub async fn run_orchestrator(
                                      task_id:{} | increase sub_agent_timeout_secs in config",
                                     timeout_secs, task_id
                                 )),
+                                evidence_verified: false,
+                                content_read_attempts: 0,
                             }
                         },
                     }
@@ -684,6 +967,23 @@ pub async fn run_orchestrator(
 
             all_results.push(result);
         }
+    }
+
+    // FASE 6 — R7: ALL_FAILED detection.
+    // After all waves complete, if every sub-agent result is a failure, the orchestration
+    // achieved nothing. Log a structured ERROR so operators can investigate the root cause
+    // (tool surface misconfiguration, provider outages, permission denials, etc.).
+    // This is separate from per-task failures caught above — it fires only when ALL tasks fail.
+    if !all_results.is_empty() && all_results.iter().all(|r| !r.success) {
+        tracing::error!(
+            orchestrator_id = %orchestrator_id,
+            task_count = all_results.len(),
+            "ORCHESTRATION_TOTAL_FAILURE: all {} sub-agent task(s) failed. \
+             Check tool surface configuration, provider availability, and permission settings. \
+             Root causes: {:?}",
+            all_results.len(),
+            all_results.iter().map(|r| r.error.as_deref().unwrap_or("unknown")).collect::<Vec<_>>(),
+        );
     }
 
     let total_latency_ms = orch_start.elapsed().as_millis() as u64;

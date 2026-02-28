@@ -258,6 +258,7 @@ use halcon_core::types::{DomainEvent, EventPayload, Session, TokenUsage};
             plan_id,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
 
         db.save_plan_steps(&session_id, &plan).unwrap();
@@ -336,6 +337,7 @@ use halcon_core::types::{DomainEvent, EventPayload, Session, TokenUsage};
             plan_id: original_plan_id,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
 
         let replan = halcon_core::traits::ExecutionPlan {
@@ -353,6 +355,7 @@ use halcon_core::types::{DomainEvent, EventPayload, Session, TokenUsage};
             plan_id: replan_id,
             replan_count: 1,
             parent_plan_id: Some(original_plan_id),
+            ..Default::default()
         };
 
         db.save_plan_steps(&session_id, &original).unwrap();

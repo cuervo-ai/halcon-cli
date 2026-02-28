@@ -240,6 +240,32 @@ pub(super) struct LoopState {
     /// gate fires (`content_read_attempts > 0 && text_bytes_extracted < threshold`).
     pub evidence_bundle: super::super::evidence_pipeline::EvidenceBundle,
 
+    /// EBS-B2: set to `true` when the deterministic pre-invocation boundary gate fires.
+    ///
+    /// Records that EBS-B2 (provider_round.rs, BRECHA-2 fix) intercepted a model-initiated
+    /// synthesis attempt on a session with insufficient evidence and short-circuited the
+    /// LLM call entirely. Distinct from `evidence_bundle.synthesis_blocked` (set by all EBS
+    /// paths); this flag records only the pre-invocation intercept.
+    ///
+    /// Used by: debug_assert in result_assembly, telemetry, tests.
+    pub deterministic_boundary_enforced: bool,
+
+    // ── Guardrail tracking ──────────────────────────────────────────────────
+    /// Tools blocked by security guardrails/TBAC during this session.
+    ///
+    /// Populated from tool error messages that indicate guardrail/permission denial.
+    /// Injected into replan prompts to prevent the planner from selecting the same
+    /// tools in retry cycles (BRECHA-C fix).
+    pub blocked_tools: Vec<(String, String)>, // (tool_name, reason)
+
+    /// Structured context for sub-agent tasks that failed during orchestration (BRECHA-R1 + FASE 5).
+    ///
+    /// Collected after each orchestrator wave when `SubAgentResult.success == false`.
+    /// Propagated to `AgentLoopResult.failed_sub_agent_steps` so the critic retry
+    /// injection in `mod.rs` can tell the planner "these approaches already failed,
+    /// use an alternative" — preventing the retry from generating the same plan.
+    pub failed_sub_agent_steps: Vec<crate::repl::agent_types::FailedStepContext>,
+
     // ── Token attribution (Phase L) ────────────────────────────────────────
     /// Tokens consumed by planner LLM call (before entering the loop).
     pub tokens_planning: u64,

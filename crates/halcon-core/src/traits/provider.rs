@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 
 use crate::error::Result;
-use crate::types::{ModelChunk, ModelInfo, ModelRequest, ProviderHandle, TokenCost};
+use crate::types::{ModelChunk, ModelInfo, ModelRequest, ProviderHandle, TokenCost, TokenizerHint, ToolFormat};
 
 /// Trait for model providers (Anthropic, Ollama, OpenAI, etc.).
 ///
@@ -61,5 +61,31 @@ pub trait ModelProvider: Send + Sync {
     /// no existing code needs to change.
     fn handle(&self) -> ProviderHandle {
         ProviderHandle::new(self.name())
+    }
+
+    /// The wire format this provider uses for tool definitions.
+    ///
+    /// Default returns `Unknown`. First-party providers override this.
+    fn tool_format(&self) -> ToolFormat {
+        ToolFormat::Unknown
+    }
+
+    /// Hint about the tokenizer family used by this provider's models.
+    ///
+    /// Used for token estimation when a real tokenizer is unavailable.
+    /// Default returns `Unknown` (~4.0 chars/token conservative estimate).
+    fn tokenizer_hint(&self) -> TokenizerHint {
+        TokenizerHint::Unknown
+    }
+
+    /// Maximum output tokens for a specific model.
+    ///
+    /// Looks up the model in `supported_models()` and returns its `max_output_tokens`.
+    /// Returns `None` if the model is not found.
+    fn model_max_output_tokens(&self, model: &str) -> Option<u32> {
+        self.supported_models()
+            .iter()
+            .find(|m| m.id == model)
+            .map(|m| m.max_output_tokens)
     }
 }

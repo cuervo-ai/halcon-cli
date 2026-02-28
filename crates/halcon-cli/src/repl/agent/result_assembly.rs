@@ -21,6 +21,7 @@ use halcon_core::EventSender;
 use super::super::agent_types::{AgentLoopResult, ControlReceiver, CriticVerdictSummary, StopCondition};
 use super::super::agent_utils::compute_fingerprint;
 use super::super::conversational_permission::ConversationalPermissionHandler;
+use super::super::evidence_pipeline::detect_operational_claim;
 use super::super::plugin_registry::PluginRegistry;
 use super::loop_state::LoopState;
 use crate::render::sink::RenderSink;
@@ -52,6 +53,8 @@ pub(super) async fn build(
     // Phase 1.2: Verdict now includes gaps + retry_instruction so mod.rs can perform
     // an actual in-session retry instead of just logging an advisory message.
     let mut critic_verdict_holder: Option<CriticVerdictSummary> = None;
+    // FASE 4: tracks whether the critic was expected to run but failed.
+    let mut critic_unavailable = false;
     // progress() returns (completed_steps, total_steps, elapsed). Check total > 0 so the
     // LoopCritic runs even when 0 steps completed (e.g. all steps failed or were skipped) —
     // failed plans still warrant adversarial evaluation.
@@ -59,7 +62,36 @@ pub(super) async fn build(
         .as_ref()
         .map(|t| t.progress().1 > 0)
         .unwrap_or(false);
-    if has_plan_execution && !state.full_text.is_empty() {
+    // V4 fix (2026-02-27): Previously, LoopCritic was skipped entirely when there was no
+    // formal ExecutionPlan (e.g. investigation tasks where the coordinator ran tools without
+    // planning, or planning failed). This caused critic_verdict=None for all tool-only
+    // sessions, making it impossible to distinguish "not evaluated" from "not achieved" and
+    // silently allowing synthetic fabricated responses to pass without adversarial scrutiny.
+    //
+    // Fix: also run LoopCritic when:
+    //   - tools_executed is non-empty (coordinator ran real tools even without a plan), OR
+    //   - forced_synthesis_detected (synthesis was injected — oracle decided goal was reached)
+    //
+    // Guard: still skip for purely conversational turns (no plan AND no tools AND no forced
+    // synthesis) to avoid the 20s critic overhead on simple greetings/questions.
+    let has_tool_work = !state.tools_executed.is_empty();
+    let has_forced_synthesis = state.forced_synthesis_detected;
+    let should_run_critic = (has_plan_execution || has_tool_work || has_forced_synthesis)
+        && !state.full_text.is_empty();
+    if should_run_critic {
+        tracing::debug!(
+            has_plan_execution,
+            has_tool_work,
+            has_forced_synthesis,
+            tools_count = state.tools_executed.len(),
+            "LoopCritic: running adversarial evaluation (V4 extended conditions)"
+        );
+    } else {
+        tracing::debug!(
+            "LoopCritic: skipping (conversational turn — no plan, no tools, no forced synthesis)"
+        );
+    }
+    if should_run_critic {
         let original_request = state.messages
             .iter()
             .rev()  // Use LAST user message (current task), not first (may be greeting)
@@ -89,25 +121,47 @@ pub(super) async fn build(
                 critic_mdl_str.to_string(),
             );
 
-            let mut verdict_opt = critic
-                .evaluate(&original_request, &state.full_text, &step_summaries)
-                .await;
-
-            // Fallback: if critic_provider was explicitly set (G2 separation) but failed,
-            // retry with the session provider so non-anthropic sessions aren't left unverified.
-            if verdict_opt.is_none() && critic_provider.is_some() {
-                tracing::info!(
-                    session_provider = %provider.name(),
-                    "LoopCritic: configured critic_provider failed — retrying with session provider"
-                );
-                let fallback_critic = super::super::supervisor::LoopCritic::new(
-                    provider.clone(),
-                    request.model.clone(),
-                );
-                verdict_opt = fallback_critic
+            // FASE 4: Wrap entire critic evaluation (primary + fallback) in a 45s timeout.
+            // Prevents critic hangs from blocking the agent loop indefinitely.
+            const CRITIC_TIMEOUT_SECS: u64 = 45;
+            let critic_future = async {
+                let mut verdict_opt = critic
                     .evaluate(&original_request, &state.full_text, &step_summaries)
                     .await;
-            }
+
+                // Fallback: if critic_provider was explicitly set (G2 separation) but failed,
+                // retry with the session provider so non-anthropic sessions aren't left unverified.
+                // FASE 4: 2s backoff before fallback to avoid hammering the provider.
+                if verdict_opt.is_none() && critic_provider.is_some() {
+                    tracing::info!(
+                        session_provider = %provider.name(),
+                        "LoopCritic: configured critic_provider failed — backoff 2s then retrying with session provider"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                    let fallback_critic = super::super::supervisor::LoopCritic::new(
+                        provider.clone(),
+                        request.model.clone(),
+                    );
+                    verdict_opt = fallback_critic
+                        .evaluate(&original_request, &state.full_text, &step_summaries)
+                        .await;
+                }
+                verdict_opt
+            };
+
+            let verdict_opt = match tokio::time::timeout(
+                std::time::Duration::from_secs(CRITIC_TIMEOUT_SECS),
+                critic_future,
+            ).await {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::error!(
+                        timeout_secs = CRITIC_TIMEOUT_SECS,
+                        "LoopCritic: overall timeout exceeded — treating as unavailable"
+                    );
+                    None
+                }
+            };
 
             match verdict_opt {
                 Some(verdict) => {
@@ -149,10 +203,12 @@ pub(super) async fn build(
                     // empty response). Previously this was a silent no-op — the verdict was
                     // simply skipped and `critic_verdict_holder` stayed None. This made it
                     // impossible to distinguish "not evaluated" from "not achieved" in telemetry.
+                    // FASE 4: set critic_unavailable flag for reward penalty.
+                    critic_unavailable = true;
                     tracing::warn!(
                         session_id = %state.session_id,
                         "LoopCritic: evaluate() returned None — provider failure or timeout; \
-                         goal completion status is UNKNOWN for this session"
+                         goal completion status is UNKNOWN for this session (critic_unavailable=true)"
                     );
                     if !state.silent {
                         render_sink.warning(
@@ -163,6 +219,23 @@ pub(super) async fn build(
                 }
             }
         }
+    }
+
+    // EBS-B2 invariant assertion (debug builds only).
+    // If the deterministic boundary was enforced, synthesis_blocked must also be set.
+    // This catches any path that sets deterministic_boundary_enforced without setting
+    // synthesis_blocked (which would indicate a broken gate implementation).
+    #[cfg(debug_assertions)]
+    if state.deterministic_boundary_enforced {
+        debug_assert!(
+            state.evidence_bundle.synthesis_blocked,
+            "INVARIANT: deterministic_boundary_enforced=true implies synthesis_blocked=true \
+             (EBS-B2 gate must set both flags atomically)"
+        );
+        debug_assert!(
+            matches!(state.synthesis_origin, Some(super::loop_state::SynthesisOrigin::SupervisorFailure)),
+            "INVARIANT: EBS-B2 gate must set synthesis_origin=SupervisorFailure for reward dampening"
+        );
     }
 
     // Determine stop condition: max_rounds, forced synthesis, or normal end.
@@ -399,7 +472,14 @@ pub(super) async fn build(
         .and_then(|arc_pr| arc_pr.lock().ok().map(|pr| pr.cost_snapshot()))
         .unwrap_or_default();
 
-    Ok(AgentLoopResult {
+    // BRECHA-S1: populate evidence metadata from loop state.
+    let evidence_verified = !state.evidence_bundle.evidence_gate_fires();
+    let content_read_attempts = state.evidence_bundle.content_read_attempts;
+
+    // BRECHA-S2: provider name for cost attribution.
+    let last_provider_used = Some(provider.name().to_string());
+
+    let mut result = AgentLoopResult {
         full_text: state.full_text,
         rounds: state.rounds,
         stop_condition,
@@ -418,5 +498,31 @@ pub(super) async fn build(
         last_model_used: Some(state.last_round_model_name),
         plugin_cost_snapshot,
         tools_executed: state.tools_executed,
-    })
+        evidence_verified,
+        content_read_attempts,
+        last_provider_used,
+        // BRECHA-S3: propagate blocked tools for cross-turn session persistence.
+        blocked_tools: state.blocked_tools,
+        // BRECHA-R1: propagate failed sub-agent steps for retry planner awareness.
+        failed_sub_agent_steps: state.failed_sub_agent_steps,
+        // FASE 4: propagate critic unavailability for reward penalty.
+        critic_unavailable,
+    };
+
+    // BRECHA-A: DirectExecution hallucination guard.
+    // If no tools were used and the text makes operational claims, append unverified notice.
+    if !state.is_conversational_intent
+        && result.tools_executed.is_empty()
+        && content_read_attempts == 0
+        && state.active_plan.is_none()
+        && !result.full_text.is_empty()
+        && detect_operational_claim(&result.full_text)
+    {
+        let notice = "\n\n---\n\u{26a0}\u{fe0f} [Unverified: this response was generated without \
+                      reading any files or executing tools. Claims about code, \
+                      file contents, or line counts may be inaccurate.]";
+        result.full_text.push_str(notice);
+    }
+
+    Ok(result)
 }

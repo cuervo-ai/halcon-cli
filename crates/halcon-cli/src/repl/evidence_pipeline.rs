@@ -176,6 +176,69 @@ impl EvidenceBundle {
     }
 }
 
+// ── Operational claim detection ────────────────────────────────────────────────
+
+/// Detects if text contains operational claims about code/files/data
+/// that would require tool evidence to be verifiable.
+///
+/// Returns `true` if an unverified notice should be appended (BRECHA-A mini-gate).
+///
+/// # Heuristic
+/// Fires when the text simultaneously:
+/// - References quantitative properties (line counts, byte counts, character counts), OR
+///   references code constructs (function, struct, impl, fn, pub), AND
+/// - Makes a claim about a file or code entity ("the file", "the code", "returns", "contains").
+///
+/// Intentionally conservative — only fires on combinations that strongly indicate
+/// the model is asserting facts about code/file content without having read it.
+pub fn detect_operational_claim(text: &str) -> bool {
+    if text.len() < 20 {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    // Quantitative properties about files or code.
+    let has_count = lower.contains(" lines")
+        || lower.contains(" line ")
+        || lower.contains(" bytes")
+        || lower.contains(" characters");
+    // Code construct references (function/struct existence claims).
+    let has_code_ref = lower.contains("function ")
+        || lower.contains("struct ")
+        || lower.contains("impl ")
+        || lower.contains(" fn ")
+        || lower.contains("pub ");
+    // File or code content claims.
+    let has_file_claim = lower.contains("the file")
+        || lower.contains("the code")
+        || lower.contains("returns ")
+        || lower.contains("contains ");
+    (has_count || has_code_ref) && has_file_claim
+}
+
+// ── Top-level gate enforcement ─────────────────────────────────────────────────
+
+/// Enforce the Evidence Boundary at any synthesis injection point.
+///
+/// Centralised helper called by ALL 12 synthesis paths (EBS-R1 coverage).
+///
+/// # Returns
+/// - `None` — evidence is sufficient or no content-read tools were attempted.
+///   The caller should proceed with its normal synthesis directive.
+/// - `Some(gate_msg)` — the gate fired. The caller **MUST**:
+///   1. Use `gate_msg` as the synthesis directive (replaces normal text).
+///   2. Set `synthesis_origin = SynthesisOrigin::SupervisorFailure`.
+///   3. Emit a `tracing::warn!` with the path label for audit trail.
+///
+/// The function sets `synthesis_blocked = true` on the bundle when it fires.
+pub fn enforce_evidence_boundary(bundle: &mut EvidenceBundle) -> Option<String> {
+    if bundle.evidence_gate_fires() {
+        bundle.synthesis_blocked = true;
+        Some(bundle.gate_message())
+    } else {
+        None
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /// Count printable/meaningful bytes in a string.
@@ -320,5 +383,127 @@ mod tests {
         bundle.record_tool_result("read_file", "");
         let s = bundle.summary();
         assert!(s.contains("FIRES"), "summary must indicate gate fires");
+    }
+
+    // ── enforce_evidence_boundary (EBS-B2 helper) ─────────────────────────────
+
+    /// TEST A — EBS-B2: binary PDF read → enforce_evidence_boundary returns Some(gate_msg).
+    /// Simulates: read_file("invoice.pdf") → %PDF- header → binary detected.
+    /// Expected: gate fires, synthesis_blocked set, returns limitation notice.
+    #[test]
+    fn ebs_b2_test_a_binary_pdf_returns_gate_message() {
+        let mut bundle = EvidenceBundle::default();
+        bundle.record_tool_result("read_file", "%PDF-1.7 binary garbage\x00\x00");
+
+        assert!(bundle.evidence_gate_fires(), "pre-condition: gate must fire after binary PDF read");
+        assert!(!bundle.synthesis_blocked, "pre-condition: synthesis not yet blocked");
+
+        let result = enforce_evidence_boundary(&mut bundle);
+
+        assert!(result.is_some(), "EBS-B2: gate fired → must return Some(gate_msg)");
+        let msg = result.unwrap();
+        assert!(msg.contains("Do NOT fabricate"), "gate_msg must have anti-fabrication directive");
+        assert!(bundle.synthesis_blocked, "EBS-B2: synthesis_blocked must be set after enforcement");
+    }
+
+    /// TEST B — EBS-B2: investigation with no tool calls → gate does NOT fire.
+    /// Simulates: model-initiated EndTurn on a session that never called read_file.
+    /// Expected: gate does not fire (no content_read_attempts), enforce returns None.
+    #[test]
+    fn ebs_b2_test_b_no_tool_calls_gate_does_not_fire() {
+        let mut bundle = EvidenceBundle::default();
+        // No read_file calls — content_read_attempts == 0
+
+        assert!(!bundle.evidence_gate_fires(), "gate must NOT fire when no content reads attempted");
+
+        let result = enforce_evidence_boundary(&mut bundle);
+        assert!(result.is_none(), "EBS-B2: no content reads → enforce returns None (normal synthesis)");
+        assert!(!bundle.synthesis_blocked, "synthesis_blocked must remain false");
+    }
+
+    /// TEST C — EBS-B2: real evidence read → gate does NOT fire → normal synthesis.
+    /// Simulates: read_file returns actual text content (≥ MIN_EVIDENCE_BYTES).
+    /// Expected: enforce returns None, synthesis proceeds normally.
+    #[test]
+    fn ebs_b2_test_c_real_evidence_gate_does_not_fire() {
+        let mut bundle = EvidenceBundle::default();
+        bundle.record_tool_result(
+            "read_file",
+            "INVOICE #2024-001\nClient: Acme Corp\nAmount: $1,500.00\nDue: 2024-12-31",
+        );
+
+        assert!(!bundle.evidence_gate_fires(), "gate must NOT fire when real text was extracted");
+
+        let result = enforce_evidence_boundary(&mut bundle);
+        assert!(result.is_none(), "EBS-B2: sufficient evidence → enforce returns None");
+        assert!(!bundle.synthesis_blocked, "synthesis_blocked must remain false for valid evidence");
+    }
+
+    /// TEST D — EBS-B2: synthesis_blocked already set → enforce_evidence_boundary is idempotent.
+    /// Simulates: EBS-1/EBS-2 already fired and set synthesis_blocked=true.
+    /// The caller (EBS-B2 gate) checks synthesis_blocked BEFORE calling enforce,
+    /// but this test validates the bundle's state is consistent post-EBS-1/EBS-2.
+    #[test]
+    fn ebs_b2_test_d_already_blocked_enforce_is_idempotent() {
+        let mut bundle = EvidenceBundle {
+            content_read_attempts: 1,
+            text_bytes_extracted: 0,
+            binary_file_count: 1,
+            synthesis_blocked: true, // already set by EBS-1/EBS-2
+            ..Default::default()
+        };
+
+        // Gate still fires (evidence insufficient)
+        assert!(bundle.evidence_gate_fires());
+        // enforce still returns Some (idempotent — safe to call again)
+        let result = enforce_evidence_boundary(&mut bundle);
+        assert!(result.is_some(), "enforce must return Some even when already blocked (idempotent)");
+        // synthesis_blocked stays true (was already true)
+        assert!(bundle.synthesis_blocked);
+    }
+
+    // ── BRECHA-A: detect_operational_claim tests ──────────────────────────────
+
+    /// TEST: "The file has 42 lines" → operational claim → true.
+    #[test]
+    fn detect_operational_claim_file_lines() {
+        let text = "The file has 42 lines of Rust code.";
+        assert!(
+            detect_operational_claim(text),
+            "line-count claim about a file must be detected"
+        );
+    }
+
+    /// TEST: "The function returns a Vec" → operational claim → true.
+    #[test]
+    fn detect_operational_claim_function_return() {
+        let text = "The code contains a function that returns a Vec<String> to the caller.";
+        assert!(
+            detect_operational_claim(text),
+            "function-return claim about code must be detected"
+        );
+    }
+
+    /// TEST: "Sure, I can help!" → conversational → false.
+    #[test]
+    fn detect_operational_claim_conversational() {
+        let text = "Sure, I can help! Let me know what you need.";
+        assert!(
+            !detect_operational_claim(text),
+            "generic conversational text must NOT trigger claim detection"
+        );
+    }
+
+    /// TEST: empty string → false (below length threshold).
+    #[test]
+    fn detect_operational_claim_short() {
+        assert!(
+            !detect_operational_claim(""),
+            "empty string must NOT trigger claim detection"
+        );
+        assert!(
+            !detect_operational_claim("Hi!"),
+            "very short text must NOT trigger claim detection"
+        );
     }
 }

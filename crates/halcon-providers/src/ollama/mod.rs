@@ -815,6 +815,14 @@ impl ModelProvider for OllamaProvider {
         // Local inference: always free.
         TokenCost::default()
     }
+
+    fn tool_format(&self) -> halcon_core::types::ToolFormat {
+        halcon_core::types::ToolFormat::OllamaXmlEmulation
+    }
+
+    fn tokenizer_hint(&self) -> halcon_core::types::TokenizerHint {
+        halcon_core::types::TokenizerHint::OllamaUnknown
+    }
 }
 
 #[cfg(test)]

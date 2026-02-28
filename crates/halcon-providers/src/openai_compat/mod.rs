@@ -622,6 +622,17 @@ impl ModelProvider for OpenAICompatibleProvider {
             estimated_cost_usd: estimated_tokens as f64 * cost_per_input,
         }
     }
+
+    fn tool_format(&self) -> halcon_core::types::ToolFormat {
+        halcon_core::types::ToolFormat::OpenAIFunctionObject
+    }
+
+    fn tokenizer_hint(&self) -> halcon_core::types::TokenizerHint {
+        match self.provider_name.as_str() {
+            "deepseek" => halcon_core::types::TokenizerHint::DeepSeekBpe,
+            _ => halcon_core::types::TokenizerHint::TiktokenCl100k,
+        }
+    }
 }
 
 #[cfg(test)]

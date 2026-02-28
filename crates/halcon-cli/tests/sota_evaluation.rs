@@ -172,6 +172,7 @@ mod sota_tests {
                     confidence: 0.9,
                     expected_args: None,
                     outcome: None,
+                    ..Default::default()
                 },
                 PlanStep {
                     description: "Parse JSON".to_string(),
@@ -180,12 +181,14 @@ mod sota_tests {
                     confidence: 0.8,
                     expected_args: None,
                     outcome: None,
+                    ..Default::default()
                 },
             ],
             requires_confirmation: false,
             plan_id: Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
 
         assert_eq!(plan.steps.len(), 2);
@@ -301,6 +304,7 @@ mod sota_tests {
                     confidence: 0.9,
                     expected_args: None,
                     outcome: None,
+                    ..Default::default()
                 },
                 PlanStep {
                     description: "Search pattern".to_string(),
@@ -309,6 +313,7 @@ mod sota_tests {
                     confidence: 0.85,
                     expected_args: None,
                     outcome: None,
+                    ..Default::default()
                 },
                 PlanStep {
                     description: "Analyze results".to_string(),
@@ -317,12 +322,14 @@ mod sota_tests {
                     confidence: 0.8,
                     expected_args: None,
                     outcome: None,
+                    ..Default::default()
                 },
             ],
             requires_confirmation: false,
             plan_id: Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
 
         // Verify plan structure

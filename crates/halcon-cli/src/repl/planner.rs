@@ -15,11 +15,22 @@ use halcon_core::types::{
     ChatMessage, MessageContent, ModelChunk, ModelRequest, Role, ToolDefinition,
 };
 
+/// Content-read tool names mirrored from evidence_pipeline for plan contract derivation.
+/// Used to set `ExecutionPlan.requires_evidence` post-parse without a cross-module dep.
+const PLAN_CONTENT_READ_TOOLS: &[&str] = &[
+    "read_file",
+    "read_multiple_files",
+    "file_read",
+    "read_multiple_files_content",
+];
+
 /// LLM-based planner that generates execution plans by prompting the model.
 pub struct LlmPlanner {
     provider: Arc<dyn ModelProvider>,
     model: String,
     max_replans: u32,
+    /// Tools blocked for this session — excluded from plan prompts and plan contracts.
+    blocked_tools: Vec<String>,
 }
 
 impl LlmPlanner {
@@ -28,11 +39,21 @@ impl LlmPlanner {
             provider,
             model,
             max_replans: 3,
+            blocked_tools: vec![],
         }
     }
 
     pub fn with_max_replans(mut self, max: u32) -> Self {
         self.max_replans = max;
+        self
+    }
+
+    /// Add a list of blocked tool names to the planner.
+    ///
+    /// The planner injects these into the plan prompt and sets them on `ExecutionPlan.blocked_tools`.
+    /// This prevents the LLM from generating steps that use tools blocked in the current session.
+    pub fn with_blocked_tools(mut self, tools: Vec<String>) -> Self {
+        self.blocked_tools = tools;
         self
     }
 
@@ -51,7 +72,7 @@ impl LlmPlanner {
     /// Test-only accessor to verify plan prompt content.
     #[cfg(test)]
     pub fn build_plan_prompt_for_test(user_message: &str, tools: &[ToolDefinition]) -> String {
-        Self::build_plan_prompt(user_message, tools)
+        Self::build_plan_prompt(user_message, tools, &[])
     }
 
     /// Build the planning prompt from user message and available tools.
@@ -61,17 +82,26 @@ impl LlmPlanner {
     /// - EXECUTION tasks (build, run, install, deploy, test, create, modify): granular steps,
     ///   synthesis ONLY when objective is fully achieved.
     /// Anti-collapse invariant: never generate a plan where all remaining steps have tool_name=null.
-    fn build_plan_prompt(user_message: &str, tools: &[ToolDefinition]) -> String {
+    fn build_plan_prompt(user_message: &str, tools: &[ToolDefinition], blocked_tools: &[String]) -> String {
         let tool_list: Vec<String> = tools
             .iter()
             .map(|t| format!("- {}: {}", t.name, t.description))
             .collect();
 
+        let blocked_note = if blocked_tools.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nCRITICAL: Do NOT use these blocked tools: {}\n",
+                blocked_tools.join(", ")
+            )
+        };
+
         format!(
             "You are a planning agent. Generate an execution plan appropriate for the task type.\n\n\
              CRITICAL: The \"goal\" field MUST directly summarize the USER REQUEST below.\n\
              Do NOT substitute a different task. Do NOT infer the project type from tool names.\n\n\
-             User request: {user_message}\n\n\
+             User request: {user_message}{blocked_note}\n\n\
              Available tools:\n{}\n\n\
              Respond with ONLY a JSON object:\n\
              {{\n  \"goal\": \"<one-line summary of the USER REQUEST above, max 10 words>\",\n  \
@@ -336,6 +366,28 @@ impl LlmPlanner {
         plan.replan_count = 0;
         plan.parent_plan_id = None;
 
+        // Normalize tool_name: DeepSeek emits `"null"` (string) instead of JSON `null`
+        // for reasoning/validation steps. Treat string "null" as None to prevent
+        // delegation to sub-agents with empty tool surfaces (FASE 3 abort).
+        for step in &mut plan.steps {
+            if step.tool_name.as_deref() == Some("null") {
+                tracing::debug!(
+                    step_desc = %step.description,
+                    "Normalized tool_name \"null\" (string) → None"
+                );
+                step.tool_name = None;
+            }
+        }
+
+        // BRECHA-S4: derive frontier contracts post-parse (not set by LLM).
+        plan.mode = halcon_core::traits::ExecutionMode::PlanExecuteReflect;
+        plan.requires_evidence = plan.steps.iter().any(|s| {
+            s.tool_name.as_deref().map_or(false, |t| {
+                PLAN_CONTENT_READ_TOOLS.iter().any(|&ct| t == ct || t.starts_with(ct))
+            })
+        });
+        plan.blocked_tools = self.blocked_tools.clone();
+
         Ok(Some(plan))
     }
 }
@@ -377,12 +429,16 @@ pub(crate) fn extract_json(s: &str) -> &str {
 
 #[async_trait]
 impl Planner for LlmPlanner {
+    // FUTURE: granular retry hook — accept `failed_steps: &[FailedStepContext]`
+    // to generate a targeted re-plan for only the failed steps, preserving
+    // successful sub-agent results. This avoids re-planning the entire task
+    // when only 1-2 steps need correction.
     async fn plan(
         &self,
         user_message: &str,
         available_tools: &[ToolDefinition],
     ) -> Result<Option<ExecutionPlan>> {
-        let prompt = Self::build_plan_prompt(user_message, available_tools);
+        let prompt = Self::build_plan_prompt(user_message, available_tools, &self.blocked_tools);
         self.invoke_for_plan(prompt).await
     }
 
@@ -452,7 +508,7 @@ mod tests {
             },
         ];
 
-        let prompt = LlmPlanner::build_plan_prompt("fix the bug in main.rs", &tools);
+        let prompt = LlmPlanner::build_plan_prompt("fix the bug in main.rs", &tools, &[]);
         assert!(prompt.contains("fix the bug in main.rs"));
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("bash"));
@@ -485,10 +541,7 @@ mod tests {
                     outcome: None,
                 },
             ],
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
 
         let tools = vec![ToolDefinition {
@@ -740,10 +793,7 @@ mod tests {
                     error: "file not found".into(),
                 }),
             }],
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
 
         let tools = vec![ToolDefinition {
@@ -788,7 +838,7 @@ mod tests {
             input_schema: serde_json::json!({}),
         }];
 
-        let plan_prompt = LlmPlanner::build_plan_prompt("test task", &tools);
+        let plan_prompt = LlmPlanner::build_plan_prompt("test task", &tools, &[]);
 
         let plan = ExecutionPlan {
             goal: "test task".into(),
@@ -803,10 +853,7 @@ mod tests {
                     error: "timeout".into(),
                 }),
             }],
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
         let replan_prompt = LlmPlanner::build_replan_prompt(&plan, 0, "timeout", &tools);
 
@@ -853,10 +900,7 @@ mod tests {
                 expected_args: None,
                 outcome: None,
             }],
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
 
         // Construct a 600-char error string (clearly > 200).
@@ -893,10 +937,7 @@ mod tests {
                 expected_args: None,
                 outcome: None,
             }],
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
         let short_error = "file not found: /tmp/config.toml";
         let prompt = LlmPlanner::build_replan_prompt(&plan, 0, short_error, &[]);
@@ -939,10 +980,7 @@ mod tests {
                     outcome: None,
                 }))
                 .collect(),
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
 
         assert_eq!(oversized.steps.len(), 9, "Pre-condition: 9 steps before compression");
@@ -1005,10 +1043,7 @@ mod tests {
                     error: "error".into(),
                 }),
             }],
-            requires_confirmation: false,
-            plan_id: Uuid::new_v4(),
-            replan_count: 0,
-            parent_plan_id: None,
+            ..Default::default()
         };
 
         let tools = vec![ToolDefinition {
@@ -1043,5 +1078,41 @@ mod tests {
         // Ensure the prompt includes the error context and original goal
         assert!(prompt.contains("Original goal"));
         assert!(prompt.contains("error"));
+    }
+
+    #[test]
+    fn null_string_tool_name_deserialized_as_some() {
+        // DeepSeek emits `"tool_name": "null"` (string) instead of JSON null.
+        // Verify serde deserializes this as Some("null"), confirming the bug exists.
+        let json = r#"{
+            "goal": "Analyze project",
+            "steps": [
+                {
+                    "description": "Read files",
+                    "tool_name": "read_file",
+                    "parallel": false,
+                    "confidence": 0.9
+                },
+                {
+                    "description": "Validate results",
+                    "tool_name": "null",
+                    "parallel": false,
+                    "confidence": 0.9
+                },
+                {
+                    "description": "Synthesize",
+                    "tool_name": null,
+                    "parallel": false,
+                    "confidence": 1.0
+                }
+            ],
+            "requires_confirmation": false
+        }"#;
+
+        let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
+        // Step 1: "null" string → Some("null") before normalization
+        assert_eq!(plan.steps[1].tool_name, Some("null".to_string()));
+        // Step 2: JSON null → None
+        assert!(plan.steps[2].tool_name.is_none());
     }
 }

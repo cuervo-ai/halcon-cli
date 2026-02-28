@@ -455,6 +455,14 @@ impl ModelProvider for GeminiProvider {
             estimated_cost_usd: estimated_tokens as f64 * cost_per_input,
         }
     }
+
+    fn tool_format(&self) -> halcon_core::types::ToolFormat {
+        halcon_core::types::ToolFormat::GeminiFunctionDeclarations
+    }
+
+    fn tokenizer_hint(&self) -> halcon_core::types::TokenizerHint {
+        halcon_core::types::TokenizerHint::GeminiSentencePiece
+    }
 }
 
 #[cfg(test)]

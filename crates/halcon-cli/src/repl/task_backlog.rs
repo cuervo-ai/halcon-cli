@@ -399,6 +399,7 @@ mod tests {
             plan_id: Uuid::new_v4(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         };
         let policy = RetryPolicy::default();
         let result = backlog.add_from_plan(&plan, &policy);

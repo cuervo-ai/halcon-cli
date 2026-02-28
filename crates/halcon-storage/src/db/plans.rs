@@ -152,6 +152,7 @@ mod tests {
             plan_id,
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 

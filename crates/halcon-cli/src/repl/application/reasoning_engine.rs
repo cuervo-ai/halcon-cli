@@ -335,6 +335,12 @@ mod tests {
             last_model_used: None,
             plugin_cost_snapshot: vec![],
             tools_executed: vec![],
+            evidence_verified: true,
+            content_read_attempts: 0,
+            last_provider_used: None,
+            blocked_tools: vec![],
+            failed_sub_agent_steps: vec![],
+            critic_unavailable: false,
         };
 
         let eval = engine.post_loop(&analysis, &result);

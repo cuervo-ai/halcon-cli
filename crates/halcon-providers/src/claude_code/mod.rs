@@ -492,6 +492,14 @@ impl ModelProvider for ClaudeCodeProvider {
             estimated_cost_usd: 0.0,
         }
     }
+
+    fn tool_format(&self) -> halcon_core::types::ToolFormat {
+        halcon_core::types::ToolFormat::AnthropicInputSchema
+    }
+
+    fn tokenizer_hint(&self) -> halcon_core::types::TokenizerHint {
+        halcon_core::types::TokenizerHint::ClaudeBpe
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -352,6 +352,7 @@ impl AgentBridgeImpl {
             critic_model: None,
             plugin_registry: None,
             is_sub_agent: false,
+            requested_provider: None,
         };
 
         let loop_result = crate::repl::agent::run_agent_loop(ctx)

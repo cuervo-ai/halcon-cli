@@ -88,7 +88,9 @@ impl DelegationRouter {
                 }
 
                 // Must have a specific tool_name.
-                let tool_name = step.tool_name.as_deref()?;
+                // Defense: DeepSeek sometimes emits "null" string; treat as None.
+                let tool_name = step.tool_name.as_deref()
+                    .filter(|t| *t != "null" && !t.is_empty())?;
 
                 // Must meet confidence threshold.
                 if step.confidence < self.min_confidence {
@@ -163,7 +165,17 @@ impl DelegationRouter {
                 let instruction = if let Some(ref tool) = step.tool_name {
                     // MCP search_files → remap instruction to use grep natively.
                     // search_files MCP times out on large directories; grep is reliable.
-                    let effective_tool = if tool == "search_files" { "grep" } else { tool.as_str() };
+                    //
+                    // dep_check → remap to read_multiple_files.
+                    // dep_check fails 100% of the time (17s then fails, 3 consecutive sessions).
+                    // Alternative: read Cargo.lock / package.json / requirements.txt directly.
+                    let effective_tool = if tool == "search_files" {
+                        "grep"
+                    } else if tool == "dep_check" {
+                        "read_multiple_files"
+                    } else {
+                        tool.as_str()
+                    };
 
                     let path_hint = if effective_tool == "file_write" {
                         // Try to get path from expected_args first.
@@ -179,6 +191,14 @@ impl DelegationRouter {
                         // Hint: guide the sub-agent to use grep correctly for content search.
                         "\nUse grep with -r -l flags to search file contents recursively. \
                          Example: grep -r -l \"keyword\" /path/to/dir".to_string()
+                    } else if tool == "dep_check" {
+                        // dep_check is unreliable — remap to reading dependency files directly.
+                        // Evidence: 3/3 failures in production (sessions Mon-Key, demo-js).
+                        "\nRead dependency files directly to analyze dependencies:\n\
+                         1. Use read_multiple_files to read: Cargo.lock, Cargo.toml, package.json, \
+                         package-lock.json, requirements.txt, go.mod (whichever exist).\n\
+                         2. Analyze the dependency versions and flag any outdated or suspicious packages.\n\
+                         Do NOT attempt to run dep_check or any audit command.".to_string()
                     } else {
                         String::new()
                     };
@@ -263,8 +283,13 @@ impl DelegationRouter {
         // MCP search_files → native remap: replace with reliable native alternatives.
         // Evidence: 3/3 failures (31327ms, 31489ms, 1283ms timeouts) in tool_execution_metrics.
         // grep and native_search have 100% success rate across all recorded invocations.
+        //
+        // dep_check → read_multiple_files remap.
+        // Evidence: 3/3 failures (~17s) in production sessions (Mon-Key, demo-js, demo-js retry).
+        // read_multiple_files reads Cargo.lock/package.json directly with 94% success rate.
         let effective_primary = match primary_tool {
             "search_files" => "grep",
+            "dep_check" => "read_multiple_files",
             other => other,
         };
 
@@ -386,6 +411,7 @@ mod tests {
             plan_id: Uuid::nil(),
             replan_count: 0,
             parent_plan_id: None,
+            ..Default::default()
         }
     }
 
@@ -997,5 +1023,33 @@ mod tests {
             AgentType::Coder,
             "search_files remap must still route to Coder agent"
         );
+    }
+
+    #[test]
+    fn null_string_tool_not_delegated() {
+        // DeepSeek emits "null" (string) instead of JSON null for reasoning steps.
+        // These must NOT be delegated — otherwise they get an empty tool surface.
+        let router = DelegationRouter::new(true).with_min_confidence(0.5);
+        let plan = make_plan(vec![
+            make_step("Read files", Some("read_multiple_files"), 0.9),
+            make_step("Validate results", Some("null"), 0.9),
+            make_step("Synthesize", None, 1.0),
+        ]);
+        let decisions = router.analyze_plan(&plan);
+        // Only step 0 should be delegated — "null" string should be filtered out.
+        assert_eq!(decisions.len(), 1, "tool_name=\"null\" must not be delegated");
+        assert_eq!(decisions[0].0, 0, "only step 0 (read_multiple_files) should delegate");
+    }
+
+    #[test]
+    fn empty_string_tool_not_delegated() {
+        let router = DelegationRouter::new(true).with_min_confidence(0.5);
+        let plan = make_plan(vec![
+            make_step("Read files", Some("file_read"), 0.9),
+            make_step("Think about it", Some(""), 0.9),
+            make_step("Synthesize", None, 1.0),
+        ]);
+        let decisions = router.analyze_plan(&plan);
+        assert_eq!(decisions.len(), 1, "empty tool_name must not be delegated");
     }
 }

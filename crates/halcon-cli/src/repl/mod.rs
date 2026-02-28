@@ -50,6 +50,7 @@ pub(crate) mod runtime_bridge;
 /// Multi-agent wave orchestration — parallel task scheduling with dependency resolution.
 pub mod orchestrator;
 pub mod orchestrator_metrics;
+pub mod model_quirks;
 
 // Anomaly detection and loop integrity.
 pub mod anomaly_detector;
@@ -336,6 +337,12 @@ pub struct Repl {
     pub(crate) onboarding_checked: bool,
     /// Phase 95: One-time plugin recommendation check on first message.
     pub(crate) plugin_recommendation_done: bool,
+    /// BRECHA-S3: Tools blocked during this session (name, reason).
+    ///
+    /// Accumulated from `state.blocked_tools` after each agent loop. Persists
+    /// across turns so the LlmPlanner can avoid generating steps with blocked tools.
+    /// Invariant: if a tool was blocked in turn N, the plan for turn N+1 excludes it.
+    pub(crate) session_blocked_tools: Vec<(String, String)>,
 }
 
 // ── Multimodal helper ─────────────────────────────────────────────────────────
@@ -713,6 +720,8 @@ impl Repl {
             onboarding_checked: false,
             // Phase 95: Plugin recommendation check runs once on first message.
             plugin_recommendation_done: false,
+            // BRECHA-S3: No blocked tools at session start.
+            session_blocked_tools: vec![],
         })
     }
 
@@ -2432,10 +2441,16 @@ impl Repl {
                         model = %planner_model,
                         "LlmPlanner resolved model for provider (Phase 3)"
                     );
+                    // BRECHA-S3: pass session-blocked tools so the planner excludes them.
+                    let blocked_names: Vec<String> = self.session_blocked_tools
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect();
                     Some(planner::LlmPlanner::new(
                         planner_prov,
                         planner_model,
-                    ).with_max_replans(self.config.planning.max_replans))
+                    ).with_max_replans(self.config.planning.max_replans)
+                     .with_blocked_tools(blocked_names))
                 } else {
                     None
                 };
@@ -2778,6 +2793,7 @@ impl Repl {
                     critic_model: critic_mdl.clone(),
                     plugin_registry: self.plugin_registry.clone(),
                     is_sub_agent: false,
+                    requested_provider: Some(self.provider.clone()),
                 };
                 // Fix: restore ctrl_rx before propagating any error so TUI controls
                 // (Pause/Step/Cancel) remain functional across agent loop failures.
@@ -2794,6 +2810,19 @@ impl Repl {
                 }
 
                 let mut result = agent_loop_result?;
+
+                // BRECHA-S3: merge blocked tools from this loop into session state.
+                // Dedup by name so repeated denials don't grow the list unboundedly.
+                for (name, reason) in result.blocked_tools.drain(..) {
+                    if !self.session_blocked_tools.iter().any(|(n, _)| n == &name) {
+                        tracing::info!(
+                            tool = %name,
+                            reason = %reason,
+                            "BRECHA-S3: tool blocked this turn — will be excluded from future plans"
+                        );
+                        self.session_blocked_tools.push((name, reason));
+                    }
+                }
 
                 // Cache timeline for --timeline exit hook.
                 self.last_timeline = result.timeline_json.clone();
@@ -2828,6 +2857,7 @@ impl Repl {
                             oscillation_penalty: result.oscillation_penalty,
                             plan_completion_ratio: result.plan_completion_ratio,
                             plugin_snapshots: result.plugin_cost_snapshot.clone(),
+                            critic_unavailable: result.critic_unavailable,
                         };
                         let reward_computation = reward_pipeline::compute_reward(&raw_signals);
                         // Step 5 plugin blending: apply plugin success rate signal (10% weight).
@@ -2922,7 +2952,19 @@ impl Repl {
                                 cv.achieved,
                                 cv.confidence,
                             );
-                            if !cv.achieved && (score_says_retry || critic_halt) {
+                            // Minimum confidence required for a critic failure to
+                            // justify re-running the entire agent loop.  A critic
+                            // at 30% confidence is too uncertain to warrant the
+                            // extra tokens and latency of a full retry.
+                            // FUTURE: granular retry hook — instead of re-running
+                            // the full agent loop, use `cv.gaps` to identify which
+                            // plan steps failed and retry only those via the
+                            // orchestrator's selective re-dispatch.
+                            const MIN_RETRY_CONFIDENCE: f32 = 0.40;
+                            if !cv.achieved
+                                && cv.confidence >= MIN_RETRY_CONFIDENCE
+                                && (score_says_retry || critic_halt)
+                            {
                                 critic_retry_needed = true;
                                 critic_retry_info = Some((
                                     cv.confidence,
@@ -2951,10 +2993,24 @@ impl Repl {
                         let instr = retry_instr.as_deref().unwrap_or(
                             "Your previous response did not fully complete the task. Please address all missing elements."
                         );
+                        // BRECHA-R1 + FASE 5: If sub-agent steps failed, tell the planner explicitly
+                        // with categorized error info so it generates ALTERNATIVE approaches.
+                        let failed_steps_note = if !result.failed_sub_agent_steps.is_empty() {
+                            format!(
+                                "\n\nFAILED APPROACHES (do NOT repeat these — use a different method):\n{}",
+                                result.failed_sub_agent_steps.iter()
+                                    .map(|ctx| format!("  - [{}] {}: {}", ctx.error_category.label(), ctx.description, ctx.error_message))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            )
+                        } else {
+                            String::new()
+                        };
                         let retry_text = format!(
-                            "[Critic retry]: Task incomplete. Missing: {}. Instruction: {}",
+                            "[Critic retry]: Task incomplete. Missing: {}. Instruction: {}{}",
                             if gaps.is_empty() { "see previous response".to_string() } else { gaps.join("; ") },
-                            instr
+                            instr,
+                            failed_steps_note
                         );
 
                         sink.info(&format!(
@@ -3021,6 +3077,7 @@ impl Repl {
                             critic_model: critic_mdl.clone(),
                             plugin_registry: None, // retry doesn't re-share plugin state
                             is_sub_agent: false,
+                            requested_provider: Some(self.provider.clone()),
                         };
 
                         let mut retry_loop_result = agent::run_agent_loop(retry_ctx).await;

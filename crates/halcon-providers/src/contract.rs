@@ -10,6 +10,7 @@ mod tests {
     use halcon_core::traits::ModelProvider;
     use halcon_core::types::{
         ChatMessage, MessageContent, ModelChunk, ModelRequest, Role, StopReason,
+        TokenizerHint, ToolFormat,
     };
     use futures::StreamExt;
 
@@ -317,6 +318,72 @@ mod tests {
                         model.id
                     );
                 }
+            }
+        }
+    }
+
+    // =======================================================
+    // Contract: Debug impl does not leak API keys
+    // =======================================================
+
+    // =======================================================
+    // Contract: tool_format() is not Unknown for real providers
+    // =======================================================
+
+    #[test]
+    fn contract_tool_format_not_unknown_for_real_providers() {
+        for p in all_providers() {
+            let name = p.name();
+            let format = p.tool_format();
+            // Echo is a test provider — Unknown is acceptable.
+            if name != "echo" {
+                assert_ne!(
+                    format,
+                    ToolFormat::Unknown,
+                    "provider '{}' must declare a known ToolFormat, got Unknown",
+                    name
+                );
+            }
+        }
+    }
+
+    // =======================================================
+    // Contract: model_max_output_tokens matches ModelInfo
+    // =======================================================
+
+    #[test]
+    fn contract_model_max_output_tokens_matches_model_info() {
+        for p in all_providers() {
+            for model in p.supported_models() {
+                let from_trait = p.model_max_output_tokens(&model.id);
+                assert_eq!(
+                    from_trait,
+                    Some(model.max_output_tokens),
+                    "provider '{}', model '{}': model_max_output_tokens() must match ModelInfo.max_output_tokens",
+                    p.name(),
+                    model.id
+                );
+            }
+        }
+    }
+
+    // =======================================================
+    // Contract: tokenizer_hint() is not Unknown for real providers
+    // =======================================================
+
+    #[test]
+    fn contract_tokenizer_hint_not_unknown_for_real_providers() {
+        for p in all_providers() {
+            let name = p.name();
+            let hint = p.tokenizer_hint();
+            // Echo is a test provider — Unknown is acceptable.
+            if name != "echo" {
+                assert_ne!(
+                    hint,
+                    TokenizerHint::Unknown,
+                    "provider '{}' must declare a known TokenizerHint, got Unknown",
+                    name
+                );
             }
         }
     }

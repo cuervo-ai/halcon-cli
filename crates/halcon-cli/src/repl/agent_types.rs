@@ -129,6 +129,157 @@ pub struct AgentLoopResult {
     /// Used by orchestrator to populate `SubAgentResult.agent_result.tools_used`
     /// and by the TUI session summary ("Tools: N calls").
     pub tools_executed: Vec<String>,
+    /// Whether the loop produced verified evidence (evidence gate did not fire).
+    /// False when content-read tools were attempted but returned insufficient text.
+    pub evidence_verified: bool,
+    /// Content-read tool attempts during this loop (read_file, read_multiple_files, etc.).
+    pub content_read_attempts: usize,
+    /// Provider name used in the final (or most recent) agent round.
+    /// Populated so metrics can attribute cost by provider across sessions.
+    pub last_provider_used: Option<String>,
+    /// Tools blocked during this loop because of guardrail/policy denials.
+    /// (tool_name, reason) pairs accumulated from post_batch error detection.
+    /// Merged by mod.rs into session_blocked_tools for cross-turn persistence (BRECHA-S3).
+    pub blocked_tools: Vec<(String, String)>,
+    /// Structured context for sub-agent tasks that failed during orchestration (BRECHA-R1 + FASE 5).
+    ///
+    /// Injected into the critic retry message with categorized error info so the planner
+    /// generates alternative approaches instead of reproducing the same failing steps.
+    pub failed_sub_agent_steps: Vec<FailedStepContext>,
+    /// Whether the LoopCritic was unavailable (both primary and fallback failed or timed out).
+    ///
+    /// When true, the reward pipeline applies a CRITIC_UNAVAILABLE_PENALTY (FASE 4) to push
+    /// sessions without adversarial verification below the retry threshold.
+    pub critic_unavailable: bool,
+}
+
+/// Categorization of why a sub-agent step failed (FASE 5).
+///
+/// Derived from the error string in `SubAgentResult.error` to provide structured
+/// context for the retry planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailedStepErrorCategory {
+    Timeout,
+    PermissionDenied,
+    ToolExecutionFailed,
+    ProviderError,
+    DependencyCascade,
+    CyclicDependency,
+    Unknown,
+}
+
+impl FailedStepErrorCategory {
+    /// Derive category from a free-form error string.
+    pub fn from_error_string(error: &str) -> Self {
+        let lower = error.to_lowercase();
+        if lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline") {
+            Self::Timeout
+        } else if lower.contains("denied") || lower.contains("permission") || lower.contains("not allowed") || lower.contains("guardrail") {
+            Self::PermissionDenied
+        } else if lower.contains("cascade") || lower.contains("dependency failed") || lower.contains("dep_failed") {
+            Self::DependencyCascade
+        } else if lower.contains("cyclic") || lower.contains("circular dependency") {
+            Self::CyclicDependency
+        } else if lower.contains("tool") && (lower.contains("fail") || lower.contains("error")) {
+            Self::ToolExecutionFailed
+        } else if lower.contains("provider") || lower.contains("api error") || lower.contains("rate limit") || lower.contains("auth") {
+            Self::ProviderError
+        } else {
+            Self::Unknown
+        }
+    }
+
+    /// Human-readable label for use in retry injection prompts.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Timeout => "TIMEOUT",
+            Self::PermissionDenied => "PERMISSION_DENIED",
+            Self::ToolExecutionFailed => "TOOL_EXECUTION_FAILED",
+            Self::ProviderError => "PROVIDER_ERROR",
+            Self::DependencyCascade => "DEPENDENCY_CASCADE",
+            Self::CyclicDependency => "CYCLIC_DEPENDENCY",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+/// Structured context for a failed sub-agent step (FASE 5).
+///
+/// Replaces the plain `String` in `failed_sub_agent_steps` with categorized
+/// error information so the retry planner gets actionable context.
+#[derive(Debug, Clone)]
+pub struct FailedStepContext {
+    /// Step description (max 120 chars, truncated from plan step).
+    pub description: String,
+    /// Categorized error type.
+    pub error_category: FailedStepErrorCategory,
+    /// Original error message (max 200 chars).
+    pub error_message: String,
+}
+
+impl std::fmt::Display for FailedStepContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}: {}", self.error_category.label(), self.description, self.error_message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_error_string_timeout() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("connection timed out after 30s"), FailedStepErrorCategory::Timeout);
+        assert_eq!(FailedStepErrorCategory::from_error_string("Request timeout: 60s deadline exceeded"), FailedStepErrorCategory::Timeout);
+    }
+
+    #[test]
+    fn from_error_string_permission_denied() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("access denied by guardrail"), FailedStepErrorCategory::PermissionDenied);
+        assert_eq!(FailedStepErrorCategory::from_error_string("permission not allowed for this tool"), FailedStepErrorCategory::PermissionDenied);
+    }
+
+    #[test]
+    fn from_error_string_dependency_cascade() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("dependency failed: step 2 cascade"), FailedStepErrorCategory::DependencyCascade);
+    }
+
+    #[test]
+    fn from_error_string_cyclic_dependency() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("cyclic dependency detected between steps"), FailedStepErrorCategory::CyclicDependency);
+    }
+
+    #[test]
+    fn from_error_string_tool_execution_failed() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("tool execution failed: grep returned exit code 1"), FailedStepErrorCategory::ToolExecutionFailed);
+    }
+
+    #[test]
+    fn from_error_string_provider_error() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("provider returned 500: internal server error"), FailedStepErrorCategory::ProviderError);
+        assert_eq!(FailedStepErrorCategory::from_error_string("rate limit exceeded, retry after 60s"), FailedStepErrorCategory::ProviderError);
+    }
+
+    #[test]
+    fn from_error_string_unknown() {
+        assert_eq!(FailedStepErrorCategory::from_error_string("something went wrong"), FailedStepErrorCategory::Unknown);
+    }
+
+    #[test]
+    fn labels_non_empty() {
+        let categories = [
+            FailedStepErrorCategory::Timeout,
+            FailedStepErrorCategory::PermissionDenied,
+            FailedStepErrorCategory::ToolExecutionFailed,
+            FailedStepErrorCategory::ProviderError,
+            FailedStepErrorCategory::DependencyCascade,
+            FailedStepErrorCategory::CyclicDependency,
+            FailedStepErrorCategory::Unknown,
+        ];
+        for cat in &categories {
+            assert!(!cat.label().is_empty(), "label for {:?} must be non-empty", cat);
+        }
+    }
 }
 
 /// Multi-dimensional strategy execution context derived from UCB1 StrategyPlan.

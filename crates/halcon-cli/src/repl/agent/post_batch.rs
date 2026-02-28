@@ -324,6 +324,24 @@ pub(super) async fn run(
             state.loop_guard.record_error(&format!("{}:{}", tool_name, error_content));
         }
 
+        // BRECHA-C: Register guardrail/TBAC tool denials into state.blocked_tools.
+        // Injected into replan prompts to break retry cycles on blocked tools.
+        for (tool_name, error_content) in &tool_failures {
+            let is_blocked = error_content.contains("denied")
+                || error_content.contains("not allowed")
+                || error_content.contains("guardrail")
+                || error_content.contains("blacklist")
+                || error_content.contains("task context policy");
+            if is_blocked && !state.blocked_tools.iter().any(|(n, _)| n == tool_name) {
+                let short_reason = error_content.chars().take(120).collect::<String>();
+                state.blocked_tools.push((tool_name.clone(), short_reason));
+                tracing::warn!(
+                    tool = %tool_name,
+                    "BRECHA-C: tool blocked by guardrail/TBAC — added to blocked_tools for replan"
+                );
+            }
+        }
+
         // Guardrail scan on tool results (warn-only — does not block tool output).
         if !guardrails.is_empty() {
             for block in &tool_result_blocks {
@@ -414,6 +432,19 @@ pub(super) async fn run(
                          suppressing tools for coordinator synthesis round"
                     );
                     state.tool_decision.set_force_next();
+                    // EBS-R1 (AllRemainingStepsSynthesisOnly): if evidence gate fires, mark
+                    // synthesis_blocked and override origin so reward pipeline penalises
+                    // fabrication when files turned out to be unreadable.
+                    if state.evidence_bundle.evidence_gate_fires() {
+                        state.evidence_bundle.synthesis_blocked = true;
+                        state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                        tracing::warn!(
+                            session_id = %state.session_id,
+                            text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                            "EvidenceGate FIRED (AllRemainingStepsSynthesisOnly): \
+                             synthesis_blocked set, origin overridden to SupervisorFailure"
+                        );
+                    }
                 }
             }
 
@@ -1065,6 +1096,17 @@ pub(super) async fn run(
             }
             state.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
             state.forced_synthesis_detected = true;
+            // EBS-R1 (ParallelBatchCollapse): if evidence gate fires, override origin to
+            // SupervisorFailure so reward pipeline applies synthesis penalty on unreadable files.
+            if state.evidence_bundle.evidence_gate_fires() {
+                state.evidence_bundle.synthesis_blocked = true;
+                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                tracing::warn!(
+                    session_id = %state.session_id,
+                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                    "EvidenceGate FIRED (ParallelBatchCollapse): origin overridden to SupervisorFailure"
+                );
+            }
             // Use force_no_tools so convergence phase collects final round signals before
             // result_assembly sees forced_synthesis_detected and builds the synthesis result.
             state.tool_decision.set_force_next();

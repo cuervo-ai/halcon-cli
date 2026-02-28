@@ -219,6 +219,7 @@ fn test_ctx<'a>(
         critic_model: None,
         plugin_registry: None,
         is_sub_agent: false,
+        requested_provider: None,
     }
 }
 
@@ -229,7 +230,10 @@ fn test_ctx<'a>(
 #[tokio::test]
 async fn multi_round_tool_conversation() {
     // Create a temp file so file_read has something to read.
-    std::fs::write("/tmp/stress_test_31.txt", "stress content").unwrap();
+    // NOTE: content must be >= MIN_EVIDENCE_BYTES (30) so the EBS gate does not fire.
+    // EBS-B2 fires when text_bytes_extracted < 30 AND content-read tools were attempted,
+    // which would incorrectly intercept the model's legitimate EndTurn response.
+    std::fs::write("/tmp/stress_test_31.txt", "stress content for the multi-round tool conversation test").unwrap();
 
     let provider: Arc<dyn ModelProvider> = Arc::new(ToolCallProvider::new());
     let mut session = Session::new("tool_test".into(), "tool-test".into(), "/tmp".into());
