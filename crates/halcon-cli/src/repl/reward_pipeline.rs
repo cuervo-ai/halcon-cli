@@ -32,6 +32,10 @@ pub struct RawRewardSignals {
     /// Whether the LoopCritic was unavailable (both primary and fallback failed/timed out).
     /// When true, an additional penalty is applied to push the reward below retry threshold.
     pub critic_unavailable: bool,
+    /// Evidence graph coverage: fraction of Good evidence nodes referenced by synthesis.
+    /// 1.0 = all evidence used, 0.0 = none referenced. Default 1.0 (no graph = full coverage).
+    /// Phase 3 EvidenceGraph Governance: small additive bonus/penalty ±0.025.
+    pub evidence_coverage: f64,
 }
 
 /// Breakdown of individual reward components for diagnostics and logging.
@@ -97,40 +101,32 @@ fn stop_condition_score(cond: &StopCondition, ratio: f32) -> f64 {
 ///
 // ── Reward weight constants ──────────────────────────────────────────────────
 //
-// Extracted as named constants so CRITIC_FAIL_STOP_CAP can be derived
-// algebraically rather than chosen by hand.
+// Weights are now read from PolicyConfig at call sites.  The constants below
+// are kept ONLY as safety-margin references for the cap validation.
 
-const W_STOP: f64 = 0.25;
-const W_TRAJECTORY: f64 = 0.30;
-const W_CRITIC: f64 = 0.25;
-const W_COHERENCE: f64 = 0.20;
-const SUCCESS_THRESHOLD: f64 = 0.60;
 const CAP_SAFETY_MARGIN: f64 = 0.025;
+const CRITIC_FAIL_STOP_CAP: f64 = 0.60;
 
-/// Upper bound for CRITIC_FAIL_STOP_CAP: the maximum allowable cap value that
-/// still ensures `final_reward < SUCCESS_THRESHOLD` at full confidence (1.0).
-///
-/// With confidence-proportional dampening, at conf=1.0 the effective cap equals
-/// CRITIC_FAIL_STOP_CAP directly.  Worst case: EndTurn + plan_completion=1.0
-/// + full coherence + critic=(false, 1.0).  We need `final < SUCCESS_THRESHOLD`:
-///   cap×W_STOP + cap×W_TRAJECTORY + 0.0×W_CRITIC + 1.0×W_COHERENCE < 0.60
-/// Solving for cap gives the upper bound below, minus a safety margin.
-fn compute_critic_fail_stop_cap() -> f64 {
-    let worst_critic = 0.0;    // 0.25 × (1.0 - 1.0) — full-confidence failure
-    let worst_coherence = 1.0; // full coherence (no plan drift)
-    let numerator = SUCCESS_THRESHOLD - worst_critic * W_CRITIC - worst_coherence * W_COHERENCE;
-    ((numerator / (W_STOP + W_TRAJECTORY)) - CAP_SAFETY_MARGIN).max(0.0)
+/// Upper bound validation for CRITIC_FAIL_STOP_CAP.
+fn compute_critic_fail_stop_cap_upper_bound(
+    success_threshold: f64,
+    w_stop: f64,
+    w_trajectory: f64,
+    w_critic: f64,
+    w_coherence: f64,
+) -> f64 {
+    let worst_critic = 0.0;
+    let worst_coherence = 1.0;
+    let numerator = success_threshold - worst_critic * w_critic - worst_coherence * w_coherence;
+    ((numerator / (w_stop + w_trajectory)) - CAP_SAFETY_MARGIN).max(0.0)
 }
 
-/// Cached value — `compute_critic_fail_stop_cap()` is pure so we can call it once.
-const CRITIC_FAIL_STOP_CAP: f64 = 0.60; // compile-time placeholder; validated by test below
-
-/// FASE 4: Penalty applied when the LoopCritic is completely unavailable (both
-/// primary and fallback failed or timed out). This pushes borderline sessions
-/// below the 0.60 retry threshold so unverified sessions trigger a retry.
-const CRITIC_UNAVAILABLE_PENALTY: f64 = 0.15;
-
-pub fn compute_reward(signals: &RawRewardSignals) -> RewardComputation {
+pub fn compute_reward(signals: &RawRewardSignals, policy: &halcon_core::types::PolicyConfig) -> RewardComputation {
+    let critic_unavailable_penalty_val = policy.critic_unavailable_penalty;
+    let w_stop = policy.w_stop;
+    let w_trajectory = policy.w_trajectory;
+    let w_critic = policy.w_critic;
+    let w_coherence = policy.w_coherence_reward;
     let raw_stop_score =
         stop_condition_score(&signals.stop_condition, signals.plan_completion_ratio);
 
@@ -192,15 +188,20 @@ pub fn compute_reward(signals: &RawRewardSignals) -> RewardComputation {
 
     // FASE 4: Critic unavailability penalty — pushes unverified sessions below retry threshold.
     let critic_unavailable_penalty = if signals.critic_unavailable {
-        CRITIC_UNAVAILABLE_PENALTY
+        critic_unavailable_penalty_val
     } else {
         0.0
     };
 
-    let final_reward = (stop_score * W_STOP
-        + trajectory_score * W_TRAJECTORY
-        + critic_score * W_CRITIC
-        + coherence_score * W_COHERENCE
+    // Phase 3 EvidenceGraph: small additive bonus/penalty based on evidence coverage.
+    // Range: (coverage - 0.5) * 0.05 → ±0.025 at extremes.
+    let evidence_coverage_signal = (signals.evidence_coverage - 0.5) * 0.05;
+
+    let final_reward = (stop_score * w_stop
+        + trajectory_score * w_trajectory
+        + critic_score * w_critic
+        + coherence_score * w_coherence
+        + evidence_coverage_signal
         - synthesis_penalty
         - critic_unavailable_penalty)
         .clamp(0.0, 1.0);
@@ -242,6 +243,13 @@ pub fn plugin_adjusted_reward(base_reward: f64, snapshots: &[PluginCostSnapshot]
 mod tests {
     use super::*;
 
+    fn dp() -> halcon_core::types::PolicyConfig { halcon_core::types::PolicyConfig::default() }
+
+    // Test-local aliases for backward-compat assertions.
+    const SUCCESS_THRESHOLD: f64 = 0.60;
+    const CRITIC_UNAVAILABLE_PENALTY: f64 = 0.15;
+    const CRITIC_FAIL_STOP_CAP: f64 = 0.60;
+
     fn end_turn_signals() -> RawRewardSignals {
         RawRewardSignals {
             stop_condition: StopCondition::EndTurn,
@@ -252,12 +260,13 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         }
     }
 
     #[test]
     fn end_turn_full_completion_high_reward() {
-        let result = compute_reward(&end_turn_signals());
+        let result = compute_reward(&end_turn_signals(), &dp());
         // stop_score = 1.0; trajectory fallback = 1.0; critic fallback = 1.0; coherence = 1.0
         assert!(result.final_reward > 0.80, "got {}", result.final_reward);
         assert_eq!(result.breakdown.stop_score, 1.0);
@@ -274,9 +283,10 @@ mod tests {
             plan_completion_ratio: 0.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let r_end = compute_reward(&end_turn_signals());
-        let r_synth = compute_reward(&synth);
+        let r_end = compute_reward(&end_turn_signals(), &dp());
+        let r_synth = compute_reward(&synth, &dp());
         assert!(
             r_synth.final_reward < r_end.final_reward,
             "synth={} end={}",
@@ -296,8 +306,9 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&synth);
+        let result = compute_reward(&synth, &dp());
         // stop_score = 0.70; synthesis_penalty = 0.10; final must reflect deduction
         assert!(result.final_reward < 0.95, "got {}", result.final_reward);
     }
@@ -313,8 +324,9 @@ mod tests {
             plan_completion_ratio: 0.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         assert!(result.final_reward < 0.20, "got {}", result.final_reward);
         assert_eq!(result.breakdown.stop_score, 0.0);
     }
@@ -330,9 +342,10 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let r_fail = compute_reward(&with_failure);
-        let r_base = compute_reward(&end_turn_signals());
+        let r_fail = compute_reward(&with_failure, &dp());
+        let r_base = compute_reward(&end_turn_signals(), &dp());
         assert!(r_fail.final_reward < r_base.final_reward);
     }
 
@@ -347,6 +360,7 @@ mod tests {
             plan_completion_ratio: 0.5,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let without_history = RawRewardSignals {
             stop_condition: StopCondition::MaxRounds,
@@ -357,9 +371,10 @@ mod tests {
             plan_completion_ratio: 0.5,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let r_with = compute_reward(&with_history);
-        let r_without = compute_reward(&without_history);
+        let r_with = compute_reward(&with_history, &dp());
+        let r_without = compute_reward(&without_history, &dp());
         // High round scores from RoundScorer should push trajectory above stop_score fallback
         assert!(r_with.final_reward > r_without.final_reward);
     }
@@ -375,13 +390,14 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let oscillating = RawRewardSignals {
             oscillation_penalty: 0.80,
             ..stable.clone()
         };
-        let r_stable = compute_reward(&stable);
-        let r_osc = compute_reward(&oscillating);
+        let r_stable = compute_reward(&stable, &dp());
+        let r_osc = compute_reward(&oscillating, &dp());
         assert!(r_osc.breakdown.trajectory_score < r_stable.breakdown.trajectory_score);
         assert!(r_osc.final_reward < r_stable.final_reward);
     }
@@ -397,13 +413,14 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let drifted = RawRewardSignals {
             plan_coherence_score: 0.95, // heavy drift
             ..coherent.clone()
         };
-        let r_coh = compute_reward(&coherent);
-        let r_dri = compute_reward(&drifted);
+        let r_coh = compute_reward(&coherent, &dp());
+        let r_dri = compute_reward(&drifted, &dp());
         assert!(r_dri.breakdown.coherence_score < r_coh.breakdown.coherence_score);
         assert!(r_dri.final_reward < r_coh.final_reward);
     }
@@ -419,6 +436,7 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let min_signals = RawRewardSignals {
             stop_condition: StopCondition::ProviderError,
@@ -429,9 +447,10 @@ mod tests {
             plan_completion_ratio: 0.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let r_max = compute_reward(&max_signals);
-        let r_min = compute_reward(&min_signals);
+        let r_max = compute_reward(&max_signals, &dp());
+        let r_min = compute_reward(&min_signals, &dp());
         assert!(r_max.final_reward <= 1.0, "exceeds 1.0: {}", r_max.final_reward);
         assert!(r_min.final_reward >= 0.0, "below 0.0: {}", r_min.final_reward);
     }
@@ -464,13 +483,14 @@ mod tests {
             plan_completion_ratio: 0.0, // nothing completed
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let full = RawRewardSignals {
             plan_completion_ratio: 1.0,
             ..zero.clone()
         };
-        let r_zero = compute_reward(&zero);
-        let r_full = compute_reward(&full);
+        let r_zero = compute_reward(&zero, &dp());
+        let r_full = compute_reward(&full, &dp());
         assert!(r_full.final_reward > r_zero.final_reward);
     }
 
@@ -490,8 +510,9 @@ mod tests {
             plan_completion_ratio: 0.0,            // no plan executed
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         assert_eq!(
             result.breakdown.coherence_score, 0.0,
             "coherence must be 0.0 when no plan executed (plan_completion_ratio=0.0), got {}",
@@ -512,8 +533,9 @@ mod tests {
             plan_completion_ratio: 0.8, // plan executed
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // coherence_score = 1.0 - 0.10 = 0.90
         assert!(
             result.breakdown.coherence_score > 0.85,
@@ -535,6 +557,7 @@ mod tests {
             plan_completion_ratio: 0.0, // no plan
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let end_turn_full_plan = RawRewardSignals {
             stop_condition: StopCondition::EndTurn,
@@ -545,9 +568,10 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let r_forced = compute_reward(&forced_no_plan);
-        let r_end = compute_reward(&end_turn_full_plan);
+        let r_forced = compute_reward(&forced_no_plan, &dp());
+        let r_end = compute_reward(&end_turn_full_plan, &dp());
         assert!(
             r_end.final_reward > r_forced.final_reward,
             "EndTurn+full_plan ({}) must beat ForcedSynthesis+no_plan ({})",
@@ -568,13 +592,14 @@ mod tests {
             plan_completion_ratio: 0.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
         let prov_err = RawRewardSignals {
             stop_condition: StopCondition::ProviderError,
             ..env_err.clone()
         };
-        let r_env = compute_reward(&env_err);
-        let r_prov = compute_reward(&prov_err);
+        let r_env = compute_reward(&env_err, &dp());
+        let r_prov = compute_reward(&prov_err, &dp());
         assert_eq!(r_env.breakdown.stop_score, 0.0, "EnvironmentError stop_score must be 0.0");
         assert_eq!(r_env.breakdown.stop_score, r_prov.breakdown.stop_score,
             "EnvironmentError and ProviderError must produce identical stop_score");
@@ -647,8 +672,9 @@ mod tests {
             plan_completion_ratio: 1.0, // all plan steps "completed"
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // effective_cap = 1.0 - 0.40 * 0.10 = 0.96 — almost no dampening
         // stop_score = min(1.0, 0.96) = 0.96; trajectory = 0.96; coherence = 1.0
         // critic_score = 0.25*(1-0.10) = 0.225
@@ -672,8 +698,9 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // stop_score=0.65, critic_score=0.25*(1-0.90)=0.025
         // final ≈ 0.65*0.25 + 0.65*0.30 + 0.025*0.25 + 1.0*0.20 ≈ 0.563
         // Must be below low-confidence case AND below threshold
@@ -696,8 +723,9 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // stop_score = 1.0 (no cap on success); critic_score = 0.90
         // trajectory = 1.0 (fallback to raw_stop); coherence = 1.0
         // final = 1.0*0.25 + 1.0*0.30 + 0.90*0.25 + 1.0*0.20 = 0.975
@@ -721,8 +749,9 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         assert!(
             (result.breakdown.stop_score - CRITIC_FAIL_STOP_CAP).abs() < 1e-9,
             "stop_score must equal CRITIC_FAIL_STOP_CAP at full confidence, got {}",
@@ -756,8 +785,9 @@ mod tests {
             plan_completion_ratio: 1.0,             // completed_steps == total_steps
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         assert!(
             result.final_reward > 0.80,
             "CASO 1: búsqueda con tools reales + critic=achieved debe dar reward > 0.80, got {}",
@@ -784,8 +814,9 @@ mod tests {
             plan_completion_ratio: 0.75,            // 3/4 steps completados
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // Plan incompleto reduce coherence score pero critic dice achieved
         assert!(
             result.final_reward > 0.60,
@@ -814,8 +845,9 @@ mod tests {
             plan_completion_ratio: 0.0,               // 0 tools → 0 plan steps completed
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // With proportional dampening at 70% confidence:
         // effective_cap = 1.0 - 0.40 * 0.70 = 0.72
         // raw_stop = 0.70 (EndTurn + plan_completion=0.0), already below cap
@@ -848,8 +880,9 @@ mod tests {
             plan_completion_ratio: 0.0,          // no plan = no completion
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // ForcedSynthesis stop_score ≤ 0.70, capped at 0.60 por critic_not_achieved,
         // - synthesis_penalty 0.10, critic_score = 0.25*(1-0.80) = 0.05
         // final << 0.60 → score_says_retry y critic_halt ambos deben disparar
@@ -871,7 +904,10 @@ mod tests {
 
     #[test]
     fn dynamic_cap_upper_bound_is_conservative() {
-        let upper_bound = compute_critic_fail_stop_cap();
+        let p = dp();
+        let upper_bound = compute_critic_fail_stop_cap_upper_bound(
+            SUCCESS_THRESHOLD, p.w_stop, p.w_trajectory, p.w_critic, p.w_coherence_reward,
+        );
         // CRITIC_FAIL_STOP_CAP must be at or below the upper bound (conservative)
         assert!(
             CRITIC_FAIL_STOP_CAP <= upper_bound,
@@ -886,7 +922,8 @@ mod tests {
         let cap = CRITIC_FAIL_STOP_CAP;
         let worst_critic = 0.25 * (1.0 - 1.0); // 0.0 — full-confidence failure
         let worst_coherence = 1.0;
-        let final_reward = cap * W_STOP + cap * W_TRAJECTORY + worst_critic * W_CRITIC + worst_coherence * W_COHERENCE;
+        let p = dp();
+        let final_reward = cap * p.w_stop + cap * p.w_trajectory + worst_critic * p.w_critic + worst_coherence * p.w_coherence_reward;
         assert!(
             final_reward < SUCCESS_THRESHOLD,
             "worst-case reward ({final_reward:.4}) with cap ({cap:.4}) must be below SUCCESS_THRESHOLD ({SUCCESS_THRESHOLD})"
@@ -897,13 +934,24 @@ mod tests {
 
     #[test]
     fn critic_unavailable_penalty_reduces_reward() {
-        let base = end_turn_signals();
+        // Use a moderate base where clamping won't mask the penalty.
+        let base = RawRewardSignals {
+            stop_condition: StopCondition::ForcedSynthesis,
+            round_scores: vec![0.7],
+            critic_verdict: None,
+            plan_coherence_score: 0.0,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 0.5,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 0.5, // neutral evidence signal
+        };
         let unavailable = RawRewardSignals {
             critic_unavailable: true,
             ..base.clone()
         };
-        let r_base = compute_reward(&base);
-        let r_unavailable = compute_reward(&unavailable);
+        let r_base = compute_reward(&base, &dp());
+        let r_unavailable = compute_reward(&unavailable, &dp());
         assert!(
             r_unavailable.final_reward < r_base.final_reward,
             "critic_unavailable must reduce reward: base={} unavailable={}",
@@ -929,8 +977,9 @@ mod tests {
             plan_completion_ratio: 0.7,
             plugin_snapshots: vec![],
             critic_unavailable: true,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         assert!(
             result.final_reward < SUCCESS_THRESHOLD,
             "critic_unavailable on borderline session must push below retry threshold {SUCCESS_THRESHOLD}, got {}",
@@ -957,8 +1006,9 @@ mod tests {
             plan_completion_ratio: 1.0, // all 4/4 plan steps completed
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // effective_cap = 1.0 - 0.40 * 0.30 = 0.88
         // stop_score = min(1.0, 0.88) = 0.88; trajectory = 0.88
         // critic_score = 0.25*(1-0.30) = 0.175; coherence = 1.0
@@ -983,8 +1033,9 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // effective_cap = 1.0 - 0.40 * 0.90 = 0.64
         // stop_score = min(1.0, 0.64) = 0.64; trajectory = 0.64
         // critic_score = 0.25*(1-0.90) = 0.025; coherence = 1.0
@@ -1008,8 +1059,9 @@ mod tests {
             plan_completion_ratio: 1.0,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let result = compute_reward(&signals);
+        let result = compute_reward(&signals, &dp());
         // effective_cap = 1.0 - 0.40 * 0.50 = 0.80
         let expected_cap = 1.0 - (1.0 - CRITIC_FAIL_STOP_CAP) * 0.50;
         assert!(
@@ -1021,11 +1073,11 @@ mod tests {
         let low_conf = compute_reward(&RawRewardSignals {
             critic_verdict: Some((false, 0.30)),
             ..signals.clone()
-        });
+        }, &dp());
         let high_conf = compute_reward(&RawRewardSignals {
             critic_verdict: Some((false, 0.90)),
             ..signals.clone()
-        });
+        }, &dp());
         assert!(
             result.final_reward < low_conf.final_reward,
             "50% conf reward ({}) must be < 30% conf reward ({})",
@@ -1040,10 +1092,94 @@ mod tests {
 
     #[test]
     fn weights_sum_to_one() {
-        let sum = W_STOP + W_TRAJECTORY + W_CRITIC + W_COHERENCE;
+        let p = dp();
+        let sum = p.w_stop + p.w_trajectory + p.w_critic + p.w_coherence_reward;
         assert!(
             (sum - 1.0).abs() < 1e-9,
             "reward weights must sum to 1.0, got {sum}"
         );
+    }
+
+    // ── Phase 3 EvidenceGraph Governance tests ──
+
+    #[test]
+    fn reward_evidence_coverage_full_bonus() {
+        // Full coverage (1.0) → bonus = (1.0 - 0.5) * 0.05 = +0.025
+        let signals = RawRewardSignals {
+            stop_condition: StopCondition::EndTurn,
+            round_scores: vec![],
+            critic_verdict: Some((true, 0.9)),
+            plan_coherence_score: 0.0,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 1.0,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 1.0,
+        };
+        let with_full = compute_reward(&signals, &dp());
+
+        let zero_coverage = RawRewardSignals {
+            evidence_coverage: 0.0,
+            ..signals.clone()
+        };
+        let with_zero = compute_reward(&zero_coverage, &dp());
+
+        // Difference should be ~0.05 (full bonus - full penalty = +0.025 - (-0.025))
+        let diff = with_full.final_reward - with_zero.final_reward;
+        assert!(
+            (diff - 0.05).abs() < 1e-9,
+            "full vs zero coverage should differ by 0.05, got {diff}"
+        );
+    }
+
+    #[test]
+    fn reward_evidence_coverage_half_is_neutral() {
+        // 50% coverage → bonus = (0.5 - 0.5) * 0.05 = 0.0
+        let signals = RawRewardSignals {
+            stop_condition: StopCondition::EndTurn,
+            round_scores: vec![],
+            critic_verdict: Some((true, 0.9)),
+            plan_coherence_score: 0.0,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 1.0,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 0.5,
+        };
+        let with_half = compute_reward(&signals, &dp());
+
+        // Compare with evidence_coverage=0.5 (neutral) to ensure it's the baseline
+        let neutral = RawRewardSignals {
+            evidence_coverage: 0.5,
+            ..signals.clone()
+        };
+        let neutral_result = compute_reward(&neutral, &dp());
+        assert!(
+            (with_half.final_reward - neutral_result.final_reward).abs() < 1e-9,
+            "50% coverage should be exactly neutral"
+        );
+    }
+
+    #[test]
+    fn reward_evidence_coverage_signal_bounded() {
+        // Maximum signal magnitude is ±0.025 — verify it doesn't blow up the reward.
+        let base = RawRewardSignals {
+            stop_condition: StopCondition::EndTurn,
+            round_scores: vec![],
+            critic_verdict: Some((true, 1.0)),
+            plan_coherence_score: 0.0,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 1.0,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 0.5, // neutral
+        };
+        let neutral_reward = compute_reward(&base, &dp()).final_reward;
+
+        let full = compute_reward(&RawRewardSignals { evidence_coverage: 1.0, ..base.clone() }, &dp());
+        let zero = compute_reward(&RawRewardSignals { evidence_coverage: 0.0, ..base.clone() }, &dp());
+
+        assert!((full.final_reward - neutral_reward).abs() <= 0.026, "Full coverage bonus <= 0.025");
+        assert!((neutral_reward - zero.final_reward).abs() <= 0.026, "Zero coverage penalty <= 0.025");
     }
 }

@@ -29,12 +29,6 @@ impl HybridRetriever {
         }
     }
 
-    #[allow(dead_code)] // Wired when an EmbeddingProvider is implemented.
-    pub fn with_embedding_provider(mut self, provider: Box<dyn EmbeddingProvider>) -> Self {
-        self.embedding_provider = Some(provider);
-        self
-    }
-
     pub fn with_rrf_k(mut self, k: f64) -> Self {
         self.rrf_k = k;
         self

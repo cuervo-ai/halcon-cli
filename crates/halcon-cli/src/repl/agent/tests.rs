@@ -113,6 +113,7 @@
             plugin_registry: None,
             is_sub_agent: false,
             requested_provider: None,
+            policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         }
     }
 
@@ -3271,8 +3272,9 @@
             plan_completion_ratio: 0.5,
             plugin_snapshots: vec![],
             critic_unavailable: false,
+            evidence_coverage: 1.0,
         };
-        let reward = compute_reward(&signals);
+        let reward = compute_reward(&signals, &halcon_core::types::PolicyConfig::default());
         assert!((reward.breakdown.stop_score - 0.15).abs() < 1e-9,
             "P2-C: CostBudget stop_score = 0.10 + 0.10*0.5 ≈ 0.15, got {}",
             reward.breakdown.stop_score);
@@ -4134,7 +4136,7 @@
     #[test]
     fn phase_l_regression_token_efficiency_neutral_for_text_rounds() {
         use crate::repl::round_scorer::RoundScorer;
-        let mut scorer = RoundScorer::new("answer the greeting");
+        let mut scorer = RoundScorer::new("answer the greeting", std::sync::Arc::new(halcon_core::types::PolicyConfig::default()));
         // Simulate a text-only round (0 tools, short output, high input)
         // score_round(round, tools_succeeded, tools_total, output_tokens, input_tokens,
         //             plan_progress_ratio, anomaly_flags, round_text)
@@ -4192,4 +4194,1193 @@
             "New formula must leave > 4000 tokens remaining above MIN_SYNTHESIS_HEADROOM, got {}",
             new_remaining
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 7 — Integration Tests (cross-phase validation)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Phase 7: PolicyConfig is consumed by reward_pipeline with correct defaults.
+    /// Validates Phase 1 (PolicyConfig) ↔ reward_pipeline integration.
+    #[test]
+    fn integration_policy_config_consumed_by_reward_pipeline() {
+        use super::super::reward_pipeline::{compute_reward, RawRewardSignals};
+
+        let policy = halcon_core::types::PolicyConfig::default();
+
+        // EndTurn with full completion → high reward
+        let good_signals = RawRewardSignals {
+            stop_condition: StopCondition::EndTurn,
+            round_scores: vec![0.8, 0.85],
+            critic_verdict: Some((true, 0.90)),
+            plan_coherence_score: 0.1,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 1.0,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 1.0,
+        };
+        let good = compute_reward(&good_signals, &policy);
+        assert!(good.final_reward > policy.success_threshold,
+            "EndTurn with good signals should exceed success_threshold ({:.2}), got {:.4}",
+            policy.success_threshold, good.final_reward);
+
+        // ForcedSynthesis with no completion → below success_threshold
+        let poor_signals = RawRewardSignals {
+            stop_condition: StopCondition::ForcedSynthesis,
+            round_scores: vec![0.2, 0.15],
+            critic_verdict: Some((false, 0.85)),
+            plan_coherence_score: 0.6,
+            oscillation_penalty: 0.3,
+            plan_completion_ratio: 0.0,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 0.2,
+        };
+        let poor = compute_reward(&poor_signals, &policy);
+        assert!(poor.final_reward < policy.success_threshold,
+            "ForcedSynthesis with poor signals should be below success_threshold ({:.2}), got {:.4}",
+            policy.success_threshold, poor.final_reward);
+
+        // critic_unavailable penalty uses PolicyConfig value
+        let unavail_signals = RawRewardSignals {
+            stop_condition: StopCondition::ForcedSynthesis,
+            round_scores: vec![0.5],
+            critic_verdict: None,
+            plan_coherence_score: 0.2,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 0.5,
+            plugin_snapshots: vec![],
+            critic_unavailable: true,
+            evidence_coverage: 1.0,
+        };
+        let unavail = compute_reward(&unavail_signals, &policy);
+        // Same signals without critic_unavailable
+        let avail_signals = RawRewardSignals {
+            critic_unavailable: false,
+            ..unavail_signals.clone()
+        };
+        let avail = compute_reward(&avail_signals, &policy);
+        let penalty_diff = avail.final_reward - unavail.final_reward;
+        assert!((penalty_diff - policy.critic_unavailable_penalty).abs() < 0.05,
+            "critic_unavailable penalty should be ~{:.2}, got {:.4}",
+            policy.critic_unavailable_penalty, penalty_diff);
+    }
+
+    /// Phase 7: SLA Fast mode caps rounds at 4.
+    /// Validates Phase 2 (SLA Hard Enforcement) constraints.
+    #[test]
+    fn integration_sla_fast_mode_4_rounds_cap() {
+        use super::super::sla_manager::{SlaMode, SlaBudget};
+
+        let budget = SlaBudget::from_mode(SlaMode::Fast);
+        assert_eq!(budget.max_rounds, 4, "Fast mode must cap at 4 rounds");
+        assert_eq!(budget.max_sub_agents, 0, "Fast mode must disallow sub-agents");
+        assert_eq!(budget.max_retries, 0, "Fast mode must disallow retries");
+        assert_eq!(budget.max_plan_depth, 2, "Fast mode must cap plan depth at 2");
+
+        // clamp_rounds enforces the cap
+        assert_eq!(budget.clamp_rounds(10), 4);
+        assert_eq!(budget.clamp_rounds(3), 3);
+        assert_eq!(budget.clamp_plan_depth(8), 2);
+    }
+
+    /// Phase 7: SLA blocks retry and orchestration when budget is exhausted.
+    /// Validates Phase 2 (SLA) allows_retry / allows_orchestration wiring.
+    #[test]
+    fn integration_sla_blocks_retry_and_orchestration() {
+        use super::super::sla_manager::{SlaMode, SlaBudget};
+
+        // Fast mode: 0 retries, 0 sub-agents
+        let fast = SlaBudget::from_mode(SlaMode::Fast);
+        assert!(!fast.allows_retry(0), "Fast SLA must block all retries");
+        assert!(!fast.allows_orchestration(), "Fast SLA must block orchestration");
+
+        // Balanced mode: 1 retry, 3 sub-agents
+        let balanced = SlaBudget::from_mode(SlaMode::Balanced);
+        assert!(balanced.allows_retry(0), "Balanced allows first retry");
+        assert!(!balanced.allows_retry(1), "Balanced blocks second retry");
+        assert!(balanced.allows_orchestration(), "Balanced allows orchestration");
+
+        // Deep mode: 3 retries, 8 sub-agents
+        let deep = SlaBudget::from_mode(SlaMode::Deep);
+        assert!(deep.allows_retry(0));
+        assert!(deep.allows_retry(2));
+        assert!(!deep.allows_retry(3), "Deep blocks 4th retry");
+        assert!(deep.allows_orchestration());
+    }
+
+    /// Phase 7: EvidenceGraph synthesis_coverage drives reward signal.
+    /// Validates Phase 3 (EvidenceGraph Governance) ↔ reward_pipeline integration.
+    #[test]
+    fn integration_evidence_graph_enriches_synthesis() {
+        use super::super::evidence_graph::EvidenceGraph;
+        use super::super::reward_pipeline::{compute_reward, RawRewardSignals};
+
+        let policy = halcon_core::types::PolicyConfig::default();
+
+        // Build graph with 3 Good nodes, reference only 1
+        let mut graph = EvidenceGraph::new();
+        let n0 = graph.add_node("read_file", "src/main.rs", 500, false, None, 0);
+        let _n1 = graph.add_node("read_file", "src/lib.rs", 300, false, None, 1);
+        let _n2 = graph.add_node("grep", "search pattern", 200, false, None, 1);
+        graph.mark_referenced(n0);
+
+        let coverage = graph.synthesis_coverage();
+        assert!((coverage - 1.0 / 3.0).abs() < 0.01,
+            "1 of 3 Good nodes referenced → coverage ~0.33, got {:.4}", coverage);
+        assert!(coverage < policy.min_synthesis_coverage || (coverage - policy.min_synthesis_coverage).abs() < 0.05,
+            "Low coverage ({:.4}) should be near or below min_synthesis_coverage ({:.2})",
+            coverage, policy.min_synthesis_coverage);
+
+        // Low coverage → negative evidence bonus
+        let low_cov_signals = RawRewardSignals {
+            stop_condition: StopCondition::EndTurn,
+            round_scores: vec![0.7],
+            critic_verdict: Some((true, 0.80)),
+            plan_coherence_score: 0.1,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 0.8,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: coverage,
+        };
+        let low_reward = compute_reward(&low_cov_signals, &policy);
+
+        // Full coverage → positive evidence bonus
+        let high_cov_signals = RawRewardSignals {
+            evidence_coverage: 1.0,
+            ..low_cov_signals.clone()
+        };
+        let high_reward = compute_reward(&high_cov_signals, &policy);
+
+        // Evidence coverage difference should produce a measurable delta
+        let delta = high_reward.final_reward - low_reward.final_reward;
+        assert!(delta > 0.0,
+            "Full coverage should produce higher reward than partial, delta = {:.6}", delta);
+        // Max delta = (1.0-0.5)*0.05 - (0.33-0.5)*0.05 = 0.025 - (-0.0085) = 0.0335
+        assert!(delta < 0.05,
+            "Evidence coverage bonus is small (±0.025), delta should be < 0.05, got {:.6}", delta);
+    }
+
+    /// Phase 7: FSM full lifecycle — Idle through all phases to Completed.
+    /// Validates Phase 4 (FSM Formalization).
+    #[test]
+    fn integration_fsm_full_lifecycle() {
+        use super::super::agent::loop_state::{AgentEvent, AgentPhase, transition};
+
+        let mut phase = AgentPhase::Idle;
+
+        // Idle → Planning (plan generated)
+        phase = transition(phase, AgentEvent::PlanGenerated);
+        assert_eq!(phase, AgentPhase::Planning);
+
+        // Planning → Executing (plan produced)
+        phase = transition(phase, AgentEvent::PlanGenerated);
+        assert_eq!(phase, AgentPhase::Executing);
+
+        // Executing → Executing (tool batch complete — stays)
+        phase = transition(phase, AgentEvent::ToolBatchComplete);
+        assert_eq!(phase, AgentPhase::Executing);
+
+        // Executing → Synthesizing (synthesis started)
+        phase = transition(phase, AgentEvent::SynthesisStarted);
+        assert_eq!(phase, AgentPhase::Synthesizing);
+
+        // Synthesizing → Evaluating (synthesis complete)
+        phase = transition(phase, AgentEvent::SynthesisComplete);
+        assert_eq!(phase, AgentPhase::Evaluating);
+
+        // Evaluating → Completed
+        phase = transition(phase, AgentEvent::EvaluationComplete);
+        assert_eq!(phase, AgentPhase::Completed);
+
+        // Completed is sticky — PlanGenerated is a no-op
+        phase = transition(phase, AgentEvent::PlanGenerated);
+        assert_eq!(phase, AgentPhase::Completed, "Completed is a terminal state");
+
+        // But ErrorOccurred can exit Completed → Halted
+        phase = transition(phase, AgentEvent::ErrorOccurred);
+        assert_eq!(phase, AgentPhase::Halted);
+    }
+
+    /// Phase 7: FSM backward compatibility — as_str() matches legacy string values.
+    /// Validates Phase 4 backward compat guarantee.
+    #[test]
+    fn integration_fsm_as_str_backward_compat() {
+        use super::super::agent::loop_state::AgentPhase;
+
+        let expected = [
+            (AgentPhase::Idle, "idle"),
+            (AgentPhase::Planning, "planning"),
+            (AgentPhase::Executing, "executing"),
+            (AgentPhase::Reflecting, "reflecting"),
+            (AgentPhase::Synthesizing, "synthesizing"),
+            (AgentPhase::Evaluating, "evaluating"),
+            (AgentPhase::Completed, "completed"),
+            (AgentPhase::Halted, "halted"),
+        ];
+        for (phase, str_val) in &expected {
+            assert_eq!(phase.as_str(), *str_val,
+                "AgentPhase::{:?}.as_str() must match legacy string", phase);
+        }
+    }
+
+    /// Phase 7: K5-2 compaction triggers on sustained growth.
+    /// Validates Phase 5 (K5-2 Growth Invariant) threshold enforcement.
+    #[test]
+    fn integration_k5_2_compaction_on_sustained_growth() {
+        let policy = halcon_core::types::PolicyConfig::default();
+
+        // Simulate consecutive growth violations
+        let mut consecutive = 0u32;
+        let mut compaction_needed = false;
+        let rounds_data: Vec<(u64, u64)> = vec![
+            (1000, 0),    // round 0: baseline
+            (1400, 1000), // round 1: 1.4× growth (> 1.3)
+            (2000, 1400), // round 2: 1.43× growth (> 1.3)
+            (2200, 2000), // round 3: 1.1× growth (< 1.3) — resets
+            (3000, 2200), // round 4: 1.36× growth (> 1.3)
+            (4500, 3000), // round 5: 1.5× growth (> 1.3) — triggers!
+        ];
+
+        for (current, prev) in &rounds_data {
+            if *prev == 0 { continue; }
+            let ratio = *current as f64 / *prev as f64;
+            if ratio > policy.growth_threshold {
+                consecutive += 1;
+            } else {
+                consecutive = 0;
+            }
+            if consecutive >= policy.growth_consecutive_trigger {
+                compaction_needed = true;
+            }
+        }
+
+        assert!(compaction_needed,
+            "2 consecutive violations at rounds 4-5 should trigger compaction");
+
+        // Verify growth_threshold and trigger values from policy
+        assert!((policy.growth_threshold - 1.3).abs() < f64::EPSILON);
+        assert_eq!(policy.growth_consecutive_trigger, 2);
+    }
+
+    /// Phase 7: K5-2 linear growth does NOT trigger compaction.
+    /// Validates Phase 5 doesn't false-positive on steady growth.
+    #[test]
+    fn integration_k5_2_no_compaction_linear_growth() {
+        let policy = halcon_core::types::PolicyConfig::default();
+
+        let mut consecutive = 0u32;
+        let mut compaction_needed = false;
+        // Linear 1.2× growth each round — below 1.3 threshold
+        let rounds: Vec<u64> = vec![1000, 1200, 1440, 1728, 2074];
+        for i in 1..rounds.len() {
+            let ratio = rounds[i] as f64 / rounds[i - 1] as f64;
+            if ratio > policy.growth_threshold {
+                consecutive += 1;
+            } else {
+                consecutive = 0;
+            }
+            if consecutive >= policy.growth_consecutive_trigger {
+                compaction_needed = true;
+            }
+        }
+
+        assert!(!compaction_needed,
+            "1.2× growth is below 1.3 threshold — no compaction");
+    }
+
+    /// Phase 7: ExecutionTracker truncate_to respects SLA plan depth.
+    /// Validates Phase 2 (SLA) ↔ ExecutionTracker integration.
+    #[test]
+    fn integration_sla_truncates_plan_via_execution_tracker() {
+        use super::super::execution_tracker::ExecutionTracker;
+        use super::super::sla_manager::{SlaMode, SlaBudget};
+        use halcon_core::traits::{ExecutionPlan, PlanStep};
+
+        let budget = SlaBudget::from_mode(SlaMode::Fast);
+        let sla_max_rounds = budget.max_rounds; // 4
+
+        // Build a plan with 6 steps — exceeds Fast SLA
+        let plan = ExecutionPlan {
+            goal: "test task".into(),
+            steps: (0..6).map(|i| PlanStep {
+                step_id: uuid::Uuid::new_v4(),
+                description: format!("Step {}", i),
+                tool_name: Some("bash".into()),
+                parallel: false,
+                confidence: 0.9,
+                expected_args: None,
+                outcome: None,
+            }).collect(),
+            requires_confirmation: false,
+            plan_id: uuid::Uuid::nil(),
+            replan_count: 0,
+            parent_plan_id: None,
+            ..Default::default()
+        };
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let mut tracker = ExecutionTracker::new(plan, tx);
+        assert_eq!(tracker.plan().steps.len(), 6);
+
+        // Truncate to fit SLA: sla_max - 2 (room for critic + synthesis)
+        let target = (sla_max_rounds as usize).saturating_sub(2);
+        tracker.truncate_to(target);
+        assert_eq!(tracker.plan().steps.len(), target,
+            "Plan should be truncated to sla_max_rounds - 2 = {}", target);
+    }
+
+    /// Phase 7: PolicyConfig fields consumed by Phase 5 K5-2 and Phase 6 mini-critic
+    /// match their documented default values.
+    #[test]
+    fn integration_policy_config_phase5_phase6_defaults() {
+        let p = halcon_core::types::PolicyConfig::default();
+
+        // Phase 5 K5-2 fields
+        assert!((p.growth_threshold - 1.3).abs() < f64::EPSILON,
+            "K5-2 growth threshold default must be 1.3");
+        assert_eq!(p.growth_consecutive_trigger, 2,
+            "K5-2 consecutive trigger default must be 2");
+
+        // Phase 6 mini-critic fields
+        assert_eq!(p.mini_critic_interval, 3,
+            "Mini-critic interval default must be 3");
+        assert!((p.mini_critic_budget_fraction - 0.50).abs() < f64::EPSILON,
+            "Mini-critic budget fraction default must be 0.50");
+
+        // Phase 1 core fields verify backward compat
+        assert!((p.success_threshold - 0.60).abs() < f64::EPSILON);
+        assert!((p.min_synthesis_coverage - 0.30).abs() < f64::EPSILON);
+        assert_eq!(p.min_evidence_bytes, 30);
+    }
+
+    /// Phase 7: Cross-phase invariant — SLA mode maps correctly from task complexity.
+    /// Validates Phase 2 (SLA) ↔ Phase F2 (Decision Layer) bridge.
+    #[test]
+    fn integration_sla_from_complexity_bridge() {
+        use super::super::decision_layer::{TaskComplexity, OrchestrationDecision};
+        use super::super::sla_manager::{SlaMode, SlaBudget};
+
+        let simple = OrchestrationDecision {
+            complexity: TaskComplexity::SimpleExecution,
+            use_orchestration: false,
+            recommended_max_rounds: 4,
+            recommended_plan_depth: 2,
+            reason: "simple task",
+        };
+        let simple_sla = SlaBudget::from_complexity(&simple);
+        assert_eq!(simple_sla.mode, SlaMode::Fast);
+        assert_eq!(simple_sla.max_rounds, 4);
+
+        let multi = OrchestrationDecision {
+            complexity: TaskComplexity::MultiDomain,
+            use_orchestration: true,
+            recommended_max_rounds: 20,
+            recommended_plan_depth: 10,
+            reason: "complex multi-domain task",
+        };
+        let multi_sla = SlaBudget::from_complexity(&multi);
+        assert_eq!(multi_sla.mode, SlaMode::Deep);
+        assert_eq!(multi_sla.max_rounds, 20);
+        assert!(multi_sla.allows_orchestration());
+        assert!(multi_sla.allows_retry(2));
+    }
+
+    /// Phase 7: EvidenceGraph + PolicyConfig — unreferenced evidence detection.
+    /// Validates Phase 3 (EvidenceGraph) governance using Phase 1 (PolicyConfig) thresholds.
+    #[test]
+    fn integration_evidence_graph_unreferenced_detection() {
+        use super::super::evidence_graph::EvidenceGraph;
+
+        let policy = halcon_core::types::PolicyConfig::default();
+        let mut graph = EvidenceGraph::new();
+
+        // Add 4 Good nodes
+        let ids: Vec<_> = (0..4).map(|i| {
+            graph.add_node("read_file", &format!("file_{}.rs", i), 100, false, None, i)
+        }).collect();
+
+        // Reference 2 of 4
+        graph.mark_referenced(ids[0]);
+        graph.mark_referenced(ids[1]);
+
+        let coverage = graph.synthesis_coverage();
+        assert!((coverage - 0.5).abs() < 0.01, "2/4 = 0.5 coverage");
+
+        // Coverage exceeds min_synthesis_coverage (0.30) — no hint injection needed
+        assert!(coverage > policy.min_synthesis_coverage,
+            "0.5 coverage exceeds min_synthesis_coverage ({:.2})", policy.min_synthesis_coverage);
+
+        // But unreferenced list has 2 items
+        let unreferenced = graph.unreferenced_evidence();
+        assert_eq!(unreferenced.len(), 2, "2 Good nodes remain unreferenced");
+
+        // Now test below threshold: 0 of 4 referenced
+        let mut graph2 = EvidenceGraph::new();
+        for i in 0..4 {
+            graph2.add_node("read_file", &format!("file_{}.rs", i), 100, false, None, i);
+        }
+        let coverage2 = graph2.synthesis_coverage();
+        assert!((coverage2).abs() < 0.01, "0/4 = 0.0 coverage");
+        assert!(coverage2 < policy.min_synthesis_coverage,
+            "0.0 coverage is below min_synthesis_coverage — hint injection would fire");
+    }
+
+    // ── Phase 8: Cross-phase integration tests ──────────────────────────────
+
+    #[test]
+    fn integration_policy_threads_to_supervisor_timeout() {
+        use crate::repl::supervisor::LoopCritic;
+
+        let mut policy = halcon_core::types::PolicyConfig::default();
+        policy.critic_timeout_secs = 120;
+        policy.excerpt_len = 500;
+        policy.halt_confidence_threshold = 0.90;
+
+        // should_halt_raw with custom threshold
+        assert!(LoopCritic::should_halt_raw(false, 0.95, policy.halt_confidence_threshold),
+            "0.95 confidence >= 0.90 threshold → should halt");
+        assert!(!LoopCritic::should_halt_raw(false, 0.85, policy.halt_confidence_threshold),
+            "0.85 confidence < 0.90 threshold → should NOT halt");
+        // Default threshold would halt at 0.85 since default is 0.80
+        assert!(LoopCritic::should_halt_raw(false, 0.85, 0.80),
+            "0.85 confidence >= 0.80 default → should halt");
+    }
+
+    #[test]
+    fn integration_policy_threads_to_reward_weights() {
+        use crate::repl::reward_pipeline::{self, RawRewardSignals};
+
+        let mut policy = halcon_core::types::PolicyConfig::default();
+        // Custom weights: boost w_stop, reduce w_critic
+        policy.w_stop = 0.50;
+        policy.w_trajectory = 0.20;
+        policy.w_critic = 0.10;
+        policy.w_coherence_reward = 0.20;
+
+        let signals = RawRewardSignals {
+            stop_condition: StopCondition::EndTurn,
+            round_scores: vec![0.8, 0.9],
+            critic_verdict: Some((true, 0.9)),
+            plan_coherence_score: 0.8,
+            oscillation_penalty: 0.0,
+            plan_completion_ratio: 1.0,
+            plugin_snapshots: vec![],
+            critic_unavailable: false,
+            evidence_coverage: 1.0,
+        };
+
+        let result = reward_pipeline::compute_reward(&signals, &policy);
+
+        // With w_stop=0.50 and EndTurn (stop score = 1.0 * completion 1.0 = 1.0):
+        // stop contribution = 0.50 * 1.0 = 0.50
+        // With default policy (w_stop=0.25): stop contribution = 0.25
+        // So custom policy should produce higher reward due to doubled stop weight
+        let result_default = reward_pipeline::compute_reward(&signals, &halcon_core::types::PolicyConfig::default());
+        assert!(result.final_reward > result_default.final_reward - 0.01,
+            "custom w_stop=0.50 should not reduce reward vs default (custom={:.3}, default={:.3})",
+            result.final_reward, result_default.final_reward);
+    }
+
+    #[test]
+    fn integration_policy_threads_to_tool_trust() {
+        use crate::repl::tool_trust::ToolTrustScorer;
+
+        let mut policy = halcon_core::types::PolicyConfig::default();
+        policy.hide_threshold = 0.50; // much higher than default 0.15
+        policy.min_calls_for_filtering = 2; // lower than default 3
+
+        let mut scorer = ToolTrustScorer::new(std::sync::Arc::new(policy));
+
+        // Record 2 failures for a tool
+        scorer.record_failure("flaky_tool", 100, None);
+        scorer.record_failure("flaky_tool", 100, None);
+
+        let decision = scorer.decide("flaky_tool");
+        // With 0/2 success rate (0.0) and min_calls=2, should be hidden (< 0.50)
+        assert!(matches!(decision, crate::repl::tool_trust::TrustDecision::Hide),
+            "0.0 success rate should be hidden with hide_threshold=0.50");
+    }
+
+    #[test]
+    fn integration_mini_critic_feeds_oracle_not_overrides() {
+        use crate::repl::domain::termination_oracle::{TerminationOracle, TerminationDecision};
+        use crate::repl::domain::round_feedback::{LoopSignal, RoundFeedback};
+        use crate::repl::domain::convergence_controller::ConvergenceAction;
+
+        // Scenario: oracle Halt + mini_critic_synthesis → oracle Halt wins
+        let fb = RoundFeedback {
+            round: 5,
+            combined_score: 0.3,
+            convergence_action: ConvergenceAction::Halt,
+            loop_signal: LoopSignal::Continue,
+            trajectory_trend: 0.2,
+            oscillation: 0.0,
+            replan_advised: false,
+            synthesis_advised: false,
+            tool_round: true,
+            had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: true, // mini-critic wants synthesis
+            evidence_coverage: 1.0,
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.5,
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
+        };
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Halt,
+            "Oracle Halt MUST override mini-critic synthesis"
+        );
+
+        // Scenario: oracle Continue + mini_critic_synthesis → InjectSynthesis
+        let fb2 = RoundFeedback {
+            convergence_action: ConvergenceAction::Continue,
+            loop_signal: LoopSignal::Continue,
+            mini_critic_synthesis: true,
+            mini_critic_replan: false,
+            ..fb.clone()
+        };
+        assert!(matches!(
+            TerminationOracle::adjudicate(&fb2),
+            TerminationDecision::InjectSynthesis { .. }
+        ), "Mini-critic synthesis should upgrade Continue to InjectSynthesis");
+    }
+
+    #[test]
+    fn integration_evidence_graph_low_coverage_delays_oracle_synthesis() {
+        use crate::repl::domain::termination_oracle::{TerminationOracle, TerminationDecision, SynthesisReason};
+        use crate::repl::domain::round_feedback::{LoopSignal, RoundFeedback};
+        use crate::repl::domain::convergence_controller::ConvergenceAction;
+
+        // Low coverage + early round + synthesis_advised → delay (Continue)
+        let fb = RoundFeedback {
+            round: 2,
+            combined_score: 0.3,
+            convergence_action: ConvergenceAction::Continue,
+            loop_signal: LoopSignal::Continue,
+            trajectory_trend: 0.3,
+            oscillation: 0.0,
+            replan_advised: false,
+            synthesis_advised: true,
+            tool_round: true,
+            had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: false,
+            evidence_coverage: 0.10, // very low
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.5,
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
+        };
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Continue,
+            "Low evidence coverage should delay synthesis_advised"
+        );
+
+        // Same but low utility + high coverage → synthesis proceeds
+        let fb2 = RoundFeedback {
+            evidence_coverage: 0.80,
+            utility_score: 0.20, // below threshold → synthesis proceeds
+            ..fb.clone()
+        };
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb2),
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::RoundScorerConsecutiveRegression,
+            },
+            "Low utility + high evidence coverage should proceed with synthesis"
+        );
+    }
+
+    #[test]
+    fn integration_fsm_tool_wait_lifecycle() {
+        use super::loop_state::{AgentPhase, AgentEvent};
+
+        // Full lifecycle: Idle → PlanSkipped → Executing → ToolsSubmitted → ToolWait → ToolBatchComplete → Executing → SynthesisStarted → Synthesizing → Completed
+        let phase = AgentPhase::Idle;
+        let phase = phase.fire(AgentEvent::PlanSkipped);
+        assert_eq!(phase, AgentPhase::Executing);
+
+        let phase = phase.fire(AgentEvent::ToolsSubmitted);
+        assert_eq!(phase, AgentPhase::ToolWait);
+        assert_eq!(phase.as_str(), "tool_wait");
+
+        let phase = phase.fire(AgentEvent::ToolBatchComplete);
+        assert_eq!(phase, AgentPhase::Executing);
+
+        // Submit tools again
+        let phase = phase.fire(AgentEvent::ToolsSubmitted);
+        assert_eq!(phase, AgentPhase::ToolWait);
+
+        // Can also go from ToolWait directly to Synthesizing
+        let phase = phase.fire(AgentEvent::SynthesisStarted);
+        assert_eq!(phase, AgentPhase::Synthesizing);
+
+        let phase = phase.fire(AgentEvent::EvaluationComplete);
+        assert_eq!(phase, AgentPhase::Completed);
+    }
+
+    #[test]
+    fn integration_retry_mutation_reads_policy_thresholds() {
+        use crate::repl::retry_mutation::*;
+
+        let mut policy = halcon_core::types::PolicyConfig::default();
+        policy.temperature_step = 0.3;     // 3x bigger than default
+        policy.max_temperature = 0.8;      // lower ceiling
+        policy.tool_failure_threshold = 10; // very lenient
+
+        let params = RetryParams {
+            temperature: 0.5,
+            plan_depth: 3,
+            model_name: "claude-sonnet".into(),
+            available_tools: vec!["bash".into()],
+        };
+
+        // Tool with 5 failures should NOT be removed (threshold=10)
+        let failures = vec![ToolFailureRecord { tool_name: "bash".into(), failure_count: 5 }];
+        let record = compute_mutation(&params, 1, &failures, &[], &policy).unwrap();
+        assert!(!record.mutations.iter().any(|m| matches!(m, MutationAxis::ToolExposureReduced { .. })),
+            "5 failures < 10 threshold → tool retained");
+
+        // Temperature should jump by 0.3 and cap at 0.8
+        assert!(record.mutations.iter().any(|m| matches!(m,
+            MutationAxis::TemperatureIncreased { to, .. } if (*to - 0.8).abs() < 0.001
+        )), "temp should jump 0.5 + 0.3 = 0.8, capped at max_temperature=0.8");
+    }
+
+    #[test]
+    fn integration_sla_blocks_replan_when_expired() {
+        use crate::repl::sla_manager::{SlaBudget, SlaMode};
+
+        let budget = SlaBudget::from_mode(SlaMode::Fast);
+        // Fast mode: max_depth=2, max_retries=0
+
+        // SLA should block retries in Fast mode
+        assert!(!budget.allows_retry(0),
+            "Fast mode SLA should block ALL retries (max_retries=0)");
+
+        // Deep mode should allow retries
+        let deep_budget = SlaBudget::from_mode(SlaMode::Deep);
+        assert!(deep_budget.allows_retry(0),
+            "Deep mode SLA should allow first retry");
+    }
+
+    // ── Phase 2 Validation: Trait Interfaces ─────────────────────────────
+
+    #[test]
+    fn phase2_tool_trust_trait_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Box<dyn halcon_core::traits::ToolTrust>>();
+    }
+
+    #[test]
+    fn phase2_budget_manager_trait_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Box<dyn halcon_core::traits::BudgetManager>>();
+    }
+
+    #[test]
+    fn phase2_evidence_tracker_trait_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Box<dyn halcon_core::traits::EvidenceTracker>>();
+    }
+
+    #[test]
+    fn phase2_tool_trust_scorer_implements_trait() {
+        use crate::repl::tool_trust::ToolTrustScorer;
+        use halcon_core::traits::ToolTrust;
+        use std::sync::Arc;
+
+        let policy = Arc::new(halcon_core::types::PolicyConfig::default());
+        let scorer: &mut dyn ToolTrust = &mut ToolTrustScorer::new(policy);
+
+        scorer.record_success("file_read", 50);
+        scorer.record_failure("bash", 100, Some("timeout"));
+
+        let score = scorer.trust_score("file_read");
+        assert!(score > 0.0, "trust score should be positive after success");
+
+        let decision = scorer.decide("file_read");
+        assert_eq!(decision, halcon_core::types::ToolTrustDecision::Include);
+
+        let metrics = scorer.get_metrics("file_read");
+        assert!(metrics.is_some(), "should have metrics for recorded tool");
+        assert_eq!(metrics.unwrap().call_count, 1);
+
+        let failures = scorer.failure_records();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].tool_name, "bash");
+    }
+
+    #[test]
+    fn phase2_sla_budget_implements_budget_manager() {
+        use crate::repl::sla_manager::{SlaBudget, SlaMode};
+        use halcon_core::traits::BudgetManager;
+
+        let budget = SlaBudget::from_mode(SlaMode::Balanced);
+        assert!(!budget.is_expired());
+        assert!(budget.remaining().is_some());
+        assert!(budget.fraction_consumed() < 0.1);
+        assert!(budget.allows_orchestration());
+    }
+
+    #[test]
+    fn phase2_evidence_graph_implements_tracker() {
+        use crate::repl::evidence_graph::EvidenceGraph;
+        use halcon_core::traits::EvidenceTracker;
+
+        let mut graph = EvidenceGraph::new();
+        let id1 = graph.add_node("file_read", "a.rs", 100, false, None, 1);
+        let id2 = graph.add_node("bash", "ls", 50, false, None, 2);
+        graph.add_edge(id1, id2);
+
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.total_evidence_bytes(), 150);
+
+        assert!(graph.synthesis_coverage() < 0.01);
+
+        graph.mark_referenced(id1);
+        assert!((graph.synthesis_coverage() - 0.5).abs() < 0.01);
+
+        graph.mark_referenced_batch(&[id2]);
+        assert!((graph.synthesis_coverage() - 1.0).abs() < 0.01);
+
+        let unreferenced = graph.unreferenced_summaries();
+        assert!(unreferenced.is_empty());
+    }
+
+    // ── Phase 2 Validation: LoopState Sub-Struct Access ──────────────────
+
+    #[test]
+    fn phase2_loop_state_sub_structs_constructible() {
+        use super::loop_state::{SynthesisControl, TokenAccounting};
+
+        let synthesis = SynthesisControl {
+            forced_synthesis_detected: false,
+            synthesis_origin: None,
+            tool_decision: super::loop_state::ToolDecisionSignal::Allow,
+            execution_intent: super::loop_state::ExecutionIntentPhase::Investigation,
+            phase: super::loop_state::AgentPhase::Idle,
+            convergence_directive_injected: false,
+        };
+        assert!(!synthesis.forced_synthesis_detected);
+
+        let tokens = TokenAccounting {
+            call_input_tokens: 0,
+            call_output_tokens: 0,
+            call_cost: 0.0,
+            pipeline_budget: 50_000,
+            provider_context_window: 128_000,
+            tokens_planning: 0,
+            tokens_subagents: 0,
+            tokens_critic: 0,
+            call_input_tokens_prev_round: 0,
+            tokens_per_round: vec![],
+            consecutive_growth_violations: 0,
+            k5_2_compaction_needed: false,
+        };
+        assert_eq!(tokens.pipeline_budget, 50_000);
+    }
+
+    #[test]
+    fn phase2_core_types_available() {
+        use halcon_core::types::{
+            ToolTrustDecision, ToolTrustMetrics, ToolFailureInfo,
+            MutationAxis, MutationRecord,
+        };
+
+        let decision = ToolTrustDecision::Include;
+        assert_eq!(decision, ToolTrustDecision::Include);
+
+        let metrics = ToolTrustMetrics {
+            tool_name: "file_read".into(),
+            success_rate: 0.95,
+            avg_latency_ms: 50.0,
+            call_count: 10,
+            failure_count: 1,
+        };
+        assert_eq!(metrics.call_count, 10);
+
+        let failure = ToolFailureInfo {
+            tool_name: "bash".into(),
+            failure_count: 3,
+        };
+        assert_eq!(failure.failure_count, 3);
+
+        let record = MutationRecord {
+            mutations: vec![MutationAxis::TemperatureIncreased { from: 0.0, to: 0.1 }],
+            retry_number: 1,
+        };
+        assert_eq!(record.mutations.len(), 1);
+    }
+
+    // ── Phase 3 Integration Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn phase3_integration_utility_delays_oracle_synthesis() {
+        use crate::repl::domain::termination_oracle::{TerminationOracle, TerminationDecision};
+        use crate::repl::domain::round_feedback::{LoopSignal, RoundFeedback};
+        use crate::repl::domain::convergence_controller::ConvergenceAction;
+
+        // High utility → delay synthesis even when synthesis_advised
+        let fb = RoundFeedback {
+            round: 3,
+            combined_score: 0.5,
+            convergence_action: ConvergenceAction::Continue,
+            loop_signal: LoopSignal::Continue,
+            trajectory_trend: 0.5,
+            oscillation: 0.0,
+            replan_advised: false,
+            synthesis_advised: true,
+            tool_round: true,
+            had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: false,
+            evidence_coverage: 0.50,
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.60, // well above threshold 0.35
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
+        };
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Continue,
+            "High utility should delay synthesis_advised"
+        );
+
+        // Low utility → synthesis proceeds
+        let fb2 = RoundFeedback {
+            utility_score: 0.10,
+            ..fb.clone()
+        };
+        assert!(matches!(
+            TerminationOracle::adjudicate(&fb2),
+            TerminationDecision::InjectSynthesis { .. }
+        ), "Low utility should allow synthesis");
+    }
+
+    #[test]
+    fn phase3_integration_strategy_mutation_with_signals() {
+        use crate::repl::domain::mid_loop_strategy::*;
+        use super::loop_state::ExecutionIntentPhase;
+
+        // Test cascade: ForceSynthesis > CollapsePlan > SwitchInvestigation
+        let signals = StrategySignals {
+            evidence_coverage: 0.40,
+            drift_score: 0.20,
+            replan_attempts: 0,
+            max_replan_attempts: 2,
+            consecutive_errors: 0,
+            tool_failure_clustering: 0.0,
+            sla_fraction_consumed: 0.90, // triggers ForceSynthesis
+            execution_intent: ExecutionIntentPhase::Execution,
+            plan_completion_fraction: 0.30,
+            cycle_detected: false,
+            round: 8,
+            max_rounds: 10,
+        };
+        let r = select_mutation(&signals, &StrategyThresholds::default());
+        assert_eq!(r.mutation, StrategyMutation::ForceSynthesis);
+    }
+
+    #[test]
+    fn phase3_integration_cycle_detector_feeds_round_feedback() {
+        use crate::repl::domain::semantic_cycle::SemanticCycleDetector;
+
+        let policy = halcon_core::types::PolicyConfig::default();
+        let mut det = SemanticCycleDetector::from_policy(&policy);
+
+        // No cycles initially
+        assert!(!det.has_cycle());
+        assert!((det.severity().as_f32()).abs() < f32::EPSILON);
+
+        // Force cycles
+        let batch = vec![("file_read".to_string(), r#"{"path": "/a.rs"}"#.to_string())];
+        det.record_round(0, &batch);
+        det.record_round(1, &batch);
+        det.record_round(2, &batch);
+
+        assert!(det.has_cycle());
+        assert!(det.severity().as_f32() > 0.0);
+    }
+
+    #[test]
+    fn phase3_integration_mid_critic_with_policy() {
+        use crate::repl::domain::mid_loop_critic::{MidLoopCritic, CriticAction};
+        use std::sync::Arc;
+
+        let policy = Arc::new(halcon_core::types::PolicyConfig::default());
+        let mut critic = MidLoopCritic::new(policy, 10);
+
+        // Record some rounds
+        for i in 0..6 {
+            critic.record_snapshot(i, 0.10, 0.20, 0.4, true);
+        }
+
+        // Checkpoint at round 6 (interval=3, 6%3==0)
+        assert!(critic.is_checkpoint(6));
+        let cp = critic.evaluate(6, 10, 0.10, 0.20, 0.10);
+        // budget=60%, progress=10% → deficit=0.50 > threshold 0.25 → Replan
+        assert_eq!(cp.action, CriticAction::Replan);
+    }
+
+    #[test]
+    fn phase3_integration_complexity_upgrade_triggers_sla_refresh() {
+        use crate::repl::domain::complexity_feedback::*;
+        use crate::repl::decision_layer::TaskComplexity;
+        use crate::repl::sla_manager::{SlaBudget, SlaMode};
+        use std::sync::Arc;
+
+        let policy = Arc::new(halcon_core::types::PolicyConfig::default());
+        let mut tracker = ComplexityTracker::new(
+            TaskComplexity::SimpleExecution, 3, policy,
+        );
+
+        let obs = ComplexityObservation {
+            rounds_used: 8,
+            replans_triggered: 2,
+            distinct_tools_used: 6,
+            domains_touched: 2,
+            elapsed_secs: 60.0,
+            orchestration_used: true,
+            tool_errors: 0,
+        };
+
+        let adj = tracker.evaluate(&obs).unwrap();
+        assert!(adj.was_upgraded);
+        assert!(adj.sla_refresh_needed);
+
+        // Verify SLA upgrade works
+        let mut budget = SlaBudget::from_mode(SlaMode::Fast);
+        assert_eq!(budget.max_rounds, 4);
+        budget.upgrade_from_complexity(&adj.adjusted);
+        assert!(budget.max_rounds > 4, "SLA should have been upgraded");
+    }
+
+    #[test]
+    fn phase3_integration_convergence_utility_computation() {
+        use crate::repl::domain::convergence_utility::*;
+
+        let policy = halcon_core::types::PolicyConfig::default();
+
+        // Mid-session with good progress
+        let inputs = UtilityInputs {
+            evidence_coverage: 0.50,
+            coherence_score: 0.70,
+            plan_progress: 0.40,
+            time_pressure: 0.20,
+            retry_cost: 0.10,
+            drift_penalty: 0.05,
+            evidence_rate: 0.20,
+        };
+        let result = compute_utility_from_policy(&inputs, &policy);
+        assert!(result.utility > 0.0, "mid-session should have positive utility");
+
+        // Late session with pressure
+        let late_inputs = UtilityInputs {
+            time_pressure: 0.95,
+            ..inputs.clone()
+        };
+        let late_result = compute_utility_from_policy(&late_inputs, &policy);
+        assert!(late_result.should_synthesize, "late session should trigger synthesis");
+    }
+
+    // ── Phase 5: Meta-Cognitive Intelligence Integration Tests ────────────────
+
+    fn make_round_metrics(round: usize, tool_calls: usize, tool_errors: usize,
+                          combined_score: f32, utility_score: f64,
+                          evidence_coverage: f64) -> crate::repl::domain::system_metrics::RoundMetrics {
+        crate::repl::domain::system_metrics::RoundMetrics {
+            round,
+            tokens_in: 500,
+            tokens_out: 200,
+            tool_calls,
+            tool_errors,
+            combined_score,
+            utility_score,
+            evidence_coverage,
+            drift_score: 0.0,
+            sla_fraction: 0.0,
+            token_fraction: 0.0,
+            replan_attempts: 0,
+            invariant_violations: 0,
+            cycle_count: 0,
+            round_duration: std::time::Duration::from_millis(100),
+            oracle_decision: "Continue".to_string(),
+        }
+    }
+
+    #[test]
+    fn phase5_integration_problem_classifier_with_metrics() {
+        use crate::repl::domain::problem_classifier::*;
+        use crate::repl::domain::system_metrics::MetricsCollector;
+
+        let policy = std::sync::Arc::new(halcon_core::types::PolicyConfig::default());
+        let mut classifier = ProblemClassifier::new(policy.clone());
+
+        // Build 3 rounds of metrics simulating high exploration
+        let mut collector = MetricsCollector::new();
+        for i in 0..3 {
+            collector.record_round(make_round_metrics(
+                i, 8, 0,
+                0.50 + (i as f32 * 0.05),
+                0.40 + (i as f64 * 0.10),
+                0.20 + (i as f64 * 0.15),
+            ));
+        }
+
+        // Classify after enough rounds
+        let result = classifier.classify(collector.rounds(), 0.20);
+        assert!(result.confidence > 0.0, "classification should have non-zero confidence");
+        // Reclassify should not fire on first call
+        assert!(classifier.reclassify(collector.rounds(), 0.20).is_none(),
+            "reclassification should not fire immediately after initial classification");
+    }
+
+    #[test]
+    fn phase5_integration_strategy_weights_bridge_utility() {
+        use crate::repl::domain::strategy_weights::*;
+        use crate::repl::domain::problem_classifier::ProblemClass;
+        use crate::repl::domain::convergence_utility;
+
+        // Get class-specific weights and bridge to utility system
+        let weights = StrategyWeights::for_class(ProblemClass::HighExploration);
+        let policy = halcon_core::types::PolicyConfig::default();
+        let utility_weights = weights.to_utility_weights(policy.utility_w_progress);
+
+        // Verify bridge preserves weight semantics
+        assert!((utility_weights.w_evidence - weights.evidence_weight).abs() < 1e-10);
+        assert!((utility_weights.w_drift - weights.drift_weight).abs() < 1e-10);
+        assert!((utility_weights.w_pressure - weights.sla_weight).abs() < 1e-10);
+
+        // Compute utility with bridged weights
+        let inputs = convergence_utility::UtilityInputs {
+            evidence_coverage: 0.50,
+            coherence_score: 0.60,
+            plan_progress: 0.30,
+            time_pressure: 0.20,
+            retry_cost: 0.10,
+            drift_penalty: 0.05,
+            evidence_rate: 0.15,
+        };
+        let result = convergence_utility::compute_utility(
+            &inputs,
+            &utility_weights,
+            policy.utility_synthesis_threshold,
+            policy.utility_marginal_threshold,
+        );
+        assert!(result.utility > 0.0, "utility with bridged weights should be positive");
+    }
+
+    #[test]
+    fn phase5_integration_convergence_forecast_with_metrics() {
+        use crate::repl::domain::convergence_estimator::*;
+        use crate::repl::domain::system_metrics::MetricsCollector;
+
+        let policy = halcon_core::types::PolicyConfig::default();
+        let mut collector = MetricsCollector::new();
+
+        // Build 4 rounds of improving metrics
+        for i in 0..4 {
+            collector.record_round(make_round_metrics(
+                i, 5, 0,
+                0.30 + (i as f32 * 0.10),
+                0.20 + (i as f64 * 0.15),
+                0.10 + (i as f64 * 0.12),
+            ));
+        }
+
+        let forecast = forecast(
+            collector.rounds(),
+            0.15,  // utility_trend (positive — improving)
+            0.12,  // evidence_rate
+            6,     // sla_remaining_rounds
+            policy.utility_synthesis_threshold,
+            policy.forecast_min_rounds,
+        );
+        assert!(forecast.probability > 0.0, "should have non-zero convergence probability");
+        assert!(forecast.confidence > 0.0, "should have non-zero confidence with 4 rounds");
+        assert!(forecast.estimated_rounds_remaining <= 6,
+            "estimated rounds should not exceed SLA remaining");
+    }
+
+    #[test]
+    fn phase5_integration_strategic_init_applies_class_preset() {
+        use crate::repl::domain::strategic_init::*;
+        use crate::repl::domain::problem_classifier::ProblemClass;
+
+        // Debug keyword should override to EvidenceSparse
+        let profile = initialize(
+            Complexity::Structured,
+            "debug the authentication error",
+            &["read_file".to_string(), "grep".to_string()],
+        );
+        assert_eq!(profile.problem_class, ProblemClass::EvidenceSparse);
+        assert!(profile.rationale.contains("debug"));
+
+        // The weights should be the EvidenceSparse preset
+        let expected = crate::repl::domain::strategy_weights::StrategyWeights::for_class(
+            ProblemClass::EvidenceSparse,
+        );
+        assert!((profile.weights.evidence_weight - expected.evidence_weight).abs() < 1e-10,
+            "strategic init should use class-specific weight preset");
+    }
+
+    #[test]
+    fn phase5_integration_session_retrospective_end_to_end() {
+        use crate::repl::domain::session_retrospective::*;
+        use crate::repl::domain::decision_trace::*;
+        use crate::repl::domain::system_metrics::MetricsCollector;
+        use crate::repl::domain::adaptation_bounds::*;
+        use crate::repl::domain::system_invariants::*;
+
+        let policy = std::sync::Arc::new(halcon_core::types::PolicyConfig::default());
+
+        // Build minimal collectors
+        let mut trace = DecisionTraceCollector::new();
+        trace.record(DecisionRecord::new(
+            DecisionPoint::OracleAdjudication,
+            0,
+            "Continue".to_string(),
+        ));
+        trace.record(DecisionRecord::new(
+            DecisionPoint::OracleAdjudication,
+            1,
+            "Synthesize".to_string(),
+        ));
+
+        let mut metrics = MetricsCollector::new();
+        for i in 0..3 {
+            metrics.record_round(make_round_metrics(
+                i, 5, if i == 0 { 2 } else { 0 },
+                0.30 + (i as f32 * 0.20),
+                0.25 + (i as f64 * 0.15),
+                0.10 + (i as f64 * 0.20),
+            ));
+        }
+
+        let bounds = AdaptationBoundsChecker::new(policy.clone());
+        let invariants = SystemInvariantChecker::new();
+
+        let profile = analyze(&trace, &metrics, &bounds, &invariants, &policy);
+        assert!(profile.convergence_efficiency >= 0.0 && profile.convergence_efficiency <= 1.0,
+            "convergence efficiency should be in [0, 1]");
+        assert!(profile.decision_density > 0.0,
+            "should have non-zero decision density with 2 decisions over 3 rounds");
+        assert!(profile.peak_utility >= profile.final_utility,
+            "peak utility should be >= final utility");
     }

@@ -92,7 +92,7 @@ pub(super) async fn run(
             .into_iter()
             .filter(|tool| {
                 let args_hash = hash_tool_args(&tool.input);
-                if state.loop_guard.is_duplicate(&tool.name, args_hash) {
+                if state.guards.loop_guard.is_duplicate(&tool.name, args_hash) {
                     tracing::warn!(tool = %tool.name, "Duplicate tool call filtered");
                     dedup_result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: tool.id.clone(),
@@ -182,8 +182,8 @@ pub(super) async fn run(
 
             // Phase E5: Enter ToolWait state while tools are executing.
             if !state.silent && (!remaining_parallel.is_empty() || !plan.sequential_batch.is_empty()) {
-                render_sink.agent_state_transition(state.current_fsm_state, "tool_wait", "executing tools");
-                state.current_fsm_state = "tool_wait";
+                render_sink.agent_state_transition(state.synthesis.phase.as_str(), "tool_wait", "executing tools");
+                state.synthesis.phase = state.synthesis.phase.fire(super::loop_state::AgentEvent::ToolsSubmitted);
             }
 
             // Execute remaining ReadOnly tools in parallel with concurrency cap.
@@ -249,8 +249,8 @@ pub(super) async fn run(
 
             // Phase E5: Return to Executing after tools complete.
             if !state.silent && (!parallel_results.is_empty() || !sequential_results.is_empty()) {
-                render_sink.agent_state_transition(state.current_fsm_state, "executing", "tools complete");
-                state.current_fsm_state = "executing";
+                render_sink.agent_state_transition(state.synthesis.phase.as_str(), "executing", "tools complete");
+                state.synthesis.phase = state.synthesis.phase.fire(super::loop_state::AgentEvent::ToolBatchComplete);
             }
 
             // Track tool invocations.
@@ -280,7 +280,16 @@ pub(super) async fn run(
                     );
                     tool_successes.push(result.tool_name.clone());
                     // EBS: record evidence from successful content-reading tool results.
-                    state.evidence_bundle.record_tool_result(&result.tool_name, content);
+                    state.evidence.bundle.record_tool_result(&result.tool_name, content);
+                    // F5 EvidenceGraph: register per-node evidence.
+                    let is_binary = super::super::evidence_pipeline::BINARY_INDICATORS
+                        .iter().any(|ind| content.contains(ind));
+                    state.evidence.graph.add_node(
+                        &result.tool_name, &result.tool_name,
+                        content.len(), is_binary, None, state.rounds as u32,
+                    );
+                    // F1 ToolTrust: record success.
+                    state.tool_trust.record_success(&result.tool_name, result.duration_ms);
                 }
                 if let ContentBlock::ToolResult {
                     ref content,
@@ -289,6 +298,13 @@ pub(super) async fn run(
                 } = block
                 {
                     tool_failures.push((result.tool_name.clone(), content.clone()));
+                    // F5 EvidenceGraph: register error node.
+                    state.evidence.graph.add_node(
+                        &result.tool_name, &result.tool_name,
+                        0, false, Some(content.as_str()), state.rounds as u32,
+                    );
+                    // F1 ToolTrust: record failure.
+                    state.tool_trust.record_failure(&result.tool_name, result.duration_ms, Some(content.as_str()));
                 }
                 tool_result_blocks.push(block);
             }
@@ -305,7 +321,16 @@ pub(super) async fn run(
                     );
                     tool_successes.push(result.tool_name.clone());
                     // EBS: record evidence from successful content-reading tool results.
-                    state.evidence_bundle.record_tool_result(&result.tool_name, content);
+                    state.evidence.bundle.record_tool_result(&result.tool_name, content);
+                    // F5 EvidenceGraph: register per-node evidence.
+                    let is_binary = super::super::evidence_pipeline::BINARY_INDICATORS
+                        .iter().any(|ind| content.contains(ind));
+                    state.evidence.graph.add_node(
+                        &result.tool_name, &result.tool_name,
+                        content.len(), is_binary, None, state.rounds as u32,
+                    );
+                    // F1 ToolTrust: record success.
+                    state.tool_trust.record_success(&result.tool_name, result.duration_ms);
                 }
                 if let ContentBlock::ToolResult {
                     ref content,
@@ -314,6 +339,13 @@ pub(super) async fn run(
                 } = block
                 {
                     tool_failures.push((result.tool_name.clone(), content.clone()));
+                    // F5 EvidenceGraph: register error node.
+                    state.evidence.graph.add_node(
+                        &result.tool_name, &result.tool_name,
+                        0, false, Some(content.as_str()), state.rounds as u32,
+                    );
+                    // F1 ToolTrust: record failure.
+                    state.tool_trust.record_failure(&result.tool_name, result.duration_ms, Some(content.as_str()));
                 }
                 tool_result_blocks.push(block);
             }
@@ -321,10 +353,10 @@ pub(super) async fn run(
 
         // HICON Phase 3: Feed tool errors to Bayesian detector
         for (tool_name, error_content) in &tool_failures {
-            state.loop_guard.record_error(&format!("{}:{}", tool_name, error_content));
+            state.guards.loop_guard.record_error(&format!("{}:{}", tool_name, error_content));
         }
 
-        // BRECHA-C: Register guardrail/TBAC tool denials into state.blocked_tools.
+        // BRECHA-C: Register guardrail/TBAC tool denials into state.evidence.blocked_tools.
         // Injected into replan prompts to break retry cycles on blocked tools.
         for (tool_name, error_content) in &tool_failures {
             let is_blocked = error_content.contains("denied")
@@ -332,9 +364,9 @@ pub(super) async fn run(
                 || error_content.contains("guardrail")
                 || error_content.contains("blacklist")
                 || error_content.contains("task context policy");
-            if is_blocked && !state.blocked_tools.iter().any(|(n, _)| n == tool_name) {
+            if is_blocked && !state.evidence.blocked_tools.iter().any(|(n, _)| n == tool_name) {
                 let short_reason = error_content.chars().take(120).collect::<String>();
-                state.blocked_tools.push((tool_name.clone(), short_reason));
+                state.evidence.blocked_tools.push((tool_name.clone(), short_reason));
                 tracing::warn!(
                     tool = %tool_name,
                     "BRECHA-C: tool blocked by guardrail/TBAC — added to blocked_tools for replan"
@@ -395,12 +427,12 @@ pub(super) async fn run(
 
             // Sprint 2: Update plan progress in loop guard for dynamic thresholds
             let (completed, total, elapsed) = tracker.progress();
-            state.loop_guard.update_plan_progress(completed, total, elapsed);
+            state.guards.loop_guard.update_plan_progress(completed, total, elapsed);
 
             // Phase 33: plan completion → force synthesis on next round.
             if tracker.is_complete() {
                 tracing::info!("All plan steps completed — forcing synthesis");
-                state.loop_guard.force_synthesis();
+                state.guards.loop_guard.force_synthesis();
             }
 
             // FIX: When all remaining non-terminal steps have no tool_name (i.e. only
@@ -424,23 +456,23 @@ pub(super) async fn run(
                 // suppression forces synthesis before bash/file_write steps run.
                 if pending_are_all_synthesis && !plan.steps.is_empty()
                     && plan.steps.iter().any(|s| s.outcome.is_none())
-                    && state.execution_intent != ExecutionIntentPhase::Execution
+                    && state.synthesis.execution_intent != ExecutionIntentPhase::Execution
                 {
                     tracing::info!(
-                        intent = ?state.execution_intent,
+                        intent = ?state.synthesis.execution_intent,
                         "All remaining plan steps are synthesis-only (no tool_name) — \
                          suppressing tools for coordinator synthesis round"
                     );
-                    state.tool_decision.set_force_next();
+                    state.synthesis.tool_decision.set_force_next();
                     // EBS-R1 (AllRemainingStepsSynthesisOnly): if evidence gate fires, mark
                     // synthesis_blocked and override origin so reward pipeline penalises
                     // fabrication when files turned out to be unreadable.
-                    if state.evidence_bundle.evidence_gate_fires() {
-                        state.evidence_bundle.synthesis_blocked = true;
-                        state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                    if state.evidence.bundle.evidence_gate_fires() {
+                        state.evidence.bundle.synthesis_blocked = true;
+                        state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                         tracing::warn!(
                             session_id = %state.session_id,
-                            text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                            text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                             "EvidenceGate FIRED (AllRemainingStepsSynthesisOnly): \
                              synthesis_blocked set, origin overridden to SupervisorFailure"
                         );
@@ -452,46 +484,63 @@ pub(super) async fn run(
             // Computes progress_delta vs previous round to detect diminishing returns.
             let (completed, total, _) = tracker.progress();
             let current_ratio = if total > 0 { completed as f32 / total as f32 } else { 0.0 };
-            let progress_delta = current_ratio - state.last_convergence_ratio;
-            state.last_convergence_ratio = current_ratio;
-            // Phase L INVARIANT K5-2: token_growth_rate < 1.3× per round.
-            // Super-linear growth indicates sub-agent output injection is too large
-            // (observed: 4836 → 20492 tokens = 4.24× in one round for "analiza" case).
-            if state.call_input_tokens_prev_round > 0 {
-                let growth_factor = state.call_input_tokens as f64
-                    / state.call_input_tokens_prev_round as f64;
-                if growth_factor > 1.3 {
+            let progress_delta = current_ratio - state.convergence.last_convergence_ratio;
+            state.convergence.last_convergence_ratio = current_ratio;
+            // Phase L INVARIANT K5-2: token_growth_rate < threshold per round.
+            // Phase 5: upgraded from warn-only to actionable — tracks consecutive violations
+            // and triggers compaction when sustained growth is detected.
+            state.tokens.tokens_per_round.push(state.tokens.call_input_tokens);
+            let growth_threshold = state.policy.growth_threshold;
+            let growth_trigger = state.policy.growth_consecutive_trigger;
+            if state.tokens.call_input_tokens_prev_round > 0 {
+                let growth_factor = state.tokens.call_input_tokens as f64
+                    / state.tokens.call_input_tokens_prev_round as f64;
+                if growth_factor > growth_threshold {
+                    state.tokens.consecutive_growth_violations += 1;
                     tracing::warn!(
                         round = state.rounds,
-                        prev_tokens = state.call_input_tokens_prev_round,
-                        curr_tokens = state.call_input_tokens,
+                        prev_tokens = state.tokens.call_input_tokens_prev_round,
+                        curr_tokens = state.tokens.call_input_tokens,
                         growth_factor,
-                        "K5-2 INVARIANT: token growth {:.2}× exceeds 1.3× linear bound —                          sub-agent injection may be too large",
-                        growth_factor
+                        consecutive_violations = state.tokens.consecutive_growth_violations,
+                        "K5-2 INVARIANT: token growth {:.2}× exceeds {:.1}× linear bound",
+                        growth_factor, growth_threshold
                     );
                     if !state.silent {
                         render_sink.info(&format!(
-                            "[token] context grew {:.1}× this round ({} → {} tokens) —                              consider summarizing sub-agent outputs",
+                            "[token] context grew {:.1}× this round ({} → {} tokens)",
                             growth_factor,
-                            state.call_input_tokens_prev_round,
-                            state.call_input_tokens
+                            state.tokens.call_input_tokens_prev_round,
+                            state.tokens.call_input_tokens
                         ));
                     }
+                    // Phase 5: trigger compaction after consecutive violations.
+                    if state.tokens.consecutive_growth_violations >= growth_trigger {
+                        tracing::warn!(
+                            consecutive = state.tokens.consecutive_growth_violations,
+                            trigger = growth_trigger,
+                            "K5-2: sustained super-linear growth — triggering context compaction"
+                        );
+                        state.tokens.k5_2_compaction_needed = true;
+                    }
+                } else {
+                    // Linear round — reset violation counter.
+                    state.tokens.consecutive_growth_violations = 0;
                 }
             }
             // Update prev_round tracker for next iteration.
-            state.call_input_tokens_prev_round = state.call_input_tokens;
+            state.tokens.call_input_tokens_prev_round = state.tokens.call_input_tokens;
             // Phase L fix B4: use the provider's full context window as denominator,
             // not pipeline_budget (which is only the L0-injection budget ~80% of window).
             // pipeline_budget(~14895) < call_input_tokens(~24504) → saturating_sub=0 → false alarm.
             // provider_context_window(64000) >> call_input_tokens → correct remaining budget.
             let tokens_remaining =
-                (state.provider_context_window as u64).saturating_sub(state.call_input_tokens);
-            if let Some(reason) = state.convergence_detector.check_with_cost(
+                (state.tokens.provider_context_window as u64).saturating_sub(state.tokens.call_input_tokens);
+            if let Some(reason) = state.convergence.convergence_detector.check_with_cost(
                 current_ratio,
                 tokens_remaining,
                 progress_delta,
-                state.call_input_tokens,
+                state.tokens.call_input_tokens,
             ) {
                 tracing::info!(
                     reason = %reason.description(),
@@ -505,11 +554,11 @@ pub(super) async fn run(
                         reason.description()
                     ));
                 }
-                state.loop_guard.force_synthesis();
+                state.guards.loop_guard.force_synthesis();
             }
 
             // Planning V3: Advance MacroPlanView to emit [N/M] progress to the user.
-            if let Some(ref mut view) = state.macro_plan_view {
+            if let Some(ref mut view) = state.convergence.macro_plan_view {
                 let current = tracker.current_step();
                 // Advance through any newly completed steps, emitting done lines.
                 // NOTE: use step.done_line() (step's own method) rather than view.format_done()
@@ -582,8 +631,8 @@ pub(super) async fn run(
                         "strict enforcement: task permanently failed",
                         Some("Use --full without --expert to allow continued execution on task failure"),
                     );
-                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
-                    state.forced_synthesis_detected = true;
+                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                    state.synthesis.forced_synthesis_detected = true;
                     return Ok(PostBatchOutcome::BreakLoop);
                 }
             }
@@ -672,9 +721,9 @@ pub(super) async fn run(
                                     // caused by supervisor-forced replanning, same as model-initiated
                                     // replanning. Supervisor authority doesn't bypass drift detection.
                                     {
-                                        let report = state.coherence_checker.check(&new_plan);
-                                        state.cumulative_drift_score += report.drift_score;
-                                        state.drift_replan_count += 1;
+                                        let report = state.convergence.coherence_checker.check(&new_plan);
+                                        state.convergence.cumulative_drift_score += report.drift_score;
+                                        state.convergence.drift_replan_count += 1;
                                         if report.drift_detected {
                                             tracing::warn!(
                                                 drift_score = report.drift_score,
@@ -701,8 +750,8 @@ pub(super) async fn run(
                                     // Mirror convergence_phase.rs model-initiated replan resets:
                                     // loop guard + adaptive policy must be reset so supervisor-forced
                                     // replans start with a clean slate (not stale escalation state).
-                                    state.loop_guard.reset_on_replan();
-                                    state.adaptive_policy.reset_after_replan();
+                                    state.guards.loop_guard.reset_on_replan();
+                                    state.convergence.adaptive_policy.reset_after_replan();
                                     state.messages.push(ChatMessage {
                                         role: Role::User,
                                         content: MessageContent::Text(format!(
@@ -813,8 +862,8 @@ pub(super) async fn run(
             if should_reflect && !matches!(outcome, super::super::reflexion::RoundOutcome::Success) {
                 // Phase E5: Transition to Reflecting state.
                 if !state.silent {
-                    render_sink.agent_state_transition(state.current_fsm_state, "reflecting", "round had issues");
-                    state.current_fsm_state = "reflecting";
+                    render_sink.agent_state_transition(state.synthesis.phase.as_str(), "reflecting", "round had issues");
+                    state.synthesis.phase = state.synthesis.phase.fire(super::loop_state::AgentEvent::ReflectionComplete);
                 }
                 render_sink.reflection_started();
                 match reflector.reflect(round, &outcome, &state.messages).await {
@@ -881,15 +930,15 @@ pub(super) async fn run(
                 }
                 // Phase E5: Transition back from Reflecting.
                 if !state.silent {
-                    render_sink.agent_state_transition(state.current_fsm_state, "executing", "reflection complete");
-                    state.current_fsm_state = "executing";
+                    render_sink.agent_state_transition(state.synthesis.phase.as_str(), "executing", "reflection complete");
+                    state.synthesis.phase = state.synthesis.phase.fire(super::loop_state::AgentEvent::ToolBatchComplete);
                 }
             }
         }
 
         // RC-2 fix: Record tool failures in the tracker and detect repeated patterns.
         for (failed_tool_name, error_msg) in &tool_failures {
-            let tripped = state.failure_tracker.record(failed_tool_name, error_msg);
+            let tripped = state.guards.failure_tracker.record(failed_tool_name, error_msg);
             if tripped {
                 tracing::warn!(
                     tool = %failed_tool_name,
@@ -920,7 +969,7 @@ pub(super) async fn run(
                         };
                         // Record using the plugin-specific pattern key so ToolFailureTracker
                         // can trip the circuit breaker on repeated plugin failures.
-                        state.failure_tracker.record(failed_tool_name, pattern);
+                        state.guards.failure_tracker.record(failed_tool_name, pattern);
                     }
                 }
             } // end lock
@@ -933,7 +982,7 @@ pub(super) async fn run(
         if !tool_failures.is_empty()
             && tool_failures.iter().all(|(tool, err)| {
                 ToolFailureTracker::error_pattern(err) == "mcp_unavailable"
-                    && state.failure_tracker.is_tripped(tool, err)
+                    && state.guards.failure_tracker.is_tripped(tool, err)
             })
         {
             tracing::error!(
@@ -965,7 +1014,7 @@ pub(super) async fn run(
                     continue;
                 }
                 // RC-2 fix: skip replan if this tool+error has already tripped.
-                if state.failure_tracker.is_tripped(failed_tool_name, error_msg) {
+                if state.guards.failure_tracker.is_tripped(failed_tool_name, error_msg) {
                     tracing::info!(
                         tool = %failed_tool_name,
                         "Skipping replan: circuit breaker tripped for this failure pattern"
@@ -1094,22 +1143,22 @@ pub(super) async fn run(
                     ),
                 );
             }
-            state.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
-            state.forced_synthesis_detected = true;
+            state.synthesis.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
+            state.synthesis.forced_synthesis_detected = true;
             // EBS-R1 (ParallelBatchCollapse): if evidence gate fires, override origin to
             // SupervisorFailure so reward pipeline applies synthesis penalty on unreadable files.
-            if state.evidence_bundle.evidence_gate_fires() {
-                state.evidence_bundle.synthesis_blocked = true;
-                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+            if state.evidence.bundle.evidence_gate_fires() {
+                state.evidence.bundle.synthesis_blocked = true;
+                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                 tracing::warn!(
                     session_id = %state.session_id,
-                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                     "EvidenceGate FIRED (ParallelBatchCollapse): origin overridden to SupervisorFailure"
                 );
             }
             // Use force_no_tools so convergence phase collects final round signals before
             // result_assembly sees forced_synthesis_detected and builds the synthesis result.
-            state.tool_decision.set_force_next();
+            state.synthesis.tool_decision.set_force_next();
             return Ok(PostBatchOutcome::Continue {
                 round_tool_log,
                 tool_failures,
@@ -1134,6 +1183,26 @@ pub(super) async fn run(
             state.messages.push(dedup_note.clone());
             state.context_pipeline.add_message(dedup_note.clone());
             session.add_message(dedup_note);
+        }
+
+        // FSM: tool batch completed — stay in Executing.
+        state.synthesis.phase = super::loop_state::transition(
+            state.synthesis.phase,
+            super::loop_state::AgentEvent::ToolBatchComplete,
+        );
+        // phase already updated by fire() above — no string sync needed.
+
+        // P3.3: Feed semantic cycle detector with this round's tool calls.
+        let cycle_calls: Vec<(String, String)> = round_tool_log.iter()
+            .map(|(name, hash)| (name.clone(), hash.to_string()))
+            .collect();
+        if state.guards.semantic_cycle_detector.record_round(round, &cycle_calls) {
+            tracing::info!(
+                round,
+                severity = ?state.guards.semantic_cycle_detector.severity(),
+                cycles = state.guards.semantic_cycle_detector.cycle_count(),
+                "Phase3 SemanticCycleDetector: cycle detected"
+            );
         }
 
         Ok(PostBatchOutcome::Continue {

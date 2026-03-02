@@ -93,70 +93,64 @@ impl Default for IdempotencyRegistry {
 // Re-export DryRunMode from halcon-core (canonical definition in phase14.rs).
 pub use halcon_core::types::DryRunMode;
 
-/// Guidance for undoing a destructive tool operation.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RollbackHint {
-    /// Tool that was or would be executed.
-    pub tool_name: String,
-    /// Human-readable description of the effect.
-    pub description: String,
-    /// Suggested undo command (if available).
-    pub undo_command: Option<String>,
-    /// Paths that would be affected.
-    pub affected_paths: Vec<String>,
-}
-
-/// Generate a rollback hint for a tool call (best-effort).
-#[allow(dead_code)]
-pub fn generate_rollback_hint(
-    tool_name: &str,
-    args: &serde_json::Value,
-) -> Option<RollbackHint> {
-    match tool_name {
-        "file_write" | "write_file" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<unknown>");
-            Some(RollbackHint {
-                tool_name: tool_name.to_string(),
-                description: format!("Would write to file: {path}"),
-                undo_command: Some(format!("rm {path}")),
-                affected_paths: vec![path.to_string()],
-            })
-        }
-        "file_edit" | "edit_file" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<unknown>");
-            Some(RollbackHint {
-                tool_name: tool_name.to_string(),
-                description: format!("Would edit file: {path}"),
-                undo_command: Some(format!("git checkout -- {path}")),
-                affected_paths: vec![path.to_string()],
-            })
-        }
-        "bash" => {
-            let cmd = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<unknown>");
-            Some(RollbackHint {
-                tool_name: tool_name.to_string(),
-                description: format!("Would execute: {cmd}"),
-                undo_command: None,
-                affected_paths: vec![],
-            })
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guidance for undoing a destructive tool operation (test-only — not yet integrated into production).
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct RollbackHint {
+        tool_name: String,
+        description: String,
+        undo_command: Option<String>,
+        affected_paths: Vec<String>,
+    }
+
+    /// Generate a rollback hint for a tool call (best-effort, test-only).
+    fn generate_rollback_hint(
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<RollbackHint> {
+        match tool_name {
+            "file_write" | "write_file" => {
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                Some(RollbackHint {
+                    tool_name: tool_name.to_string(),
+                    description: format!("Would write to file: {path}"),
+                    undo_command: Some(format!("rm {path}")),
+                    affected_paths: vec![path.to_string()],
+                })
+            }
+            "file_edit" | "edit_file" => {
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                Some(RollbackHint {
+                    tool_name: tool_name.to_string(),
+                    description: format!("Would edit file: {path}"),
+                    undo_command: Some(format!("git checkout -- {path}")),
+                    affected_paths: vec![path.to_string()],
+                })
+            }
+            "bash" => {
+                let cmd = args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                Some(RollbackHint {
+                    tool_name: tool_name.to_string(),
+                    description: format!("Would execute: {cmd}"),
+                    undo_command: None,
+                    affected_paths: vec![],
+                })
+            }
+            _ => None,
+        }
+    }
 
     #[test]
     fn compute_execution_id_deterministic() {

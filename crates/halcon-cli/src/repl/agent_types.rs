@@ -151,6 +151,23 @@ pub struct AgentLoopResult {
     /// When true, the reward pipeline applies a CRITIC_UNAVAILABLE_PENALTY (FASE 4) to push
     /// sessions without adversarial verification below the retry threshold.
     pub critic_unavailable: bool,
+
+    /// Tool failure records from ToolTrustScorer for retry mutation (F4).
+    ///
+    /// Used by `repl/mod.rs` to compute `RetryMutation` axes (tool removal, temp increase,
+    /// plan depth reduction, model fallback) when the critic triggers a retry.
+    pub tool_trust_failures: Vec<crate::repl::retry_mutation::ToolFailureRecord>,
+
+    /// SLA budget snapshot from the agent loop (Phase 2 SLA Hard Enforcement).
+    ///
+    /// Propagated from `LoopState.sla_budget` so mod.rs can gate retries via
+    /// `allows_retry()` without re-deriving the budget from DecisionLayer.
+    pub sla_budget: Option<crate::repl::sla_manager::SlaBudget>,
+
+    /// Evidence graph synthesis coverage (Phase 3 EvidenceGraph Governance).
+    /// Fraction of Good evidence nodes referenced by synthesis. 1.0 = full coverage.
+    /// Default 1.0 when no evidence graph is active.
+    pub evidence_coverage: f64,
 }
 
 /// Categorization of why a sub-agent step failed (FASE 5).

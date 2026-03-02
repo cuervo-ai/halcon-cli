@@ -149,12 +149,6 @@ impl TaskBridge {
         &mut self.backlog
     }
 
-    /// Access the scheduler.
-    #[allow(dead_code)]
-    pub fn scheduler(&self) -> &TaskScheduler {
-        &self.scheduler
-    }
-
     /// Whether the framework is enabled.
     pub fn is_enabled(&self) -> bool {
         self.config.enabled

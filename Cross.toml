@@ -1,15 +1,65 @@
 [build]
-# Use pre-built images from ghcr.io/cross-rs
-pre-build = []
+# Install system dependencies common to all Linux targets (Debian/Ubuntu-based images).
+# These are needed for:
+#   keyring sync-secret-service → libdbus-1-dev (D-Bus headers)
+#   git2 HTTPS → libssl-dev (OpenSSL headers, uses pkg-config in GNU targets)
+#   zstd → cmake / build-essential
+pre-build = [
+    "apt-get update -qq && apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || apk add --no-cache dbus-dev openssl-dev 2>&1 || true",
+]
 
+# ── Environment variables passed into every cross container ───────────────────
+[build.env]
+passthrough = [
+    "HALCON_GIT_HASH",
+    "HALCON_BUILD_DATE",
+    "HALCON_BUILD_DATE_OVERRIDE",
+    "ORT_STRATEGY",
+    "ORT_USE_CUDA",
+    "LIBGIT2_SYS_USE_PKG_CONFIG",
+    "LIBGIT2_STATIC",
+    "ZSTD_SYS_USE_PKG_CONFIG",
+]
+
+# ── Linux x86_64 static (musl) ────────────────────────────────────────────────
+# musl cross image is Alpine-based → uses apk; static OpenSSL bundled with libgit2.
 [target.x86_64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+pre-build = [
+    "apk add --no-cache dbus-dev openssl-dev 2>&1 || apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+]
 
-[target.aarch64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+[target.x86_64-unknown-linux-musl.env]
+passthrough = [
+    "ORT_STRATEGY",
+    "LIBGIT2_SYS_USE_PKG_CONFIG",
+    "LIBGIT2_STATIC",
+]
 
+# ── Linux x86_64 dynamic (glibc) ─────────────────────────────────────────────
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
+pre-build = [
+    "apt-get update -qq && apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+]
+
+# ── Linux ARM64 dynamic (glibc) ───────────────────────────────────────────────
 [target.aarch64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+pre-build = [
+    "apt-get update -qq && apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+]
 
+# ── Linux ARM64 static (musl) ─────────────────────────────────────────────────
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+pre-build = [
+    "apk add --no-cache dbus-dev openssl-dev 2>&1 || apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+]
+
+# ── Linux ARMv7 static (musl) ─────────────────────────────────────────────────
 [target.armv7-unknown-linux-musleabihf]
 image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main"
+pre-build = [
+    "apk add --no-cache dbus-dev openssl-dev 2>&1 || apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+]

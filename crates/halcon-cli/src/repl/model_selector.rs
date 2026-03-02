@@ -204,9 +204,15 @@ impl ModelSelector {
     /// Callers should emit the returned string as a render_sink warning so the user
     /// is informed about provider quality issues without crashing or auto-switching.
     pub fn quality_gate_check(&self, min_interactions: u32) -> Option<String> {
-        /// Below this avg_reward the model is considered "degraded".
-        const QUALITY_GATE_THRESHOLD: f64 = 0.35;
+        self.quality_gate_check_with_threshold(min_interactions, 0.35)
+    }
 
+    /// Quality gate with configurable threshold (from PolicyConfig.model_quality_gate).
+    pub fn quality_gate_check_with_threshold(
+        &self,
+        min_interactions: u32,
+        quality_gate_threshold: f64,
+    ) -> Option<String> {
         let Ok(stats) = self.quality_stats.lock() else {
             return None;
         };
@@ -223,12 +229,12 @@ impl ModelSelector {
         }
 
         let best = assessed.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        if best < QUALITY_GATE_THRESHOLD {
+        if best < quality_gate_threshold {
             let avg = assessed.iter().sum::<f64>() / assessed.len() as f64;
             Some(format!(
                 "Provider quality degradation detected: best avg_reward={:.2} (threshold={:.2}), \
                  mean={:.2} across {} model(s). Consider switching providers.",
-                best, QUALITY_GATE_THRESHOLD, avg, assessed.len()
+                best, quality_gate_threshold, avg, assessed.len()
             ))
         } else {
             None

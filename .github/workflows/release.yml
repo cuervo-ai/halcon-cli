@@ -86,19 +86,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 — static musl (primary Linux artifact)
+          # Linux x86_64 — dynamic glibc (primary Linux artifact)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use-cross: true
+            archive: tar.gz
+            features: headless
+
+          # Linux x86_64 — static musl (Alpine/Docker)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             use-cross: true
             archive: tar.gz
-            features: tui
+            features: headless
 
           # Linux ARM64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use-cross: true
             archive: tar.gz
-            features: ""
+            features: headless
 
           # macOS Intel
           - os: macos-13
@@ -131,6 +138,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Zuclubit (momoto-ui) path
+        shell: bash
+        run: |
+          # The workspace Cargo.toml references ../Zuclubit/momoto-ui/... relative to workspace root.
+          # Clone the momoto-ui submodule to the expected path so optional color-science deps resolve.
+          PARENT_DIR="$(cd .. && pwd)"
+          ZUCLUBIT_DIR="${PARENT_DIR}/Zuclubit"
+          mkdir -p "${ZUCLUBIT_DIR}"
+          if [ ! -d "${ZUCLUBIT_DIR}/momoto-ui" ]; then
+            git clone --depth=1 --branch main \
+              https://github.com/cuervo-ai/momoto-ui.git \
+              "${ZUCLUBIT_DIR}/momoto-ui" 2>/dev/null || \
+            git clone --depth=1 \
+              https://github.com/cuervo-ai/momoto-ui.git \
+              "${ZUCLUBIT_DIR}/momoto-ui" || \
+            echo "WARN: could not clone momoto-ui — color-science will be unavailable"
+          fi
+        continue-on-error: true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -154,23 +180,38 @@ jobs:
       - name: Build (cross)
         if: matrix.use-cross == true
         shell: bash
+        env:
+          # ORT: musl has no prebuilt ONNX Runtime → compile from source inside cross container
+          # GNU: use prebuilt binaries (faster)
+          ORT_STRATEGY: ${{ contains(matrix.target, 'musl') && 'compile' || 'download' }}
+          LIBGIT2_SYS_USE_PKG_CONFIG: "0"
+          LIBGIT2_STATIC: "1"
+          ZSTD_SYS_USE_PKG_CONFIG: "0"
         run: |
           FEATURES="${{ matrix.features }}"
           if [ -n "$FEATURES" ]; then
-            cross build --release --target ${{ matrix.target }} --features "$FEATURES" --locked -p halcon-cli
+            cross build --release --target ${{ matrix.target }} \
+              --no-default-features --features "$FEATURES" --locked -p halcon-cli
           else
-            cross build --release --target ${{ matrix.target }} --no-default-features --locked -p halcon-cli
+            cross build --release --target ${{ matrix.target }} \
+              --no-default-features --locked -p halcon-cli
           fi
 
       - name: Build (cargo)
         if: matrix.use-cross == false
         shell: bash
+        env:
+          ORT_STRATEGY: download
+          LIBGIT2_SYS_USE_PKG_CONFIG: "0"
+          LIBGIT2_STATIC: "1"
         run: |
           FEATURES="${{ matrix.features }}"
           if [ -n "$FEATURES" ]; then
-            cargo build --release --target ${{ matrix.target }} --features "$FEATURES" --locked -p halcon-cli
+            cargo build --release --target ${{ matrix.target }} \
+              --no-default-features --features "$FEATURES" --locked -p halcon-cli
           else
-            cargo build --release --target ${{ matrix.target }} --no-default-features --locked -p halcon-cli
+            cargo build --release --target ${{ matrix.target }} \
+              --no-default-features --locked -p halcon-cli
           fi
 
       - name: Package (Unix)
@@ -309,16 +350,32 @@ jobs:
           version = os.environ.get("VERSION", "")
           dist = Path("dist")
 
+          # Map Rust target triple → (os, arch, ext)
+          TARGET_META = {
+              "aarch64-apple-darwin":       ("macos",   "aarch64", "tar.gz"),
+              "x86_64-apple-darwin":        ("macos",   "x86_64",  "tar.gz"),
+              "x86_64-unknown-linux-gnu":   ("linux",   "x86_64",  "tar.gz"),
+              "x86_64-unknown-linux-musl":  ("linux",   "x86_64",  "tar.gz"),
+              "aarch64-unknown-linux-gnu":  ("linux",   "aarch64", "tar.gz"),
+              "aarch64-unknown-linux-musl": ("linux",   "aarch64", "tar.gz"),
+              "x86_64-pc-windows-msvc":     ("windows", "x86_64",  "zip"),
+          }
+
           artifacts = []
           for f in sorted(dist.glob("*.tar.gz")) + sorted(dist.glob("*.zip")):
               if any(ext in f.name for ext in [".sig", ".pem", ".sbom"]):
                   continue
               sha256 = hashlib.sha256(f.read_bytes()).hexdigest()
               size = f.stat().st_size
-              target = f.stem.replace(f"halcon-{version}-", "").replace(".tar", "").replace(".zip", "")
+              stem = f.stem.replace(".tar", "")
+              target = stem.replace(f"halcon-{version}-", "")
+              meta = TARGET_META.get(target, ("unknown", "unknown", f.suffix.lstrip(".")))
               artifacts.append({
                   "name": f.name,
                   "target": target,
+                  "os": meta[0],
+                  "arch": meta[1],
+                  "ext": meta[2],
                   "sha256": sha256,
                   "size": size,
                   "url": f"https://releases.cli.cuervo.cloud/latest/{f.name}"
@@ -419,6 +476,13 @@ jobs:
             dist/*.sbom.*.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build website
+        run: |
+          cd website
+          npm ci --prefer-offline 2>/dev/null || npm ci
+          npm run build
+        continue-on-error: true  # Don't fail release if website build fails
 
       - name: Deploy website (Cloudflare Pages)
         uses: cloudflare/pages-action@v1

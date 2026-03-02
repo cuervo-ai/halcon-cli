@@ -197,6 +197,7 @@ pub async fn run_orchestrator(
     // and permission requests show as a modal in the TUI (or other parent UI).
     // When None, sub-agents auto-approve all Destructive tools (non-interactive).
     perm_awaiter: Option<crate::render::sink::PermissionAwaiter>,
+    policy: std::sync::Arc<halcon_core::types::PolicyConfig>,
 ) -> Result<OrchestratorResult> {
     let orch_start = Instant::now();
     let budget = SharedBudget::new(parent_limits);
@@ -356,6 +357,7 @@ pub async fn run_orchestrator(
                 let working_dir = working_dir.to_string();
                 // Clone the Option<Arc<...>> so the async move block owns it.
                 let perm_awaiter_clone = perm_awaiter.clone();
+                let policy = policy.clone();
 
                 // Inject shared context from previous waves into system prompt.
                 let system_prompt = if let Some(ref snap) = context_snapshot {
@@ -498,18 +500,15 @@ pub async fn run_orchestrator(
                         stream: true,
                     };
 
-                    // SOTA 2026: Hard cap sub-agent timeout at 200s.
+                    // SOTA 2026: Hard cap sub-agent timeout (PolicyConfig.sub_agent_max_timeout_secs).
                     // Sub-agents have focused, narrow tasks — a 10-minute default causes
                     // 31s+ stalls when the convergence controller gets stuck in a replan loop.
-                    // Audit 2026-02-23: raised from 120s to 200s after confirmed timeouts.
-                    // Audit 2026-02-27: raised from 200s to 300s to accommodate dep_check on
-                    // Node.js projects (npm audit fetches from registry, needs 240s minimum).
                     // dep_check.rs uses NODE_TIMEOUT=240s — sub-agent must exceed that.
-                    const SUB_AGENT_MAX_TIMEOUT_SECS: u64 = 300;
+                    let sub_agent_max_timeout = policy.sub_agent_max_timeout_secs;
                     let timeout_dur = if limits.max_duration_secs > 0 {
-                        Duration::from_secs(limits.max_duration_secs.min(SUB_AGENT_MAX_TIMEOUT_SECS))
+                        Duration::from_secs(limits.max_duration_secs.min(sub_agent_max_timeout))
                     } else {
-                        Duration::from_secs(SUB_AGENT_MAX_TIMEOUT_SECS)
+                        Duration::from_secs(sub_agent_max_timeout)
                     };
 
                     // Set up the render sink and permission policy for this sub-agent.
@@ -586,6 +585,7 @@ pub async fn run_orchestrator(
                         // (tight limits + multilingual keyword extraction).
                         is_sub_agent: true,
                         requested_provider: None,
+                        policy: policy.clone(),
                     };
 
                     let loop_result = tokio::time::timeout(timeout_dur, agent::run_agent_loop(ctx)).await;
@@ -756,6 +756,7 @@ pub async fn run_orchestrator(
                                         plugin_registry: None,
                                         is_sub_agent: true,
                                         requested_provider: None,
+                                        policy: policy.clone(),
                                     };
 
                                     let retry_loop = tokio::time::timeout(
@@ -1363,6 +1364,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
+            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 1);
@@ -1410,6 +1412,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
+            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1457,6 +1460,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
+            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1490,6 +1494,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
+            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         ).await.unwrap();
 
         // Collect all events.
@@ -1544,6 +1549,7 @@ mod tests {
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
+            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1582,6 +1588,7 @@ mod tests {
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
+            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);

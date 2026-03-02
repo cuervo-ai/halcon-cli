@@ -341,6 +341,9 @@ mod tests {
             blocked_tools: vec![],
             failed_sub_agent_steps: vec![],
             critic_unavailable: false,
+            tool_trust_failures: vec![],
+            sla_budget: None,
+            evidence_coverage: 1.0,
         };
 
         let eval = engine.post_loop(&analysis, &result);

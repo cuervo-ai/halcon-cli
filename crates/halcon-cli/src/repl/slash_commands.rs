@@ -305,6 +305,7 @@ impl Repl {
             self.config.tools.confirm_destructive,
             self.config.security.tbac_enabled,
             None, // perm_awaiter: slash commands run outside TUI
+            std::sync::Arc::new(self.config.policy.clone()),
         )
         .await
         {
@@ -1166,6 +1167,7 @@ impl Repl {
             self.config.tools.confirm_destructive,
             self.config.security.tbac_enabled,
             None, // perm_awaiter: slash commands run outside TUI
+            std::sync::Arc::new(self.config.policy.clone()),
         )
         .await
         {

@@ -52,3 +52,23 @@ install:
 	cp target/release/halcon ~/.local/bin/halcon
 	codesign --sign - --force ~/.local/bin/halcon
 	@echo "✅ Installed ~/.local/bin/halcon"
+
+# ── Cross-compilation (Linux targets via cross+Docker) ────────────────────────
+## Linux x86_64 static musl (broadest compatibility)
+build-linux-x86:
+	./scripts/build-cross.sh x86_64-unknown-linux-musl --release
+
+## Linux ARM64 dynamic glibc
+build-linux-arm64:
+	./scripts/build-cross.sh aarch64-unknown-linux-gnu --release
+
+## Linux ARM64 static musl (Alpine/Docker)
+build-linux-arm64-musl:
+	./scripts/build-cross.sh aarch64-unknown-linux-musl --release
+
+## All Linux targets
+build-linux-all: build-linux-x86 build-linux-arm64
+
+## Show contents of dist/
+dist-list:
+	@ls -lh dist/ 2>/dev/null || echo "(dist/ is empty)"

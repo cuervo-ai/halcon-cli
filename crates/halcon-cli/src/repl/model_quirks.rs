@@ -215,6 +215,123 @@ pub fn contains_tool_xml_artifacts(text: &str) -> bool {
         || text.contains("<halcon::tool_call>")
 }
 
+// ── Alternative Tool-Call Format Recovery ──────────────────────────────────
+
+/// A recovered tool call extracted from alternative text-based formats.
+///
+/// Some providers emit tool calls as XML-like text instead of structured
+/// `ToolUseStart`/`ToolUseDelta` chunks. This struct represents a tool call
+/// recovered from such text so it can be injected into the normal execution
+/// pipeline as if it were a native tool call.
+#[derive(Debug, Clone)]
+pub struct RecoveredToolCall {
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+/// Marker for the format that was detected in text.
+const DSML_MARKER: &str = "\u{ff5c}DSML\u{ff5c}";
+
+/// Attempt to extract tool calls from alternative text-based formats.
+///
+/// Currently recognises:
+/// - **DSML format**: `<｜DSML｜function_calls>...<｜DSML｜invoke name="...">...`
+///
+/// Returns `None` if no alternative format is detected, allowing the caller
+/// to proceed with the normal text-only path. Returns `Some(vec)` with the
+/// recovered tool calls if a known format was found.
+///
+/// This is **provider-agnostic**: any model that emits these patterns gets
+/// the same treatment. P1-B validation still applies to the recovered calls.
+pub fn try_recover_tool_calls_from_text(text: &str) -> Option<Vec<RecoveredToolCall>> {
+    // Fast path: check for DSML marker (U+FF5C = fullwidth vertical bar ｜)
+    if !text.contains(DSML_MARKER) {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+    let mut rest = text;
+
+    // Pattern: <｜DSML｜invoke name="TOOL_NAME">
+    //          <｜DSML｜parameter name="PARAM" ...>VALUE<｜DSML｜/parameter>
+    //          ...
+    //          </｜DSML｜invoke>
+    let invoke_open = format!("<{DSML_MARKER}invoke name=\"");
+    let invoke_close = format!("</{DSML_MARKER}invoke>");
+    let param_open = format!("<{DSML_MARKER}parameter name=\"");
+    let param_close_prefix = format!("</{DSML_MARKER}parameter>");
+    // Also handle self-closing: <｜DSML｜parameter>
+    let param_close_alt = format!("{DSML_MARKER}parameter>");
+
+    while let Some(invoke_start) = rest.find(&invoke_open) {
+        let after_open = &rest[invoke_start + invoke_open.len()..];
+        // Extract tool name (until closing quote)
+        let name_end = match after_open.find('"') {
+            Some(i) => i,
+            None => break,
+        };
+        let tool_name = &after_open[..name_end];
+
+        // Find the end of this invoke block
+        let invoke_body_start = invoke_start + invoke_open.len() + name_end;
+        let remaining = &rest[invoke_body_start..];
+        let invoke_end = remaining.find(&invoke_close).unwrap_or(remaining.len());
+        let invoke_body = &remaining[..invoke_end];
+
+        // Extract parameters from the invoke body
+        let mut params = serde_json::Map::new();
+        let mut param_rest = invoke_body;
+        while let Some(param_start) = param_rest.find(&param_open) {
+            let after_param = &param_rest[param_start + param_open.len()..];
+            let pname_end = match after_param.find('"') {
+                Some(i) => i,
+                None => break,
+            };
+            let param_name = &after_param[..pname_end];
+
+            // Find the > that closes the opening tag (skip attributes like string="true")
+            let tag_close = match after_param[pname_end..].find('>') {
+                Some(i) => pname_end + i + 1,
+                None => break,
+            };
+
+            let value_start = &after_param[tag_close..];
+            // Value ends at the closing tag
+            let value_end = value_start
+                .find(&param_close_prefix)
+                .or_else(|| value_start.find(&param_close_alt))
+                .unwrap_or(value_start.len());
+            let param_value = value_start[..value_end].trim();
+
+            params.insert(
+                param_name.to_string(),
+                serde_json::Value::String(param_value.to_string()),
+            );
+
+            param_rest = &value_start[value_end..];
+        }
+
+        calls.push(RecoveredToolCall {
+            name: tool_name.to_string(),
+            input: serde_json::Value::Object(params),
+        });
+
+        // Advance past this invoke block
+        rest = &rest[invoke_body_start + invoke_end + invoke_close.len().min(remaining.len() - invoke_end)..];
+    }
+
+    if calls.is_empty() {
+        None
+    } else {
+        tracing::info!(
+            count = calls.len(),
+            tools = ?calls.iter().map(|c| &c.name).collect::<Vec<_>>(),
+            "DSML format recovery: extracted tool calls from alternative text format"
+        );
+        Some(calls)
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -331,5 +448,51 @@ mod tests {
         assert!(contains_tool_xml_artifacts("<invoke name=\"x\">"));
         assert!(contains_tool_xml_artifacts("<halcon::tool_call>x</halcon::tool_call>"));
         assert!(!contains_tool_xml_artifacts("clean text without xml"));
+    }
+
+    #[test]
+    fn dsml_recovery_extracts_single_tool_call() {
+        let text = "I need to list files.\n\
+            <\u{ff5c}DSML\u{ff5c}function_calls>\n\
+            <\u{ff5c}DSML\u{ff5c}invoke name=\"list_files\">\n\
+            <\u{ff5c}DSML\u{ff5c}parameter name=\"path\" string=\"true\">.</\u{ff5c}DSML\u{ff5c}parameter>\n\
+            </\u{ff5c}DSML\u{ff5c}invoke>\n\
+            </\u{ff5c}DSML\u{ff5c}function_calls>";
+
+        let result = try_recover_tool_calls_from_text(text);
+        assert!(result.is_some());
+        let calls = result.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_files");
+        assert_eq!(calls[0].input["path"], ".");
+    }
+
+    #[test]
+    fn dsml_recovery_extracts_multiple_parameters() {
+        let text = "<\u{ff5c}DSML\u{ff5c}function_calls>\n\
+            <\u{ff5c}DSML\u{ff5c}invoke name=\"file_read\">\n\
+            <\u{ff5c}DSML\u{ff5c}parameter name=\"path\">src/main.rs</\u{ff5c}DSML\u{ff5c}parameter>\n\
+            <\u{ff5c}DSML\u{ff5c}parameter name=\"lines\">100</\u{ff5c}DSML\u{ff5c}parameter>\n\
+            </\u{ff5c}DSML\u{ff5c}invoke>\n\
+            </\u{ff5c}DSML\u{ff5c}function_calls>";
+
+        let calls = try_recover_tool_calls_from_text(text).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_read");
+        assert_eq!(calls[0].input["path"], "src/main.rs");
+        assert_eq!(calls[0].input["lines"], "100");
+    }
+
+    #[test]
+    fn dsml_recovery_returns_none_for_clean_text() {
+        assert!(try_recover_tool_calls_from_text("Hello world, no DSML here").is_none());
+        assert!(try_recover_tool_calls_from_text("").is_none());
+    }
+
+    #[test]
+    fn dsml_recovery_returns_none_for_standard_xml() {
+        // Standard halcon XML should NOT be recovered as DSML
+        let text = "<function_calls><invoke name=\"test\"></invoke></function_calls>";
+        assert!(try_recover_tool_calls_from_text(text).is_none());
     }
 }

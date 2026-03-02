@@ -198,12 +198,12 @@ pub(super) async fn run(
     // force an early synthesis instead of starting a new model invocation.
     // Guard only fires when `used > 0` (at least one round has been completed).
     // On round 0, the full budget is available and no truncation risk exists.
-    const MIN_OUTPUT_HEADROOM_TOKENS: u64 = 5_000;
+    let min_output_headroom = state.policy.output_headroom_tokens as u64;
     if limits.max_total_tokens > 0 {
         let used = session.total_usage.total() as u64;
         let budget = limits.max_total_tokens as u64;
         let remaining = budget.saturating_sub(used);
-        if used > 0 && remaining < MIN_OUTPUT_HEADROOM_TOKENS {
+        if used > 0 && remaining < min_output_headroom {
             tracing::warn!(
                 used,
                 budget,
@@ -219,16 +219,16 @@ pub(super) async fn run(
                     Some("Increase max_total_tokens for complex tasks"),
                 );
             }
-            state.synthesis_origin = Some(SynthesisOrigin::CacheCorruption);
-            state.forced_synthesis_detected = true;
+            state.synthesis.synthesis_origin = Some(SynthesisOrigin::CacheCorruption);
+            state.synthesis.forced_synthesis_detected = true;
             // EBS-R1 (OutputHeadroomCritical): if evidence gate fires, override origin to
             // SupervisorFailure so reward pipeline applies synthesis penalty.
-            if state.evidence_bundle.evidence_gate_fires() {
-                state.evidence_bundle.synthesis_blocked = true;
-                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+            if state.evidence.bundle.evidence_gate_fires() {
+                state.evidence.bundle.synthesis_blocked = true;
+                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                 tracing::warn!(
                     session_id = %state.session_id,
-                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                     "EvidenceGate FIRED (OutputHeadroomCritical): origin overridden to SupervisorFailure"
                 );
             }
@@ -258,21 +258,21 @@ pub(super) async fn run(
     //
     // NOT a dependency on LoopCritic (probabilistic). LoopCritic remains as second line.
     if round_request.tools.is_empty()
-        && state.evidence_bundle.evidence_gate_fires()
-        && !state.evidence_bundle.synthesis_blocked
+        && state.evidence.bundle.evidence_gate_fires()
+        && !state.evidence.bundle.synthesis_blocked
     {
         use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
-        let gate_msg = state.evidence_bundle.gate_message();
-        state.evidence_bundle.synthesis_blocked = true;
-        state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
-        state.deterministic_boundary_enforced = true;
-        state.forced_synthesis_detected = true;
+        let gate_msg = state.evidence.bundle.gate_message();
+        state.evidence.bundle.synthesis_blocked = true;
+        state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+        state.evidence.deterministic_boundary_enforced = true;
+        state.synthesis.forced_synthesis_detected = true;
         tracing::warn!(
             session_id = %state.session_id,
             round,
-            text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
-            content_read_attempts = state.evidence_bundle.content_read_attempts,
-            binary_file_count = state.evidence_bundle.binary_file_count,
+            text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
+            content_read_attempts = state.evidence.bundle.content_read_attempts,
+            binary_file_count = state.evidence.bundle.binary_file_count,
             min_threshold = MIN_EVIDENCE_BYTES,
             "EBS-B2: Pre-invocation synthesis gate fired — LLM call skipped, \
              limitation notice injected directly (BRECHA-2 deterministic fix)"
@@ -425,12 +425,12 @@ pub(super) async fn run(
                 full_text: state.full_text.clone(),
                 rounds: state.rounds,
                 stop_condition: StopCondition::ProviderError,
-                call_input_tokens: state.call_input_tokens,
-                call_output_tokens: state.call_output_tokens,
-                call_cost: state.call_cost,
+                call_input_tokens: state.tokens.call_input_tokens,
+                call_output_tokens: state.tokens.call_output_tokens,
+                call_cost: state.tokens.call_cost,
                 latency_ms: state.loop_start.elapsed().as_millis() as u64,
                 execution_fingerprint: compute_fingerprint(&round_request.messages),
-                round_evaluations: state.round_evaluations.clone(),
+                round_evaluations: state.convergence.round_evaluations.clone(),
                 timeline_json: None,
                 last_model_used: None,
                 plan_completion_ratio: 0.0,
@@ -476,7 +476,7 @@ pub(super) async fn run(
                     }
 
                     // ── Dynamic Budget Reconciliation ──────────────────────────────────
-                    // The state.pipeline_budget was computed pre-loop from the PRIMARY provider's
+                    // The state.tokens.pipeline_budget was computed pre-loop from the PRIMARY provider's
                     // context_window. After fallback to a provider with a SMALLER window
                     // (e.g., Anthropic 200K → Ollama 32K), the old budget is too large:
                     // L0 alone (40% × 200K = 80K) would exceed Ollama's full context window.
@@ -498,16 +498,16 @@ pub(super) async fn run(
                             input_fraction
                         }
                     };
-                    if new_pipeline_budget != state.pipeline_budget {
+                    if new_pipeline_budget != state.tokens.pipeline_budget {
                         tracing::info!(
-                            old_budget = state.pipeline_budget,
+                            old_budget = state.tokens.pipeline_budget,
                             new_budget = new_pipeline_budget,
                             fallback_context_window,
                             provider = %attempt.provider_name,
                             model = %round_request.model,
                             "Dynamic Budget Reconciliation: adjusting pipeline budget for fallback provider"
                         );
-                        state.pipeline_budget = new_pipeline_budget;
+                        state.tokens.pipeline_budget = new_pipeline_budget;
                         state.context_pipeline.update_budget(new_pipeline_budget);
                     }
                     // Keep state.compaction_model in sync with the now-active model.
@@ -661,12 +661,12 @@ pub(super) async fn run(
                     full_text: state.full_text.clone(),
                     rounds: state.rounds,
                     stop_condition: StopCondition::Interrupted,
-                    call_input_tokens: state.call_input_tokens,
-                    call_output_tokens: state.call_output_tokens,
-                    call_cost: state.call_cost,
+                    call_input_tokens: state.tokens.call_input_tokens,
+                    call_output_tokens: state.tokens.call_output_tokens,
+                    call_cost: state.tokens.call_cost,
                     latency_ms: state.loop_start.elapsed().as_millis() as u64,
                     execution_fingerprint: compute_fingerprint(&round_request.messages),
-                    round_evaluations: state.round_evaluations.clone(),
+                    round_evaluations: state.convergence.round_evaluations.clone(),
                     timeline_json: None,
                     last_model_used: None,
                     plan_completion_ratio: 0.0,
@@ -795,12 +795,12 @@ pub(super) async fn run(
                 full_text: state.full_text.clone(),
                 rounds: state.rounds,
                 stop_condition: StopCondition::ProviderError,
-                call_input_tokens: state.call_input_tokens,
-                call_output_tokens: state.call_output_tokens,
-                call_cost: state.call_cost,
+                call_input_tokens: state.tokens.call_input_tokens,
+                call_output_tokens: state.tokens.call_output_tokens,
+                call_cost: state.tokens.call_cost,
                 latency_ms: state.loop_start.elapsed().as_millis() as u64,
                 execution_fingerprint: compute_fingerprint(&round_request.messages),
-                round_evaluations: state.round_evaluations.clone(),
+                round_evaluations: state.convergence.round_evaluations.clone(),
                 timeline_json: None,
                 last_model_used: None,
                 plan_completion_ratio: 0.0,
@@ -828,19 +828,19 @@ pub(super) async fn run(
     session.estimated_cost_usd += round_cost.estimated_cost_usd;
 
     // Accumulate per-call metrics.
-    state.call_input_tokens += round_usage.input_tokens as u64;
-    state.call_output_tokens += round_usage.output_tokens as u64;
-    state.call_cost += round_cost.estimated_cost_usd;
+    state.tokens.call_input_tokens += round_usage.input_tokens as u64;
+    state.tokens.call_output_tokens += round_usage.output_tokens as u64;
+    state.tokens.call_cost += round_cost.estimated_cost_usd;
 
     // HICON Phase 3: Feed token metrics to Bayesian detector
-    state.loop_guard.update_token_counts(
+    state.guards.loop_guard.update_token_counts(
         round_usage.input_tokens as u64,
         round_usage.output_tokens as u64,
         (round_usage.input_tokens + round_usage.output_tokens) as u64,
     );
 
     // HICON Phase 5: Feed metrics to ARIMA predictor for resource forecasting
-    state.resource_predictor.observe(
+    state.hicon.resource_predictor.observe(
         round + 1,
         round_usage.input_tokens as u64,
         round_usage.output_tokens as u64,
@@ -848,17 +848,17 @@ pub(super) async fn run(
     );
 
     // HICON Phase 5: Budget overflow detection (check every 5 rounds)
-    if state.resource_predictor.is_ready() && (round + 1) % 5 == 0 {
-        let prediction = state.resource_predictor.predict_resources(5); // Predict next 5 state.rounds
+    if state.hicon.resource_predictor.is_ready() && (round + 1) % 5 == 0 {
+        let prediction = state.hicon.resource_predictor.predict_resources(5); // Predict next 5 state.rounds
 
         // Check token budget overflow
         if let Some(total_tokens) = prediction.total_tokens_mean() {
-            let projected_total = state.call_input_tokens + state.call_output_tokens + total_tokens as u64;
+            let projected_total = state.tokens.call_input_tokens + state.tokens.call_output_tokens + total_tokens as u64;
             let token_limit = limits.max_total_tokens;
             if token_limit > 0 && projected_total > token_limit as u64 {
                 tracing::warn!(
                     round = round + 1,
-                    current_tokens = state.call_input_tokens + state.call_output_tokens,
+                    current_tokens = state.tokens.call_input_tokens + state.tokens.call_output_tokens,
                     predicted_total = projected_total,
                     limit = token_limit,
                     "ARIMA: Token budget overflow predicted within 5 state.rounds"
@@ -866,7 +866,7 @@ pub(super) async fn run(
                 // Remediation Phase 1.2: Make ARIMA warnings visible to user
                 render_sink.hicon_budget_warning(
                     5,
-                    state.call_input_tokens + state.call_output_tokens,
+                    state.tokens.call_input_tokens + state.tokens.call_output_tokens,
                     projected_total,
                 );
             }
@@ -874,11 +874,11 @@ pub(super) async fn run(
 
         // Check cost budget overflow (if budget configured)
         if let Some(total_cost) = prediction.total_cost_mean() {
-            let projected_cost = state.call_cost + total_cost;
+            let projected_cost = state.tokens.call_cost + total_cost;
             // Note: Cost budget not in limits struct yet, would need AgentConfig integration
             tracing::debug!(
                 round = round + 1,
-                current_cost = state.call_cost,
+                current_cost = state.tokens.call_cost,
                 predicted_total = projected_cost,
                 "ARIMA: Cost projection"
             );
@@ -1134,17 +1134,113 @@ pub(super) async fn run(
             full_text: state.full_text.clone(),
             rounds: state.rounds,
             stop_condition: stop,
-            call_input_tokens: state.call_input_tokens,
-            call_output_tokens: state.call_output_tokens,
-            call_cost: state.call_cost,
+            call_input_tokens: state.tokens.call_input_tokens,
+            call_output_tokens: state.tokens.call_output_tokens,
+            call_cost: state.tokens.call_cost,
             latency_ms: state.loop_start.elapsed().as_millis() as u64,
             execution_fingerprint: compute_fingerprint(&state.messages),
-            round_evaluations: state.round_evaluations.clone(),
+            round_evaluations: state.convergence.round_evaluations.clone(),
             timeline_json: state.execution_tracker.as_ref().map(|t| t.to_json().to_string()),
             last_model_used: Some(state.last_round_model_name.clone()),
             plan_completion_ratio: budget_exit_plan_ratio,
         })));
     }
+
+    // ── FASE 2: Alternative format recovery ────────────────────────────────
+    // Some providers emit tool calls as text in alternative XML formats (e.g. DSML)
+    // instead of structured ToolUseStart/ToolUseDelta chunks. When `stop_reason`
+    // is EndTurn but the text contains a recoverable format, extract the tool calls
+    // and redirect to the tool-use path. Provider-agnostic: any model that emits
+    // these patterns gets the same treatment. P1-B still applies.
+    if stop_reason != StopReason::ToolUse {
+        if let Some(recovered) = super::super::model_quirks::try_recover_tool_calls_from_text(&round_text) {
+            tracing::info!(
+                round,
+                recovered_count = recovered.len(),
+                "FASE 2: recovered tool calls from alternative text format — redirecting to tool-use path"
+            );
+            if !state.silent {
+                render_sink.info(&format!(
+                    "[format-recovery] recovered {} tool call(s) from text format",
+                    recovered.len()
+                ));
+            }
+            // Convert recovered calls to CompletedToolUse and redirect to tool-use path.
+            // Use synthetic IDs since the provider didn't generate structured ones.
+            let mut synthetic_tools: Vec<super::super::accumulator::CompletedToolUse> = Vec::new();
+            for (i, call) in recovered.iter().enumerate() {
+                synthetic_tools.push(super::super::accumulator::CompletedToolUse {
+                    id: format!("recovered_{round}_{i}"),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                });
+            }
+
+            // Strip the DSML text from round_text so it doesn't contaminate full_text.
+            let clean_text = super::super::model_quirks::strip_tool_xml_artifacts(&round_text);
+            let clean_round_text = if clean_text.contains('\u{ff5c}') {
+                // DSML markers still present — strip the entire DSML block
+                round_text
+                    .split("<\u{ff5c}DSML\u{ff5c}")
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            } else {
+                clean_text.into_owned()
+            };
+
+            // Record trace with the recovered tool calls.
+            record_trace(
+                trace_db, state.session_id, &mut state.trace_step_index,
+                TraceStepType::ModelResponse,
+                serde_json::json!({
+                    "round": pending_trace_round,
+                    "text": &clean_round_text,
+                    "stop_reason": "recovered_tool_use",
+                    "usage": { "input_tokens": pending_trace_usage.input_tokens, "output_tokens": pending_trace_usage.output_tokens },
+                    "latency_ms": pending_trace_latency,
+                    "tool_uses": synthetic_tools.iter().map(|t| serde_json::json!({
+                        "id": t.id, "name": t.name, "input": t.input,
+                    })).collect::<Vec<_>>(),
+                }).to_string(),
+                pending_trace_latency,
+                exec_clock,
+            );
+
+            // Build assistant message with tool use blocks.
+            let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
+            if !clean_round_text.is_empty() {
+                assistant_blocks.push(ContentBlock::Text { text: clean_round_text });
+            }
+            for tool in &synthetic_tools {
+                assistant_blocks.push(ContentBlock::ToolUse {
+                    id: tool.id.clone(),
+                    name: tool.name.clone(),
+                    input: tool.input.clone(),
+                });
+            }
+            let assistant_msg = ChatMessage {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(assistant_blocks),
+            };
+            state.messages.push(assistant_msg.clone());
+            state.context_pipeline.add_message(assistant_msg.clone());
+            session.add_message(assistant_msg);
+
+            state.rounds = round + 1;
+            session.agent_rounds += 1;
+
+            return Ok(ProviderRoundOutcome::ToolUse(ProviderRoundOutput {
+                completed_tools: synthetic_tools,
+                round_model_name,
+                round_provider_name,
+                round_usage,
+                round_text_for_scorer,
+            }));
+        }
+    }
+    // ── End FASE 2 ───────────────────────────────────────────────────────────
 
     if stop_reason != StopReason::ToolUse {
         // Record deferred trace with empty tool_uses for non-tool-use rounds.
@@ -1182,19 +1278,19 @@ pub(super) async fn run(
         // Sprint 1 Fix: Reset loop guard counter on text rounds.
         // Step 8e: Use record_text_round() instead of reset_on_text_round() to track
         // RoundType::Text in the sliding window for cross-type oscillation detection.
-        state.loop_guard.record_text_round();
-        if state.loop_guard.detect_cross_type_oscillation() {
+        state.guards.loop_guard.record_text_round();
+        if state.guards.loop_guard.detect_cross_type_oscillation() {
             render_sink.warning("[loop-guard] cross-type Tool↔Text oscillation — forcing synthesis", None);
-            state.synthesis_origin = Some(SynthesisOrigin::OscillationDetected);
-            state.forced_synthesis_detected = true;
+            state.synthesis.synthesis_origin = Some(SynthesisOrigin::OscillationDetected);
+            state.synthesis.forced_synthesis_detected = true;
             // EBS-R1 (CrossTypeOscillationDetected): if evidence gate fires, override origin to
             // SupervisorFailure so reward pipeline applies synthesis penalty on unreadable files.
-            if state.evidence_bundle.evidence_gate_fires() {
-                state.evidence_bundle.synthesis_blocked = true;
-                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+            if state.evidence.bundle.evidence_gate_fires() {
+                state.evidence.bundle.synthesis_blocked = true;
+                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                 tracing::warn!(
                     session_id = %state.session_id,
-                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                     "EvidenceGate FIRED (CrossTypeOscillationDetected): \
                      origin overridden to SupervisorFailure"
                 );

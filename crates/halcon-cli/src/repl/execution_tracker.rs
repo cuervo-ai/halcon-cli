@@ -228,6 +228,18 @@ impl ExecutionTracker {
         // plan_start is intentionally NOT reset — total elapsed covers the full session.
     }
 
+    /// Truncate the plan to at most `max_steps` steps (Phase 2 SLA).
+    ///
+    /// Drops trailing non-terminal steps beyond the limit. Already-completed steps
+    /// are preserved. Used when SLA budget cannot accommodate the full plan.
+    pub fn truncate_to(&mut self, max_steps: usize) {
+        if self.plan.steps.len() <= max_steps {
+            return;
+        }
+        self.plan.steps.truncate(max_steps);
+        self.steps.truncate(max_steps);
+    }
+
     /// Export execution timeline for logging/serialization.
     #[allow(dead_code)]
     pub fn to_timeline(&self) -> ExecutionTimeline {
@@ -293,6 +305,31 @@ impl ExecutionTracker {
                     plan_id: self.plan.plan_id,
                     step_index,
                     outcome: "success".to_string(),
+                }));
+            }
+        }
+    }
+
+    /// Mark a step as skipped due to capability validation failure (P3.2).
+    ///
+    /// Sets the step outcome to a Failure with the given reason and transitions
+    /// to Completed (terminal). Skipped steps do not count toward progress.
+    pub fn skip_step(&mut self, step_index: usize, reason: &str) {
+        if let Some(tracked) = self.steps.get_mut(step_index) {
+            if !tracked.status.is_terminal() {
+                let now = Utc::now();
+                tracked.status = TaskStatus::Completed;
+                tracked.finished_at = Some(now);
+                tracked.duration_ms = Some(0);
+                let outcome = StepOutcome::Skipped {
+                    reason: reason.to_string(),
+                };
+                tracked.step.outcome = Some(outcome.clone());
+                self.plan.steps[step_index].outcome = Some(outcome);
+                let _ = self.event_tx.send(DomainEvent::new(EventPayload::PlanStepCompleted {
+                    plan_id: self.plan.plan_id,
+                    step_index,
+                    outcome: format!("skipped: {}", reason),
                 }));
             }
         }
@@ -432,60 +469,15 @@ impl ExecutionTracker {
 // if BOTH names (plan step + executed tool) resolve to the same canonical entry,
 // regardless of which direction the lookup runs.
 
-/// Known equivalences between native tool names and MCP/external tool variants.
-///
-/// Each entry is `(canonical_name, [alias1, alias2, ...])`.  Two tool names are
-/// considered equivalent if they both appear in the same row (as the canonical
-/// name or as an alias).
-static TOOL_ALIASES: &[(&str, &[&str])] = &[
-    // ── File operations ──
-    ("file_read",       &["read_text_file", "read_file", "readfile", "get_file_contents", "get_file", "read_content"]),
-    ("file_write",      &["write_file", "write_text_file", "create_file", "save_file", "put_file"]),
-    ("file_edit",       &["edit_file", "update_file", "modify_file", "patch_file", "replace_in_file"]),
-    ("file_delete",     &["delete_file", "remove_file", "rm_file"]),
-    // ── Directory listing ──
-    ("directory_tree",  &["list_directory", "list_dir", "list_files", "read_dir", "ls", "show_directory"]),
-    ("glob",            &["find_files", "search_files", "glob_pattern", "list_glob", "match_files"]),
-    // ── Search ──
-    ("grep",            &["search_text", "grep_search", "search_in_file", "search_file", "find_in_files"]),
-    // ── Shell execution ──
-    ("bash",            &["run_bash", "execute_bash", "shell", "run_command", "execute_command", "run_shell", "exec"]),
-    // ── Git operations ──
-    ("git_status",      &["get_git_status", "git_state", "show_git_status"]),
-    ("git_diff",        &["get_git_diff", "show_diff", "diff"]),
-    ("git_log",         &["get_git_log", "show_log", "git_history", "log"]),
-    ("git_commit",      &["do_git_commit", "commit_changes", "commit"]),
-    ("git_add",         &["stage_changes", "git_stage", "add_to_staging"]),
-    ("git_branch",      &["list_branches", "show_branch", "current_branch"]),
-    // ── Web ──
-    ("web_search",      &["search_web", "search_internet", "web_query", "internet_search"]),
-    ("web_fetch",       &["fetch_url", "get_url", "http_get", "fetch_page", "fetch"]),
-    // ── Tasks ──
-    ("task_track",      &["track_task", "create_task", "add_task", "new_task"]),
-];
+// Tool alias resolution is centralised in `tool_aliases` module.
+// Delegation to shared module avoids maintaining duplicate alias tables.
 
 /// Returns true if `a` and `b` name the same tool operation.
 ///
-/// Checks exact equality first, then bidirectional alias lookup: both names
-/// must appear in the same row of `TOOL_ALIASES` (as canonical or as an alias).
+/// Delegates to `tool_aliases::are_equivalent()` which resolves both names
+/// to canonical form before comparison.
 fn tool_names_are_equivalent(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    for (canonical, aliases) in TOOL_ALIASES {
-        let a_in_row = a == *canonical || aliases.contains(&a);
-        let b_in_row = b == *canonical || aliases.contains(&b);
-        if a_in_row && b_in_row {
-            tracing::trace!(
-                plan_tool = a,
-                executed_tool = b,
-                canonical = canonical,
-                "ExecutionTracker: fuzzy tool name match via alias table"
-            );
-            return true;
-        }
-    }
-    false
+    super::tool_aliases::are_equivalent(a, b)
 }
 
 // ── Timeline types ──
@@ -1213,6 +1205,57 @@ mod tests {
         assert_eq!(completed_after, 2, "both MCP steps should complete plan steps via alias");
         assert_eq!(total_after, 2);
         assert!(tracker.is_complete());
+    }
+
+    // ── Phase 2 SLA: truncate_to tests ──
+
+    #[test]
+    fn truncate_to_reduces_plan_and_steps() {
+        let tracker_steps = vec![
+            make_step("Step 1", "file_read"),
+            make_step("Step 2", "bash"),
+            make_step("Step 3", "file_edit"),
+            make_step("Step 4", "grep"),
+        ];
+        let mut tracker = make_tracker(tracker_steps);
+        assert_eq!(tracker.plan().steps.len(), 4);
+        assert_eq!(tracker.tracked_steps().len(), 4);
+
+        tracker.truncate_to(2);
+        assert_eq!(tracker.plan().steps.len(), 2);
+        assert_eq!(tracker.tracked_steps().len(), 2);
+        // First two steps preserved.
+        assert_eq!(tracker.tracked_steps()[0].step.description, "Step 1");
+        assert_eq!(tracker.tracked_steps()[1].step.description, "Step 2");
+    }
+
+    #[test]
+    fn truncate_to_noop_when_within_limit() {
+        let mut tracker = make_tracker(vec![
+            make_step("Step 1", "file_read"),
+            make_step("Step 2", "bash"),
+        ]);
+        tracker.truncate_to(5); // Limit is higher than step count.
+        assert_eq!(tracker.plan().steps.len(), 2);
+        assert_eq!(tracker.tracked_steps().len(), 2);
+    }
+
+    #[test]
+    fn truncate_to_preserves_completed_steps() {
+        let mut tracker = make_tracker(vec![
+            make_step("Step 1", "file_read"),
+            make_step("Step 2", "bash"),
+            make_step("Step 3", "file_edit"),
+        ]);
+        // Complete first step.
+        tracker.record_tool_results(&["file_read".into()], &[], 1);
+        assert_eq!(tracker.tracked_steps()[0].status, TaskStatus::Completed);
+
+        // Truncate to 2 — completed step is preserved.
+        tracker.truncate_to(2);
+        assert_eq!(tracker.plan().steps.len(), 2);
+        assert_eq!(tracker.tracked_steps()[0].status, TaskStatus::Completed);
+        assert_eq!(tracker.tracked_steps()[1].status, TaskStatus::Pending);
     }
 
     #[test]

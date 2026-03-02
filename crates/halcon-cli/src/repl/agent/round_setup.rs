@@ -132,7 +132,51 @@ pub(super) async fn run(
                 }
                 hasher.finish()
             };
-            state.loop_guard.update_plan_hash(plan_hash);
+            state.guards.loop_guard.update_plan_hash(plan_hash);
+        }
+    }
+
+    // Phase 5 K5-2: compaction fallback for sustained super-linear context growth.
+    // When post_batch detects consecutive growth violations exceeding the trigger,
+    // this fallback truncates old messages and caps tool outputs to reduce context size.
+    // This runs BEFORE the normal compaction check, which may follow with summarization.
+    if state.tokens.k5_2_compaction_needed {
+        state.tokens.k5_2_compaction_needed = false; // reset after handling
+        tracing::warn!(
+            round,
+            messages = state.messages.len(),
+            "K5-2 compaction fallback: truncating old messages + capping tool outputs"
+        );
+        // Truncation fallback: remove oldest non-system messages, keep last 60%.
+        let keep_count = (state.messages.len() * 3) / 5; // ~60%
+        if keep_count > 0 && state.messages.len() > keep_count {
+            let remove_count = state.messages.len() - keep_count;
+            // Remove from the front, but preserve the first message (system/user prompt).
+            let mut preserved = Vec::with_capacity(keep_count + 1);
+            preserved.push(state.messages[0].clone()); // keep system/first user message
+            preserved.extend(state.messages[remove_count + 1..].iter().cloned());
+            state.messages = preserved;
+            tracing::info!(
+                removed = remove_count,
+                remaining = state.messages.len(),
+                "K5-2: truncated old messages"
+            );
+        }
+        // Cap tool output content to 2000 chars to reduce per-message bloat.
+        for msg in state.messages.iter_mut() {
+            if let halcon_core::types::MessageContent::Blocks(ref mut blocks) = msg.content {
+                for block in blocks.iter_mut() {
+                    if let halcon_core::types::ContentBlock::ToolResult { ref mut content, .. } = block {
+                        if content.len() > 2000 {
+                            content.truncate(2000);
+                            content.push_str("\n[... truncated by K5-2 compaction]");
+                        }
+                    }
+                }
+            }
+        }
+        if !state.silent {
+            render_sink.info("[K5-2] context compaction applied — truncated old messages and tool outputs");
         }
     }
 
@@ -143,9 +187,9 @@ pub(super) async fn run(
         // `needs_compaction()` uses the stale config value (default 200K) which fires at
         // 80% × 200K = 160K. For DeepSeek (64K context), that threshold is never reached
         // before the provider rejects the request. Instead use `needs_compaction_with_budget()`
-        // which applies a 70% threshold on the actual state.pipeline_budget derived from the model
+        // which applies a 70% threshold on the actual state.tokens.pipeline_budget derived from the model
         // context window (Fix A): trigger at 70% × 80% × 64K ≈ 35.8K tokens — safe, early.
-        if compactor.needs_compaction_with_budget(&state.messages, state.pipeline_budget) {
+        if compactor.needs_compaction_with_budget(&state.messages, state.tokens.pipeline_budget) {
             if !state.silent {
                 render_sink.spinner_start("Compacting context...");
             }
@@ -158,7 +202,7 @@ pub(super) async fn run(
             let pre_compact_count = state.messages.len();
 
             let compaction_result = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(state.policy.compaction_timeout_secs),
                 async {
                     // Build a compaction request using the same provider.
                     // Use state.compaction_model (resolved pre-loop) so cross-provider
@@ -206,7 +250,7 @@ pub(super) async fn run(
                 Ok(summary_text) if !summary_text.is_empty() => {
                     // Use budget-adaptive keep_recent so the preserved window scales
                     // with the provider's actual context window (Fix B extension).
-                    compactor.apply_compaction_with_budget(&mut state.messages, &summary_text, state.pipeline_budget);
+                    compactor.apply_compaction_with_budget(&mut state.messages, &summary_text, state.tokens.pipeline_budget);
                     // Sync session state.messages and re-seed pipeline.
                     session.messages = state.messages.clone();
                     // REMEDIATION FIX C — Preserve L1-L4 on compaction.
@@ -235,16 +279,17 @@ pub(super) async fn run(
                     // Compute utilization and escalate proportionally.
                     let current_tokens =
                         ContextCompactor::estimate_message_tokens(&state.messages) as u32;
-                    let utilization_pct = if state.pipeline_budget > 0 {
-                        (current_tokens as f64 / state.pipeline_budget as f64 * 100.0) as u32
+                    let utilization_pct = if state.tokens.pipeline_budget > 0 {
+                        (current_tokens as f64 / state.tokens.pipeline_budget as f64 * 100.0) as u32
                     } else {
                         100
                     };
                     tracing::warn!(
                         utilization_pct,
                         current_tokens,
-                        state.pipeline_budget,
-                        "Context compaction timed out after 15s — context at {}% capacity",
+                        state.tokens.pipeline_budget,
+                        "Context compaction timed out after {}s — context at {}% capacity",
+                        state.policy.compaction_timeout_secs,
                         utilization_pct
                     );
                     if !state.silent {
@@ -252,7 +297,7 @@ pub(super) async fn run(
                             &format!(
                                 "context compaction timed out ({}% full, {}/{} tokens) — \
                                  disabling tools next round to prevent context overflow",
-                                utilization_pct, current_tokens, state.pipeline_budget
+                                utilization_pct, current_tokens, state.tokens.pipeline_budget
                             ),
                             Some("Provider may be slow; tools suppressed to allow synthesis"),
                         );
@@ -265,7 +310,7 @@ pub(super) async fn run(
                             "P1-B: context ≥70% after compaction timeout — \
                              suppressing tools next round"
                         );
-                        state.tool_decision.set_force_next();
+                        state.synthesis.tool_decision.set_force_next();
                     }
                 }
                 _ => {}
@@ -444,6 +489,16 @@ pub(super) async fn run(
             l2_entries, l3_entries, l4_entries, total,
         );
     }
+    // F1 ToolTrust: filter low-trust tools after round 0.
+    if state.rounds > 0 {
+        let (trusted, hidden) = state.tool_trust.filter_tools(state.cached_tools.clone());
+        if hidden > 0 {
+            tracing::info!(hidden = hidden, remaining = trusted.len(),
+                "ToolTrust: removed low-trust tools from surface");
+            state.cached_tools = trusted;
+        }
+    }
+
     let mut round_request = ModelRequest {
         model: selected_model.clone(),
         messages: built_messages,
@@ -458,9 +513,9 @@ pub(super) async fn run(
 
     // Sprint 1: CapabilityOrchestrationLayer — evaluate all filter rules in one pass.
     // Replaces the 5 scattered STRIP points that previously appeared here:
-    //   • state.tool_decision.is_active() → tools: vec![] assignment
-    //   • state.tool_decision.is_active() → Ollama emulation block strip
-    //   • state.tool_decision.consume() reset
+    //   • state.synthesis.tool_decision.is_active() → tools: vec![] assignment
+    //   • state.synthesis.tool_decision.is_active() → Ollama emulation block strip
+    //   • state.synthesis.tool_decision.consume() reset
     //   • !model.supports_tools → round_request.tools.clear()
     //   • state.is_conversational_intent → state.cached_system directive injection
     {
@@ -477,13 +532,13 @@ pub(super) async fn run(
             .unwrap_or(true);
 
         let orch_ctx = RoundContext {
-            force_no_tools_next_round: state.tool_decision.is_active(),
+            force_no_tools_next_round: state.synthesis.tool_decision.is_active(),
             selected_model: &selected_model,
             model_supports_tools,
             is_conversational_intent: state.is_conversational_intent,
             tools_non_empty: !round_request.tools.is_empty(),
         };
-        let orch_decision = state.capability_orchestrator.evaluate(&orch_ctx);
+        let orch_decision = state.guards.capability_orchestrator.evaluate(&orch_ctx);
 
         // Apply — Ollama tool emulation strip.
         if orch_decision.strip_ollama_emulation {
@@ -538,7 +593,7 @@ pub(super) async fn run(
         }
 
         // Consume tool_decision — orchestration has processed it; resets to Allow.
-        state.tool_decision.consume();
+        state.synthesis.tool_decision.consume();
     }
 
     // Phase 3B: Synthesis phase system prompt sanitization.
@@ -582,6 +637,77 @@ pub(super) async fn run(
                     "Phase 3B: stripped tool-mode directives from system prompt (tools=[])"
                 );
                 sys.truncate(pos);
+            }
+        }
+    }
+
+    // Phase 3C: Synthesis guard — max_tokens cap + concise synthesis constraint.
+    //
+    // When tools are absent and this is NOT a simple conversational turn, the LLM is
+    // in "synthesis mode" — summarising sub-agent results or producing a final answer
+    // without tool access. Without guardrails, models (especially DeepSeek) generate
+    // runaway bash/shell script templates that hit max_tokens (8192) and produce
+    // unusable output.
+    //
+    // Guards applied:
+    //   1. Cap max_tokens to SYNTHESIS_MAX_TOKENS (4096) — enough for a rich summary,
+    //      too short for a full script template.
+    //   2. Inject SYNTHESIS_CONSTRAINT directive into system prompt — explicitly
+    //      prohibits code generation and requires concise, evidence-based synthesis.
+    //
+    // Conditions: tools empty AND (has plan execution OR forced synthesis OR has tool
+    // work history) — i.e., this is an agent synthesis round, not a casual chat.
+    if round_request.tools.is_empty() && !state.is_conversational_intent {
+        let synthesis_max_tokens = state.policy.synthesis_max_tokens;
+
+        // Detect post-orchestration synthesis: if the execution tracker has any
+        // steps with outcomes, sub-agents ran and we're now synthesising.
+        let has_orchestrator_results = state.execution_tracker.as_ref()
+            .map_or(false, |t| t.plan().steps.iter().any(|s| s.outcome.is_some()));
+
+        let is_synthesis_round = state.synthesis.forced_synthesis_detected
+            || state.synthesis.synthesis_origin.is_some()
+            || !state.tools_executed.is_empty()
+            || state.evidence.bundle.content_read_attempts > 0
+            || has_orchestrator_results;
+
+        if is_synthesis_round {
+            // Guard 1: Cap max_tokens.
+            if round_request.max_tokens.map_or(false, |mt| mt > synthesis_max_tokens) {
+                tracing::debug!(
+                    original = round_request.max_tokens,
+                    capped = synthesis_max_tokens,
+                    round,
+                    "Phase 3C: capped max_tokens for synthesis round"
+                );
+                round_request.max_tokens = Some(synthesis_max_tokens);
+            }
+
+            // Guard 2: Inject synthesis constraint into system prompt.
+            const SYNTHESIS_CONSTRAINT: &str = "\n\n## Synthesis Mode\n\
+                You are now in SYNTHESIS MODE. Follow these rules strictly:\n\
+                - Summarise the results of completed tool executions concisely.\n\
+                - Do NOT generate bash scripts, shell commands, or executable code blocks.\n\
+                - Do NOT emit XML tool-call syntax or function invocations.\n\
+                - If evidence is insufficient, state what is missing rather than speculating.\n\
+                - Keep your response under 3000 tokens.\n\
+                - Use structured markdown (headers, bullets) for clarity.";
+
+            if let Some(ref mut sys) = round_request.system {
+                sys.push_str(SYNTHESIS_CONSTRAINT);
+            } else {
+                round_request.system = Some(SYNTHESIS_CONSTRAINT.to_string());
+            }
+            tracing::debug!(
+                round,
+                provider = effective_provider.name(),
+                "Phase 3C: injected synthesis constraint (tools=[], synthesis_round=true)"
+            );
+
+            // FASE 6: TUI observability — signal synthesis phase to the UI.
+            if !state.silent {
+                render_sink.phase_started("synthesis", "Synthesising results (no tools)...");
+                render_sink.agent_state_transition("executing", "synthesising", "tools stripped — synthesis mode");
             }
         }
     }
@@ -632,12 +758,12 @@ pub(super) async fn run(
             full_text: state.full_text.clone(),
             rounds: state.rounds,
             stop_condition: StopCondition::ProviderError,
-            call_input_tokens: state.call_input_tokens,
-            call_output_tokens: state.call_output_tokens,
-            call_cost: state.call_cost,
+            call_input_tokens: state.tokens.call_input_tokens,
+            call_output_tokens: state.tokens.call_output_tokens,
+            call_cost: state.tokens.call_cost,
             latency_ms: state.loop_start.elapsed().as_millis() as u64,
             execution_fingerprint: compute_fingerprint(&round_request.messages),
-            round_evaluations: state.round_evaluations.clone(),
+            round_evaluations: state.convergence.round_evaluations.clone(),
         };
         return Ok(RoundSetupOutcome::EarlyReturn(Box::new(data)));
     }

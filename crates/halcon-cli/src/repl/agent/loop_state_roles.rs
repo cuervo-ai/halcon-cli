@@ -52,13 +52,13 @@ impl ControlSignals {
     /// Construct a snapshot from the current loop state.
     pub(super) fn from_loop_state(state: &LoopState) -> Self {
         Self {
-            forced_synthesis_detected:      state.forced_synthesis_detected,
-            convergence_directive_injected: state.convergence_directive_injected,
+            forced_synthesis_detected:      state.synthesis.forced_synthesis_detected,
+            convergence_directive_injected: state.synthesis.convergence_directive_injected,
             environment_error_halt:         state.environment_error_halt,
             auto_pause:                     state.auto_pause,
             ctrl_cancelled:                 state.ctrl_cancelled,
             model_downgrade_advisory_active: state.model_downgrade_advisory_active,
-            tool_decision:                  state.tool_decision,
+            tool_decision:                  state.synthesis.tool_decision,
         }
     }
 
@@ -103,9 +103,9 @@ impl LoopAccumulator {
             full_text_len:        state.full_text.len(),
             rounds_completed:     state.rounds,
             tools_executed:       state.tools_executed.clone(),
-            replan_attempts:      state.replan_attempts,
-            drift_replan_count:   state.drift_replan_count,
-            cumulative_drift_score: state.cumulative_drift_score,
+            replan_attempts:      state.convergence.replan_attempts,
+            drift_replan_count:   state.convergence.drift_replan_count,
+            cumulative_drift_score: state.convergence.cumulative_drift_score,
         }
     }
 
@@ -146,14 +146,14 @@ impl TokenBudget {
     /// Construct a snapshot from the current loop state.
     pub(super) fn from_loop_state(state: &LoopState) -> Self {
         Self {
-            input_tokens:      state.call_input_tokens,
-            output_tokens:     state.call_output_tokens,
-            cost:              state.call_cost,
-            pipeline_budget:   state.pipeline_budget,
-            context_window:    state.provider_context_window,
-            tokens_planning:   state.tokens_planning,
-            tokens_subagents:  state.tokens_subagents,
-            tokens_critic:     state.tokens_critic,
+            input_tokens:      state.tokens.call_input_tokens,
+            output_tokens:     state.tokens.call_output_tokens,
+            cost:              state.tokens.call_cost,
+            pipeline_budget:   state.tokens.pipeline_budget,
+            context_window:    state.tokens.provider_context_window,
+            tokens_planning:   state.tokens.tokens_planning,
+            tokens_subagents:  state.tokens.tokens_subagents,
+            tokens_critic:     state.tokens.tokens_critic,
         }
     }
 
@@ -217,8 +217,8 @@ impl SubsystemHealth {
     /// Construct a snapshot from the current loop state.
     pub(super) fn from_loop_state(state: &LoopState, round: usize) -> Self {
         Self {
-            metacognitive_should_run: state.metacognitive_loop.should_run_cycle(round + 1),
-            last_convergence_ratio:  state.last_convergence_ratio,
+            metacognitive_should_run: state.hicon.metacognitive_loop.should_run_cycle(round + 1),
+            last_convergence_ratio:  state.convergence.last_convergence_ratio,
             next_round_restarts:     state.next_round_restarts,
         }
     }

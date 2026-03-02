@@ -11,6 +11,9 @@ mod provider;
 mod provider_capabilities;
 mod storage;
 mod tool;
+mod tool_trust;
+mod budget_manager;
+mod evidence_tracker;
 
 pub use chat_executor::{ChatExecutionEvent, ChatExecutionInput, ChatExecutor, ChatHistoryMessage, MediaAttachmentInline};
 pub use completion::{
@@ -27,3 +30,6 @@ pub use provider::*;
 pub use provider_capabilities::ProviderCapabilities;
 pub use storage::*;
 pub use tool::*;
+pub use tool_trust::ToolTrust;
+pub use budget_manager::BudgetManager;
+pub use evidence_tracker::EvidenceTracker;

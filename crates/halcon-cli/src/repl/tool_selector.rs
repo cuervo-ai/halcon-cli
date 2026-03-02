@@ -233,6 +233,74 @@ impl ToolSelector {
     }
 }
 
+// ── Environment-aware tool filter (FASE 5) ──────────────────────────────────
+
+/// Tools that require a git repository to function.
+const GIT_DEPENDENT_TOOLS: &[&str] = &[
+    "git_status", "git_diff", "git_log", "git_add", "git_commit",
+    "git_branch", "git_stash", "git_push", "git_pull",
+];
+
+/// Tools that require CI configuration to function.
+const CI_DEPENDENT_TOOLS: &[&str] = &[
+    "ci_logs", "ci_status", "ci_trigger", "pipeline_status",
+];
+
+/// Environment context for tool filtering.
+///
+/// Detected once at session start, passed to `filter_by_environment()`.
+#[derive(Debug, Clone)]
+pub(crate) struct EnvironmentContext {
+    pub is_git_repo: bool,
+    pub has_ci_config: bool,
+}
+
+impl EnvironmentContext {
+    /// Detect environment context from the working directory.
+    pub fn detect(working_dir: &str) -> Self {
+        let path = std::path::Path::new(working_dir);
+        let is_git_repo = path.join(".git").exists()
+            || std::process::Command::new("git")
+                .args(["rev-parse", "--is-inside-work-tree"])
+                .current_dir(path)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+        let has_ci_config = path.join(".github/workflows").exists()
+            || path.join(".gitlab-ci.yml").exists()
+            || path.join(".circleci").exists()
+            || path.join("Jenkinsfile").exists()
+            || path.join(".travis.yml").exists()
+            || path.join("azure-pipelines.yml").exists();
+
+        Self { is_git_repo, has_ci_config }
+    }
+
+    /// Filter tools based on environment availability.
+    ///
+    /// Removes tools that depend on unavailable environment features (e.g., git
+    /// tools when not in a git repo). Returns the filtered tool list.
+    pub fn filter_tools(&self, tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+        tools.into_iter()
+            .filter(|tool| {
+                let name = tool.name.as_str();
+                // Remove git tools when not in a git repo
+                if !self.is_git_repo && GIT_DEPENDENT_TOOLS.contains(&name) {
+                    tracing::debug!(tool = name, "EnvironmentFilter: removed (no git repo)");
+                    return false;
+                }
+                // Remove CI tools when no CI config detected
+                if !self.has_ci_config && CI_DEPENDENT_TOOLS.contains(&name) {
+                    tracing::debug!(tool = name, "EnvironmentFilter: removed (no CI config)");
+                    return false;
+                }
+                true
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +462,69 @@ mod tests {
         // glob is search → included
         // symbol_search is search → included
         assert_eq!(names, vec!["file_read", "bash", "grep", "glob", "symbol_search"]);
+    }
+
+    // ── EnvironmentContext tests (FASE 5) ──
+
+    #[test]
+    fn env_filter_removes_git_tools_when_no_git() {
+        let ctx = EnvironmentContext { is_git_repo: false, has_ci_config: true };
+        let tools = vec![
+            make_tool("file_read"),
+            make_tool("git_status"),
+            make_tool("git_diff"),
+            make_tool("bash"),
+            make_tool("git_commit"),
+        ];
+        let filtered = ctx.filter_tools(tools);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["file_read", "bash"]);
+    }
+
+    #[test]
+    fn env_filter_keeps_git_tools_when_git_exists() {
+        let ctx = EnvironmentContext { is_git_repo: true, has_ci_config: false };
+        let tools = vec![
+            make_tool("file_read"),
+            make_tool("git_status"),
+            make_tool("git_diff"),
+            make_tool("bash"),
+        ];
+        let filtered = ctx.filter_tools(tools);
+        assert_eq!(filtered.len(), 4);
+    }
+
+    #[test]
+    fn env_filter_removes_ci_tools_when_no_ci() {
+        let ctx = EnvironmentContext { is_git_repo: true, has_ci_config: false };
+        let tools = vec![
+            make_tool("file_read"),
+            make_tool("ci_logs"),
+            make_tool("ci_status"),
+            make_tool("bash"),
+        ];
+        let filtered = ctx.filter_tools(tools);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["file_read", "bash"]);
+    }
+
+    #[test]
+    fn env_filter_keeps_all_when_environment_complete() {
+        let ctx = EnvironmentContext { is_git_repo: true, has_ci_config: true };
+        let tools = vec![
+            make_tool("file_read"),
+            make_tool("git_status"),
+            make_tool("ci_logs"),
+            make_tool("bash"),
+        ];
+        let filtered = ctx.filter_tools(tools);
+        assert_eq!(filtered.len(), 4);
+    }
+
+    #[test]
+    fn env_filter_empty_input_returns_empty() {
+        let ctx = EnvironmentContext { is_git_repo: false, has_ci_config: false };
+        let filtered = ctx.filter_tools(vec![]);
+        assert!(filtered.is_empty());
     }
 }

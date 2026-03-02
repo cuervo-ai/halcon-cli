@@ -103,9 +103,39 @@ impl TerminationOracle {
             };
         }
         if feedback.synthesis_advised {
-            return TerminationDecision::InjectSynthesis {
-                reason: SynthesisReason::RoundScorerConsecutiveRegression,
-            };
+            // Phase 3.6: Utility-based synthesis delay.
+            // RoundScorer's synthesis_advised is the weakest synthesis signal. When the
+            // convergence utility score is above the synthesis threshold, delay synthesis
+            // to let the model continue productive work. Fall-through to Phase 6 legacy
+            // evidence check as a safety net.
+            const UTILITY_SYNTHESIS_THRESHOLD: f64 = 0.35;
+            const EVIDENCE_COVERAGE_THRESHOLD: f64 = 0.30;
+            const LATE_ROUND_CUTOFF: usize = 8;
+
+            // Primary gate: utility score (P3.6)
+            if feedback.utility_score > UTILITY_SYNTHESIS_THRESHOLD {
+                tracing::debug!(
+                    round = feedback.round,
+                    utility_score = %feedback.utility_score,
+                    "Oracle: delaying synthesis — utility above threshold, work still productive"
+                );
+                // Fall through to lower-precedence checks (Replan/ForceNoTools/Continue).
+            }
+            // Legacy fallback: evidence coverage (Phase 6)
+            else if feedback.evidence_coverage < EVIDENCE_COVERAGE_THRESHOLD
+                && feedback.round < LATE_ROUND_CUTOFF
+            {
+                tracing::debug!(
+                    round = feedback.round,
+                    evidence_coverage = %feedback.evidence_coverage,
+                    "Oracle: delaying synthesis — low evidence coverage, allowing more collection"
+                );
+                // Fall through to lower-precedence checks (Replan/ForceNoTools/Continue).
+            } else {
+                return TerminationDecision::InjectSynthesis {
+                    reason: SynthesisReason::RoundScorerConsecutiveRegression,
+                };
+            }
         }
 
         // ── Precedence 3: Replan ──────────────────────────────────────────────
@@ -122,6 +152,22 @@ impl TerminationOracle {
         if feedback.replan_advised {
             return TerminationDecision::Replan {
                 reason: ReplanReason::RoundScorerLowTrajectory,
+            };
+        }
+
+        // ── Precedence 3b: Mini-Critic signals ──────────────────────────────
+        // Phase 5 Governance: mini-critic is now INPUT to oracle, not post-override.
+        // Its signals have lower precedence than all other replan/synthesis sources
+        // but higher precedence than ForceNoTools/Continue.
+        // Oracle Halt (precedence 1) always wins over mini-critic.
+        if feedback.mini_critic_synthesis {
+            return TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::ConvergenceControllerSynthesizeAction,
+            };
+        }
+        if feedback.mini_critic_replan {
+            return TerminationDecision::Replan {
+                reason: ReplanReason::LoopGuardStagnationDetected,
             };
         }
 
@@ -154,6 +200,16 @@ mod tests {
             synthesis_advised: false,
             tool_round: true,
             had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: false,
+            evidence_coverage: 1.0,
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.5,
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
         }
     }
 
@@ -222,6 +278,7 @@ mod tests {
     fn synthesis_advised_produces_inject_synthesis() {
         let mut fb = base_feedback();
         fb.synthesis_advised = true;
+        fb.utility_score = 0.20; // below threshold → synthesis proceeds
         assert_eq!(
             TerminationOracle::adjudicate(&fb),
             TerminationDecision::InjectSynthesis {
@@ -359,5 +416,95 @@ mod tests {
             ReplanReason::RoundScorerLowTrajectory,
         ];
         assert_eq!(reasons.len(), 3);
+    }
+
+    // ── Phase 6: Evidence-coverage-based synthesis delay ─────────────────────
+
+    #[test]
+    fn low_evidence_coverage_delays_synthesis_advised() {
+        let mut fb = base_feedback();
+        fb.synthesis_advised = true;
+        fb.evidence_coverage = 0.10; // well below 0.30 threshold
+        fb.round = 3; // early round
+        // Low coverage + early round → delay synthesis, fall through to Continue
+        assert_eq!(TerminationOracle::adjudicate(&fb), TerminationDecision::Continue);
+    }
+
+    #[test]
+    fn high_evidence_coverage_does_not_delay_synthesis_advised() {
+        let mut fb = base_feedback();
+        fb.synthesis_advised = true;
+        fb.evidence_coverage = 0.80; // well above threshold
+        fb.utility_score = 0.20; // below utility threshold → synthesis proceeds
+        fb.round = 3;
+        // Low utility + high coverage → synthesis proceeds normally
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::RoundScorerConsecutiveRegression,
+            }
+        );
+    }
+
+    #[test]
+    fn late_round_overrides_low_evidence_coverage_delay() {
+        let mut fb = base_feedback();
+        fb.synthesis_advised = true;
+        fb.evidence_coverage = 0.10; // low coverage
+        fb.utility_score = 0.20; // below utility threshold
+        fb.round = 10; // late round (>= 8)
+        // Low utility + late round → don't delay further, synthesize
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::RoundScorerConsecutiveRegression,
+            }
+        );
+    }
+
+    #[test]
+    fn convergence_synthesize_not_delayed_by_low_coverage() {
+        let mut fb = base_feedback();
+        fb.convergence_action = ConvergenceAction::Synthesize;
+        fb.evidence_coverage = 0.05; // very low coverage
+        fb.round = 2;
+        // ConvergenceController::Synthesize is a strong signal — never delayed
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::ConvergenceControllerSynthesizeAction,
+            }
+        );
+    }
+
+    #[test]
+    fn loop_guard_inject_not_delayed_by_low_coverage() {
+        let mut fb = base_feedback();
+        fb.loop_signal = LoopSignal::InjectSynthesis;
+        fb.evidence_coverage = 0.05; // very low coverage
+        fb.round = 2;
+        // LoopGuard::InjectSynthesis is a strong signal — never delayed
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::LoopGuardInjectSynthesis,
+            }
+        );
+    }
+
+    #[test]
+    fn low_coverage_delay_falls_through_to_replan_if_advised() {
+        let mut fb = base_feedback();
+        fb.synthesis_advised = true;
+        fb.replan_advised = true;
+        fb.evidence_coverage = 0.10; // low coverage delays synthesis_advised
+        fb.round = 3;
+        // synthesis_advised delayed → falls through to replan_advised (P3)
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Replan {
+                reason: ReplanReason::RoundScorerLowTrajectory,
+            }
+        );
     }
 }

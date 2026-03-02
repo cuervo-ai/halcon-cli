@@ -276,6 +276,7 @@ mod sota_tests {
     #[test]
     fn plan_step_with_tools() {
         let step = PlanStep {
+            step_id: uuid::Uuid::new_v4(),
             description: "Execute bash command".to_string(),
             tool_name: Some("bash".to_string()),
             parallel: false,

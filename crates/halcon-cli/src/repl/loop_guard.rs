@@ -78,8 +78,15 @@ pub(crate) struct ToolLoopGuard {
     current_plan_hash: Option<u64>,
     /// Last detected anomaly (for self-correction in agent loop).
     last_anomaly: Option<AnomalyResult>,
-    /// Sliding window of last 8 round types for cross-type oscillation detection.
+    /// Sliding window of recent round types for cross-type oscillation detection.
+    /// Window size controlled by `oscillation_window` (default: 8, from PolicyConfig).
     round_types: std::collections::VecDeque<RoundType>,
+    /// Max entries in `round_types` sliding window (PolicyConfig.oscillation_window).
+    oscillation_window: usize,
+    /// Minimum synthesis threshold used by `set_tightness` (PolicyConfig.loop_guard_min_synthesis).
+    min_synthesis: usize,
+    /// Minimum force threshold used by `set_tightness` (PolicyConfig.loop_guard_min_force).
+    min_force: usize,
 }
 
 /// Known read-only tool names. Tools in this set gather information but don't
@@ -117,7 +124,19 @@ impl ToolLoopGuard {
             current_plan_hash: None,
             last_anomaly: None,
             round_types: std::collections::VecDeque::new(),
+            oscillation_window: 8,
+            min_synthesis: 3,
+            min_force: 5,
         }
+    }
+
+    /// Create a guard configured from PolicyConfig thresholds.
+    pub(crate) fn with_policy(policy: &halcon_core::types::PolicyConfig) -> Self {
+        let mut guard = Self::new();
+        guard.oscillation_window = policy.oscillation_window;
+        guard.min_synthesis = policy.loop_guard_min_synthesis;
+        guard.min_force = policy.loop_guard_min_force;
+        guard
     }
 
     /// Record a completed tool round and return the recommended action.
@@ -130,7 +149,7 @@ impl ToolLoopGuard {
 
         // Track round type for cross-type oscillation detection.
         self.round_types.push_back(RoundType::Tool);
-        if self.round_types.len() > 8 {
+        if self.round_types.len() > self.oscillation_window {
             self.round_types.pop_front();
         }
 
@@ -275,7 +294,7 @@ impl ToolLoopGuard {
     /// Use `detect_cross_type_oscillation()` AFTER this call to check for Tool↔Text alternation.
     pub(crate) fn record_text_round(&mut self) {
         self.round_types.push_back(RoundType::Text);
-        if self.round_types.len() > 8 {
+        if self.round_types.len() > self.oscillation_window {
             self.round_types.pop_front();
         }
         self.reset_on_text_round(); // existing behavior preserved
@@ -334,13 +353,13 @@ impl ToolLoopGuard {
     pub(crate) fn set_tightness(&mut self, tightness: f32) {
         const BASE_SYNTHESIS: usize = 6;
         const BASE_FORCE: usize = 10;
-        const MIN_SYNTHESIS: usize = 3;
-        const MIN_FORCE: usize = 5;
+        let min_synthesis = self.min_synthesis;
+        let min_force = self.min_force;
         let scale = tightness.clamp(0.0, 1.0) as f64;
         self.synthesis_threshold =
-            ((1.0 - scale) * BASE_SYNTHESIS as f64 + scale * MIN_SYNTHESIS as f64) as usize;
+            ((1.0 - scale) * BASE_SYNTHESIS as f64 + scale * min_synthesis as f64) as usize;
         self.force_threshold =
-            ((1.0 - scale) * BASE_FORCE as f64 + scale * MIN_FORCE as f64) as usize;
+            ((1.0 - scale) * BASE_FORCE as f64 + scale * min_force as f64) as usize;
         tracing::debug!(
             tightness,
             synthesis_threshold = self.synthesis_threshold,

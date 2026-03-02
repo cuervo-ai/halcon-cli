@@ -25,7 +25,7 @@ use super::provider_client::check_control;
 use super::PhaseOutcome;
 use crate::render::sink::RenderSink;
 
-const MAX_REPLAN_ATTEMPTS: u32 = 2;
+// NOTE: MAX_REPLAN_ATTEMPTS now read from state.policy.max_replan_attempts (PolicyConfig).
 
 /// Run the convergence phase for one tool-use round.
 ///
@@ -64,7 +64,7 @@ pub(super) async fn run(
             round_tool_log.iter().map(|(_, h)| *h).collect();
         let had_errors = !tool_failures.is_empty();
 
-        let ca = state.conv_ctrl.observe_round(
+        let ca = state.convergence.conv_ctrl.observe_round(
             round as u32,
             &conv_names,
             &conv_hashes,
@@ -86,7 +86,7 @@ pub(super) async fn run(
                 // Mark convergence_directive_injected so oracle InjectSynthesis handler
                 // (if oracle picks InjectSynthesis from a lower-priority source) will not
                 // inject a duplicate synthesis message this round.
-                state.convergence_directive_injected = true;
+                state.synthesis.convergence_directive_injected = true;
             }
             ConvergenceAction::Replan => {
                 tracing::info!(round, "ConvergenceController: Replan — injecting directive");
@@ -97,7 +97,7 @@ pub(super) async fn run(
                     );
                 }
                 // Inject a User-visible directive to force a new approach.
-                // Does NOT consume a MAX_REPLAN_ATTEMPTS slot (that counter governs
+                // Does NOT consume a max_replan_attempts slot (that counter governs
                 // model-initiated ReplanRequired, not convergence-driven nudges).
                 state.messages.push(ChatMessage {
                     role: Role::User,
@@ -112,7 +112,7 @@ pub(super) async fn run(
                 // Phase 113: Signal that a convergence directive was injected this round.
                 // ToolLoopGuard's InjectSynthesis will check this and skip if set —
                 // preventing two conflicting User directives in the same round.
-                state.convergence_directive_injected = true;
+                state.synthesis.convergence_directive_injected = true;
             }
             ConvergenceAction::Halt => {
                 // P0-2: Do NOT early-return here — oracle adjudicates after all signals
@@ -138,7 +138,7 @@ pub(super) async fn run(
         let plan_steps_total = state.active_plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
         let tools_count = state.tools_executed.len();
         if plan_steps_total > 0 && tools_count >= plan_steps_total.saturating_mul(2) {
-            let intent_str = format!("{:?}", state.execution_intent);
+            let intent_str = format!("{:?}", state.synthesis.execution_intent);
             tracing::info!(
                 round,
                 tools_count,
@@ -168,16 +168,16 @@ pub(super) async fn run(
         use std::collections::HashMap;
 
         // Observe loop guard health
-        let loop_guard_health = if state.loop_guard.consecutive_rounds() == 0 {
+        let loop_guard_health = if state.guards.loop_guard.consecutive_rounds() == 0 {
             1.0
         } else {
-            1.0 - (state.loop_guard.consecutive_rounds() as f64 / 10.0).min(1.0)
+            1.0 - (state.guards.loop_guard.consecutive_rounds() as f64 / 10.0).min(1.0)
         };
 
         let mut metrics = HashMap::new();
-        metrics.insert("consecutive_rounds".to_string(), state.loop_guard.consecutive_rounds() as f64);
+        metrics.insert("consecutive_rounds".to_string(), state.guards.loop_guard.consecutive_rounds() as f64);
 
-        state.metacognitive_loop.monitor(ComponentObservation {
+        state.hicon.metacognitive_loop.monitor(ComponentObservation {
             component: SystemComponent::LoopGuard,
             round: round + 1,
             metrics,
@@ -185,7 +185,7 @@ pub(super) async fn run(
         });
 
         // Observe self-corrector health
-        let corrector_stats = state.self_corrector.stats();
+        let corrector_stats = state.hicon.self_corrector.stats();
         let corrector_health = if corrector_stats.total_corrections > 0 {
             corrector_stats.success_rate
         } else {
@@ -196,7 +196,7 @@ pub(super) async fn run(
         corrector_metrics.insert("corrections".to_string(), corrector_stats.total_corrections as f64);
         corrector_metrics.insert("success_rate".to_string(), corrector_stats.success_rate);
 
-        state.metacognitive_loop.monitor(ComponentObservation {
+        state.hicon.metacognitive_loop.monitor(ComponentObservation {
             component: SystemComponent::SelfCorrector,
             round: round + 1,
             metrics: corrector_metrics,
@@ -204,9 +204,9 @@ pub(super) async fn run(
         });
 
         // Observe resource predictor health
-        let predictor_health = if state.resource_predictor.is_ready() { 1.0 } else { 0.5 };
+        let predictor_health = if state.hicon.resource_predictor.is_ready() { 1.0 } else { 0.5 };
 
-        state.metacognitive_loop.monitor(ComponentObservation {
+        state.hicon.metacognitive_loop.monitor(ComponentObservation {
             component: SystemComponent::ResourcePredictor,
             round: round + 1,
             metrics: HashMap::new(),
@@ -215,10 +215,10 @@ pub(super) async fn run(
     }
 
     // HICON Phase 6: Run full metacognitive cycle every 10 rounds
-    if state.metacognitive_loop.should_run_cycle(round + 1) {
-        let analysis = state.metacognitive_loop.analyze(round + 1);
-        let plan = state.metacognitive_loop.adapt(&analysis);
-        let insight = state.metacognitive_loop.reflect(&plan);
+    if state.hicon.metacognitive_loop.should_run_cycle(round + 1) {
+        let analysis = state.hicon.metacognitive_loop.analyze(round + 1);
+        let plan = state.hicon.metacognitive_loop.adapt(&analysis);
+        let insight = state.hicon.metacognitive_loop.reflect(&plan);
 
         tracing::info!(
             round = round + 1,
@@ -231,7 +231,7 @@ pub(super) async fn run(
             "Metacognitive cycle: Φ coherence measured"
         );
 
-        state.metacognitive_loop.integrate(&insight, round + 1);
+        state.hicon.metacognitive_loop.integrate(&insight, round + 1);
 
         // Remediation Phase 1.2: Make Phi coherence visible to user
         let status = if insight.phi.phi >= 0.7 {
@@ -260,8 +260,8 @@ pub(super) async fn run(
     // Uses the round_tool_log collected before dedup (above) for full
     // (tool_name, args_hash) tracking.
     // `mut` required so Phase 2 causal wiring can override to ReplanRequired when
-    // state.round_scorer.should_trigger_replan() fires (low-trajectory override path).
-    let mut loop_action = state.loop_guard.record_round(round_tool_log);
+    // state.convergence.round_scorer.should_trigger_replan() fires (low-trajectory override path).
+    let mut loop_action = state.guards.loop_guard.record_round(round_tool_log);
 
     // P0-2: Declare oracle_decision before the RoundScorer+RoundFeedback scoped block so
     // it survives into the oracle dispatch section below (after HICON Phase 4).
@@ -284,7 +284,7 @@ pub(super) async fn run(
             super::super::loop_guard::LoopAction::ForceNoTools => vec!["ForceNoTools".to_string()],
             _ => vec![],
         };
-        let eval = state.round_scorer.score_round(
+        let eval = state.convergence.round_scorer.score_round(
             round,
             tool_successes.len(),
             tool_successes.len() + tool_failures.len(),
@@ -296,19 +296,19 @@ pub(super) async fn run(
         );
         // Use RoundScorer structural signals to reinforce LoopGuard:
         // consecutive regressions → force synthesis early (before escalation threshold).
-        if state.round_scorer.should_inject_synthesis() {
+        if state.convergence.round_scorer.should_inject_synthesis() {
             tracing::info!(round, "RoundScorer: consecutive regressions → reinforcing synthesis directive");
-            state.loop_guard.force_synthesis();
+            state.guards.loop_guard.force_synthesis();
         }
         // Phase 2 causal wiring: should_trigger_replan() was previously computed but
         // NEVER applied to loop_action — a phantom signal. Wire it here so persistent
         // low-trajectory rounds drive structural replanning through the existing
-        // ReplanRequired handler (with its budget guard at MAX_REPLAN_ATTEMPTS).
+        // ReplanRequired handler (with its budget guard at max_replan_attempts).
         // Only override when loop_action is still Continue/ForceNoTools — do NOT
         // override Break (loop guard terminal) or InjectSynthesis (synthesis takes
         // priority over replan: synthesis is a softer signal that may resolve stagnation
         // without the cost of a full LLM replan call) or ReplanRequired (already set).
-        if state.round_scorer.should_trigger_replan()
+        if state.convergence.round_scorer.should_trigger_replan()
             && !matches!(
                 loop_action,
                 super::super::loop_guard::LoopAction::Break
@@ -343,17 +343,185 @@ pub(super) async fn run(
                 super::super::loop_guard::LoopAction::ForceNoTools => LoopSignal::ForceNoTools,
                 super::super::loop_guard::LoopAction::Continue => LoopSignal::Continue,
             };
+            // Phase 5 Governance: mini-critic runs BEFORE oracle — its signal becomes
+            // INPUT to the oracle adjudication rather than a post-override.
+            let mini_critic_signal = mini_critic_check(state, round);
+            // ReduceTools does not affect oracle (just sets force_next), so only encode
+            // ForceReplan and ForceSynthesis as boolean signals.
+            let mini_critic_replan = matches!(mini_critic_signal, Some(MiniCriticAction::ForceReplan));
+            let mini_critic_synthesis = matches!(mini_critic_signal, Some(MiniCriticAction::ForceSynthesis));
+            // Apply ReduceTools side-effect immediately (does not affect oracle decision).
+            if matches!(mini_critic_signal, Some(MiniCriticAction::ReduceTools)) {
+                tracing::info!(round, "MiniCritic: declining trend → reducing tool scope");
+                state.synthesis.tool_decision.set_force_next();
+            }
+
+            // ── Phase 3: Populate domain intelligence signals ──────────────
+            let effective_max_rounds = state.sla_budget.as_ref()
+                .map(|s| s.max_rounds as usize)
+                .unwrap_or(20);
+            let evidence_coverage = state.evidence.graph.synthesis_coverage();
+
+            // P3.3: Semantic cycle detection (already fed in post_batch)
+            let semantic_cycle_detected = state.guards.semantic_cycle_detector.has_cycle();
+            let cycle_severity = state.guards.semantic_cycle_detector.severity().as_f32();
+
+            // P3.4: Mid-loop critic checkpoints
+            let plan_progress = state.execution_tracker.as_ref()
+                .map(|t| { let (done, total, _) = t.progress(); if total > 0 { done as f64 / total as f64 } else { 0.0 } })
+                .unwrap_or(0.0);
+            state.convergence.mid_loop_critic.record_snapshot(
+                round, plan_progress, evidence_coverage, eval.combined_score,
+                !(tool_successes.is_empty() && tool_failures.is_empty()),
+            );
+            let mid_critic_action = if state.convergence.mid_loop_critic.is_checkpoint(round) {
+                let cp = state.convergence.mid_loop_critic.evaluate(
+                    round,
+                    effective_max_rounds,
+                    plan_progress,
+                    evidence_coverage,
+                    state.convergence.cumulative_drift_score as f64,
+                );
+                tracing::debug!(
+                    round, ?cp.action, deficit = %cp.progress_deficit,
+                    "Phase3 MidLoopCritic checkpoint"
+                );
+                Some(cp.action)
+            } else {
+                None
+            };
+
+            // P3.5: Complexity feedback
+            let complexity_upgraded = {
+                let obs = super::super::domain::complexity_feedback::ComplexityObservation {
+                    rounds_used: round + 1,
+                    replans_triggered: state.convergence.replan_attempts as usize,
+                    distinct_tools_used: state.tools_executed.iter()
+                        .collect::<std::collections::HashSet<_>>().len(),
+                    domains_touched: 1, // simplified — single domain default
+                    elapsed_secs: state.loop_start.elapsed().as_secs_f64(),
+                    orchestration_used: state.orchestration_decision.is_some(),
+                    tool_errors: tool_failures.len(),
+                };
+                match state.convergence.complexity_tracker.evaluate(&obs) {
+                    Some(adj) if adj.was_upgraded => {
+                        tracing::info!(
+                            original = ?adj.original, adjusted = ?adj.adjusted,
+                            confidence = %adj.confidence,
+                            "Phase3 ComplexityTracker: upgrade triggered"
+                        );
+                        true
+                    }
+                    _ => false,
+                }
+            };
+
+            // P5.2: Problem classification (after classification_min_rounds)
+            let problem_class = if round >= state.policy.classification_min_rounds {
+                if state.convergence.problem_classifier.current().is_none() {
+                    let metrics = state.convergence.metrics_collector.rounds();
+                    let sla_frac = state.sla_budget.as_ref()
+                        .map(|s| s.fraction_consumed()).unwrap_or(0.0);
+                    let result = state.convergence.problem_classifier.classify(metrics, sla_frac);
+                    tracing::debug!(
+                        class = %result.class.label(),
+                        confidence = %result.confidence,
+                        "Phase5 ProblemClassifier: initial classification"
+                    );
+                    // P5.3: Apply class-specific weight preset
+                    state.convergence.strategy_weight_manager.set_baseline(
+                        super::super::domain::strategy_weights::StrategyWeights::for_class(result.class),
+                    );
+                    Some(result.class)
+                } else {
+                    // Check for reclassification
+                    let metrics = state.convergence.metrics_collector.rounds();
+                    let sla_frac = state.sla_budget.as_ref()
+                        .map(|s| s.fraction_consumed()).unwrap_or(0.0);
+                    if let Some(reclass) = state.convergence.problem_classifier.reclassify(metrics, sla_frac) {
+                        tracing::debug!(
+                            class = %reclass.class.label(),
+                            "Phase5 ProblemClassifier: reclassified"
+                        );
+                        state.convergence.strategy_weight_manager.set_baseline(
+                            super::super::domain::strategy_weights::StrategyWeights::for_class(reclass.class),
+                        );
+                    }
+                    state.convergence.problem_classifier.current_class()
+                }
+            } else {
+                state.convergence.problem_classifier.current_class()
+            };
+
+            // P3.6: Convergence utility function
+            let sla_fraction = state.sla_budget.as_ref()
+                .map(|s| s.fraction_consumed())
+                .unwrap_or(0.0);
+            let token_fraction = if state.tokens.pipeline_budget > 0 {
+                (state.tokens.call_input_tokens + state.tokens.call_output_tokens) as f64
+                    / state.tokens.pipeline_budget as f64
+            } else {
+                0.0
+            };
+            let utility_inputs = super::super::domain::convergence_utility::UtilityInputs {
+                evidence_coverage,
+                coherence_score: eval.combined_score as f64,
+                plan_progress,
+                time_pressure: sla_fraction.max(token_fraction),
+                retry_cost: if state.tokens.pipeline_budget > 0 {
+                    (state.tokens.call_input_tokens as f64) / (state.tokens.pipeline_budget as f64)
+                } else { 0.0 },
+                drift_penalty: state.convergence.cumulative_drift_score as f64,
+                evidence_rate: state.convergence.mid_loop_critic.evidence_rate(),
+            };
+            // P5.3: Use strategy-managed weights for utility computation
+            let strategy_utility_weights = state.convergence.strategy_weight_manager.current()
+                .to_utility_weights(state.policy.utility_w_progress);
+            let utility_result = super::super::domain::convergence_utility::compute_utility(
+                &utility_inputs,
+                &strategy_utility_weights,
+                state.policy.utility_synthesis_threshold,
+                state.policy.utility_marginal_threshold,
+            );
+            let utility_score = utility_result.utility;
+
+            // P5.4: Convergence forecast
+            let utility_trend = state.convergence.metrics_collector.utility_trend();
+            let sla_remaining = state.sla_budget.as_ref()
+                .map(|s| (s.max_rounds as usize).saturating_sub(round + 1))
+                .unwrap_or(10);
+            let evidence_rate_val = state.convergence.mid_loop_critic.evidence_rate();
+            let forecast = super::super::domain::convergence_estimator::forecast(
+                state.convergence.metrics_collector.rounds(),
+                utility_trend,
+                evidence_rate_val,
+                sla_remaining,
+                state.policy.utility_synthesis_threshold,
+                state.policy.forecast_min_rounds,
+            );
+            let forecast_rounds_remaining = Some(forecast.estimated_rounds_remaining);
+
             let round_feedback = RoundFeedback {
                 round,
                 combined_score: eval.combined_score,
                 convergence_action: round_convergence_action.clone(),
                 loop_signal: loop_sig,
-                trajectory_trend: state.round_scorer.trend_score(),
-                oscillation: state.round_scorer.oscillation_penalty(),
-                replan_advised: state.round_scorer.should_trigger_replan(),
-                synthesis_advised: state.round_scorer.should_inject_synthesis(),
+                trajectory_trend: state.convergence.round_scorer.trend_score(),
+                oscillation: state.convergence.round_scorer.oscillation_penalty(),
+                replan_advised: state.convergence.round_scorer.should_trigger_replan(),
+                synthesis_advised: state.convergence.round_scorer.should_inject_synthesis(),
                 tool_round: !(tool_successes.is_empty() && tool_failures.is_empty()),
                 had_errors: !tool_failures.is_empty(),
+                mini_critic_replan,
+                mini_critic_synthesis,
+                evidence_coverage,
+                semantic_cycle_detected,
+                cycle_severity,
+                utility_score,
+                mid_critic_action,
+                complexity_upgraded,
+                problem_class,
+                forecast_rounds_remaining,
             };
 
             // P0-2: TerminationOracle — AUTHORITATIVE (shadow mode removed).
@@ -367,17 +535,38 @@ pub(super) async fn run(
                 round,
                 "TerminationOracle: authoritative decision"
             );
-            oracle_decision = Some(termination);
+            oracle_decision = Some(termination.clone());
+
+            // P4.2: Record oracle decision in trace
+            {
+                use super::super::domain::decision_trace::{DecisionRecord, DecisionPoint};
+                let trace_record = DecisionRecord::new(
+                    DecisionPoint::OracleAdjudication,
+                    round,
+                    format!("{:?}", termination),
+                )
+                .with_input("combined_score", format!("{:.3}", round_feedback.combined_score))
+                .with_input("convergence_action", format!("{:?}", round_feedback.convergence_action))
+                .with_input("loop_signal", format!("{:?}", round_feedback.loop_signal))
+                .with_input("utility_score", format!("{:.3}", round_feedback.utility_score))
+                .with_rationale(format!(
+                    "synthesis_advised={}, replan_advised={}, evidence_cov={:.2}",
+                    round_feedback.synthesis_advised,
+                    round_feedback.replan_advised,
+                    round_feedback.evidence_coverage,
+                ));
+                state.convergence.decision_trace.record(trace_record);
+            }
 
             // Sprint 3: AdaptivePolicy — within-session parameter adaptation (active, L6).
             // Observes the round's trajectory and adjusts replan_sensitivity if declining.
-            let policy_adj = state.adaptive_policy.observe(&round_feedback);
+            let policy_adj = state.convergence.adaptive_policy.observe(&round_feedback);
             if policy_adj.replan_sensitivity_delta > 0.0 {
-                state.round_scorer
-                    .set_replan_sensitivity(state.adaptive_policy.current_sensitivity());
+                state.convergence.round_scorer
+                    .set_replan_sensitivity(state.convergence.adaptive_policy.current_sensitivity());
                 tracing::info!(
                     delta = policy_adj.replan_sensitivity_delta,
-                    new_sensitivity = state.adaptive_policy.current_sensitivity(),
+                    new_sensitivity = state.convergence.adaptive_policy.current_sensitivity(),
                     ?policy_adj.rationale,
                     "AdaptivePolicy: replan_sensitivity escalated within session",
                 );
@@ -387,7 +576,7 @@ pub(super) async fn run(
             // forwarding it lowers the synthesis trigger threshold so the loop exits
             // sooner instead of continuing to oscillate.  Domain-pure: no infra imports.
             if policy_adj.synthesis_urgency_boost > 0.0 {
-                state.conv_ctrl.boost_synthesis_urgency(policy_adj.synthesis_urgency_boost);
+                state.convergence.conv_ctrl.boost_synthesis_urgency(policy_adj.synthesis_urgency_boost);
                 tracing::debug!(
                     boost = policy_adj.synthesis_urgency_boost,
                     round,
@@ -405,13 +594,107 @@ pub(super) async fn run(
                     "AdaptivePolicy: model downgrade advisory — current tier underperforming",
                 );
             }
+
+            // P5.3: Per-round strategy weight micro-adjustment for next round
+            if let Some(pc) = problem_class {
+                if let Some(adj) = state.convergence.strategy_weight_manager.adjust(&round_feedback, &pc) {
+                    tracing::debug!(
+                        total_shift = %adj.total_shift,
+                        bounded = adj.bounded,
+                        rationale = adj.rationale,
+                        "Phase5 StrategyWeights: per-round adjustment"
+                    );
+                }
+            }
+
+            // ── P4.1: System Invariants — per-round validation ──────────────
+            {
+                use super::super::domain::system_invariants::InvariantSnapshot;
+
+                let sla_ordinal = state.sla_budget.as_ref().map(|s| {
+                    match s.mode {
+                        super::super::sla_manager::SlaMode::Fast => 0u8,
+                        super::super::sla_manager::SlaMode::Balanced => 1,
+                        super::super::sla_manager::SlaMode::Deep => 2,
+                    }
+                }).unwrap_or(1);
+
+                let snap = InvariantSnapshot {
+                    synthesis_blocked: state.evidence.bundle.synthesis_blocked,
+                    synthesis_origin_is_supervisor: state.synthesis.synthesis_origin
+                        .as_ref()
+                        .map(|o| matches!(o, super::loop_state::SynthesisOrigin::SupervisorFailure))
+                        .unwrap_or(false),
+                    evidence_bytes: state.evidence.bundle.text_bytes_extracted,
+                    min_evidence_bytes: state.policy.min_evidence_bytes,
+                    content_read_attempts: state.evidence.bundle.content_read_attempts,
+                    is_synthesis_round: state.synthesis.forced_synthesis_detected
+                        || state.cached_tools.is_empty(),
+                    forced_synthesis_detected: state.synthesis.forced_synthesis_detected,
+                    sla_mode_ordinal: sla_ordinal,
+                    complexity_upgrade_count: if state.convergence.complexity_tracker.was_upgraded() {
+                        1
+                    } else {
+                        0
+                    },
+                    replan_attempts: state.convergence.replan_attempts,
+                    max_replan_attempts: state.policy.max_replan_attempts,
+                    round,
+                    utility_score: round_feedback.utility_score,
+                    accumulated_cost: state.tokens.call_cost,
+                    fsm_phase: state.synthesis.phase.as_str(),
+                    tool_suppression_active: state.synthesis.tool_decision.is_active(),
+                    cumulative_drift: state.convergence.cumulative_drift_score,
+                    max_drift_bound: state.policy.max_drift_bound,
+                };
+                let violations = state.convergence.invariant_checker.check_round(&snap);
+                if violations > 0 {
+                    tracing::warn!(
+                        round,
+                        violations,
+                        "P4.1: system invariant violations detected"
+                    );
+                }
+
+                // ── P4.3: Structured metrics collection ─────────────────────
+                {
+                    use super::super::domain::system_metrics::RoundMetrics;
+
+                    let round_metrics = RoundMetrics {
+                        round,
+                        tokens_in: state.tokens.call_input_tokens,
+                        tokens_out: state.tokens.call_output_tokens,
+                        tool_calls: tool_successes.len() + tool_failures.len(),
+                        tool_errors: tool_failures.len(),
+                        combined_score: round_feedback.combined_score,
+                        utility_score: round_feedback.utility_score,
+                        evidence_coverage: round_feedback.evidence_coverage,
+                        drift_score: state.convergence.cumulative_drift_score,
+                        sla_fraction: state.sla_budget.as_ref()
+                            .map(|s| s.fraction_consumed())
+                            .unwrap_or(0.0),
+                        token_fraction: if state.tokens.pipeline_budget > 0 {
+                            (state.tokens.call_input_tokens + state.tokens.call_output_tokens) as f64
+                                / state.tokens.pipeline_budget as f64
+                        } else { 0.0 },
+                        replan_attempts: state.convergence.replan_attempts,
+                        invariant_violations: violations,
+                        cycle_count: state.guards.semantic_cycle_detector.cycle_count(),
+                        round_duration: state.loop_start.elapsed(),
+                        oracle_decision: format!("{:?}", oracle_decision.as_ref().unwrap_or(
+                            &super::super::domain::termination_oracle::TerminationDecision::Continue
+                        )),
+                    };
+                    state.convergence.metrics_collector.record_round(round_metrics);
+                }
+            }
         }
 
-        state.round_evaluations.push(eval);
+        state.convergence.round_evaluations.push(eval);
     }
 
     // HICON Phase 4: Check for detected anomaly and apply self-correction.
-    if let Some(anomaly_result) = state.loop_guard.take_last_anomaly() {
+    if let Some(anomaly_result) = state.guards.loop_guard.take_last_anomaly() {
         tracing::info!(
             round,
             anomaly_type = ?anomaly_result.anomaly,
@@ -431,7 +714,7 @@ pub(super) async fn run(
         render_sink.hicon_anomaly(&anomaly_type_str, &severity_str, &details, confidence);
 
         // Select appropriate correction strategy
-        if let Some(strategy) = state.self_corrector.select_strategy(
+        if let Some(strategy) = state.hicon.self_corrector.select_strategy(
             &anomaly_result.anomaly,
             anomaly_result.severity,
             round,
@@ -443,7 +726,7 @@ pub(super) async fn run(
 
             // Apply correction (may modify system prompt and/or inject message)
             let current_system = state.cached_system.as_deref().unwrap_or("");
-            let (new_system, injected_msg) = state.self_corrector.apply_strategy(
+            let (new_system, injected_msg) = state.hicon.self_corrector.apply_strategy(
                 strategy,
                 current_system,
                 round,
@@ -473,41 +756,46 @@ pub(super) async fn run(
     let is_loop_guard_break = matches!(loop_action, LoopAction::Break);
     tracing::info!(
         round,
-        consecutive_tool_rounds = state.loop_guard.consecutive_rounds(),
+        consecutive_tool_rounds = state.guards.loop_guard.consecutive_rounds(),
         underlying_loop_action = ?loop_action,
-        oscillation = state.loop_guard.detect_oscillation(),
-        read_saturation = state.loop_guard.detect_read_saturation(),
+        oscillation = state.guards.loop_guard.detect_oscillation(),
+        read_saturation = state.guards.loop_guard.detect_read_saturation(),
         "TerminationOracle dispatching (authoritative)"
     );
 
     use super::super::termination_oracle::{ReplanReason, SynthesisReason, TerminationDecision};
+
+    // Phase 5 Governance fix: mini-critic signals are now encoded in RoundFeedback
+    // and consumed by the oracle's adjudication logic.  No post-override occurs here.
+    // ReduceTools side-effect was already applied above (before RoundFeedback construction).
+
     match oracle_decision.expect("oracle_decision always set in RoundFeedback block above") {
         // ── Precedence 1: Halt ──────────────────────────────────────────────
         TerminationDecision::Halt => {
             if is_loop_guard_break {
                 // LoopSignal::Break = oscillation / plan complete → ForcedSynthesis.
                 tracing::warn!(
-                    consecutive_tool_rounds = state.loop_guard.consecutive_rounds(),
+                    consecutive_tool_rounds = state.guards.loop_guard.consecutive_rounds(),
                     "Oracle Halt: loop guard break (oscillation or plan complete)"
                 );
                 if !state.silent {
                     render_sink.warning(
                         &format!(
                             "auto-stopped after {} consecutive tool state.rounds (pattern detected)",
-                            state.loop_guard.consecutive_rounds()
+                            state.guards.loop_guard.consecutive_rounds()
                         ),
                         Some("Oscillation or plan completion detected — synthesizing response."),
                     );
                 }
                         // Mark as ForcedSynthesis so post-loop correctly classifies this stop.
-                state.synthesis_origin = Some(SynthesisOrigin::OracleConvergence);
-                state.forced_synthesis_detected = true;
+                state.synthesis.synthesis_origin = Some(SynthesisOrigin::OracleConvergence);
+                state.synthesis.forced_synthesis_detected = true;
             }
             // FIX: Instead of breaking the loop immediately (which produces no final
             // response), inject a synthesis directive and allow one final tool-free
             // round. Guard: if forced_synthesis_detected was already true (we already
             // did a synthesis sub-round but oracle fired Halt again), break for real.
-            if !state.forced_synthesis_detected {
+            if !state.synthesis.forced_synthesis_detected {
                 // V5 fix (2026-02-27): Investigative task synthesis guard.
                 // If the oracle is attempting to force synthesis on an Investigation task
                 // but ZERO real tool calls were executed, this is suspicious — it likely
@@ -517,7 +805,7 @@ pub(super) async fn run(
                 // the LoopCritic (V4 fix) will evaluate the output adversarially.
                 // Restriction: does NOT block synthesis (avoiding deadlock) but marks the
                 // session with `synthesis_origin = SupervisorFailure` for reward dampening.
-                if matches!(state.execution_intent, ExecutionIntentPhase::Investigation)
+                if matches!(state.synthesis.execution_intent, ExecutionIntentPhase::Investigation)
                     && state.tools_executed.is_empty()
                 {
                     tracing::warn!(
@@ -537,9 +825,9 @@ pub(super) async fn run(
                     }
                     // Mark as SupervisorFailure so reward pipeline applies synthesis penalty
                     // AND LoopCritic (V4) will adversarially evaluate the fabricated output.
-                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                 } else {
-                    state.synthesis_origin = Some(SynthesisOrigin::OracleConvergence);
+                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::OracleConvergence);
                 }
                 // EBS Evidence Gate (EBS-1): check if sufficient readable content was
                 // extracted before allowing synthesis. Gate fires when content-read tools
@@ -550,15 +838,15 @@ pub(super) async fn run(
                 // instead of fabricating content from prior knowledge.
                 let synth_text_halt = {
                     use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
-                    if state.evidence_bundle.evidence_gate_fires() {
-                        state.evidence_bundle.synthesis_blocked = true;
+                    if state.evidence.bundle.evidence_gate_fires() {
+                        state.evidence.bundle.synthesis_blocked = true;
                         // Gate fires → always mark as SupervisorFailure for reward dampening.
-                        state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                        state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                         tracing::warn!(
                             session_id = %state.session_id,
-                            text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
-                            content_read_attempts = state.evidence_bundle.content_read_attempts,
-                            binary_file_count = state.evidence_bundle.binary_file_count,
+                            text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
+                            content_read_attempts = state.evidence.bundle.content_read_attempts,
+                            binary_file_count = state.evidence.bundle.binary_file_count,
                             min_threshold = MIN_EVIDENCE_BYTES,
                             "EvidenceGate FIRED (Halt): synthesis replaced with limitation \
                              report directive. Content-read tools ran but extracted \
@@ -570,15 +858,33 @@ pub(super) async fn run(
                                 Some("Files may be binary (PDF). Injecting limitation report directive."),
                             );
                         }
-                        state.evidence_bundle.gate_message()
+                        state.evidence.bundle.gate_message()
                     } else {
-                        "[System: You have gathered sufficient information. \
+                        let mut directive = "[System: You have gathered sufficient information. \
                          Please synthesize all your findings into a comprehensive \
                          final response for the user. Do not call any more tools.]"
-                            .to_string()
+                            .to_string();
+                        // Phase 3 EvidenceGraph: advisory hint for unreferenced evidence.
+                        let coverage = state.evidence.graph.synthesis_coverage();
+                        if coverage < state.policy.min_synthesis_coverage
+                            && state.evidence.graph.good_node_count() > 0
+                        {
+                            let unreferenced = state.evidence.graph.unreferenced_evidence();
+                            let hints: Vec<String> = unreferenced.iter()
+                                .take(5)
+                                .map(|n| format!("- {} ({})", n.tool_args_summary, n.tool_name))
+                                .collect();
+                            if !hints.is_empty() {
+                                directive.push_str(&format!(
+                                    "\n\n[Note: The following evidence items were gathered but may not yet be reflected in your response:\n{}\nPlease consider incorporating them.]",
+                                    hints.join("\n")
+                                ));
+                            }
+                        }
+                        directive
                     }
                 };
-                state.forced_synthesis_detected = true;
+                state.synthesis.forced_synthesis_detected = true;
                 let synth_msg = ChatMessage {
                     role: Role::User,
                     content: MessageContent::Text(synth_text_halt.into()),
@@ -586,10 +892,17 @@ pub(super) async fn run(
                 state.messages.push(synth_msg.clone());
                 state.context_pipeline.add_message(synth_msg.clone());
                 session.add_message(synth_msg);
-                state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                // FASE 6: TUI synthesis phase visibility.
+                if !state.silent {
+                    render_sink.phase_started("synthesis", "Oracle halt — synthesising final answer...");
+                }
                 return Ok(PhaseOutcome::NextRound);
             }
             // Already performed synthesis round — exit for real.
+            if !state.silent {
+                render_sink.phase_ended();
+            }
             return Ok(PhaseOutcome::BreakLoop);
         }
 
@@ -600,19 +913,19 @@ pub(super) async fn run(
                     // Hard stop: stagnation confirmed by ConvergenceController.
                     // FIX: Same pattern as Halt — inject synthesis directive and allow
                     // one final tool-free round so the model produces a real response.
-                    if !state.forced_synthesis_detected {
+                    if !state.synthesis.forced_synthesis_detected {
                         // EBS Evidence Gate (EBS-2): same gate check for ConvergenceController
                         // hard-stop path. Prevents fabrication when stagnation is caused by
                         // unreadable binary files (tools ran in circles, found nothing).
                         let synth_text_conv = {
                             use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
-                            if state.evidence_bundle.evidence_gate_fires() {
-                                state.evidence_bundle.synthesis_blocked = true;
+                            if state.evidence.bundle.evidence_gate_fires() {
+                                state.evidence.bundle.synthesis_blocked = true;
                                 tracing::warn!(
                                     session_id = %state.session_id,
-                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
-                                    content_read_attempts = state.evidence_bundle.content_read_attempts,
-                                    binary_file_count = state.evidence_bundle.binary_file_count,
+                                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
+                                    content_read_attempts = state.evidence.bundle.content_read_attempts,
+                                    binary_file_count = state.evidence.bundle.binary_file_count,
                                     min_threshold = MIN_EVIDENCE_BYTES,
                                     "EvidenceGate FIRED (ConvergenceCtrl): replacing synthesis \
                                      with limitation report. Binary/unreadable files detected."
@@ -624,17 +937,35 @@ pub(super) async fn run(
                                     );
                                 }
                                 // Gate fires → SupervisorFailure for reward dampening.
-                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
-                                state.evidence_bundle.gate_message()
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                state.evidence.bundle.gate_message()
                             } else {
-                                state.synthesis_origin = Some(SynthesisOrigin::OracleConvergence);
-                                "[System: You have gathered sufficient information. \
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::OracleConvergence);
+                                let mut directive = "[System: You have gathered sufficient information. \
                                  Please synthesize all your findings into a comprehensive \
                                  final response for the user. Do not call any more tools.]"
-                                    .to_string()
+                                    .to_string();
+                                // Phase 3 EvidenceGraph: advisory hint for unreferenced evidence.
+                                let coverage = state.evidence.graph.synthesis_coverage();
+                                if coverage < state.policy.min_synthesis_coverage
+                                    && state.evidence.graph.good_node_count() > 0
+                                {
+                                    let unreferenced = state.evidence.graph.unreferenced_evidence();
+                                    let hints: Vec<String> = unreferenced.iter()
+                                        .take(5)
+                                        .map(|n| format!("- {} ({})", n.tool_args_summary, n.tool_name))
+                                        .collect();
+                                    if !hints.is_empty() {
+                                        directive.push_str(&format!(
+                                            "\n\n[Note: The following evidence items were gathered but may not yet be reflected in your response:\n{}\nPlease consider incorporating them.]",
+                                            hints.join("\n")
+                                        ));
+                                    }
+                                }
+                                directive
                             }
                         };
-                        state.forced_synthesis_detected = true;
+                        state.synthesis.forced_synthesis_detected = true;
                         let synth_msg = ChatMessage {
                             role: Role::User,
                             content: MessageContent::Text(synth_text_conv.into()),
@@ -642,7 +973,7 @@ pub(super) async fn run(
                         state.messages.push(synth_msg.clone());
                         state.context_pipeline.add_message(synth_msg.clone());
                         session.add_message(synth_msg);
-                        state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                        state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         return Ok(PhaseOutcome::NextRound);
                     }
                     return Ok(PhaseOutcome::BreakLoop);
@@ -652,14 +983,14 @@ pub(super) async fn run(
                     // Soft hint: inject synthesis directive, continue to next round.
                     // Suppress if convergence directive was already injected this round
                     // (ConvergenceController::Replan injects a conflicting directive).
-                    if state.convergence_directive_injected {
+                    if state.synthesis.convergence_directive_injected {
                         tracing::debug!(
                             round,
                             "Oracle InjectSynthesis suppressed: convergence directive active this round"
                         );
                     } else {
                         tracing::info!(
-                            consecutive_tool_rounds = state.loop_guard.consecutive_rounds(),
+                            consecutive_tool_rounds = state.guards.loop_guard.consecutive_rounds(),
                             ?reason,
                             "Oracle: injecting synthesis directive"
                         );
@@ -674,12 +1005,12 @@ pub(super) async fn run(
                         let synth_text_loopguard = {
                             use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                             if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                                &mut state.evidence_bundle,
+                                &mut state.evidence.bundle,
                             ) {
-                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                 tracing::warn!(
                                     session_id = %state.session_id,
-                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                                     min_threshold = MIN_EVIDENCE_BYTES,
                                     "EvidenceGate FIRED (LoopGuardInjectSynthesis): hint replaced with limitation report"
                                 );
@@ -705,6 +1036,71 @@ pub(super) async fn run(
 
         // ── Precedence 3: Replan ────────────────────────────────────────────
         TerminationDecision::Replan { reason } => {
+            // P3.1: Mid-loop strategy mutation — decides HOW to replan.
+            let p3_evidence_cov = state.evidence.graph.synthesis_coverage();
+            let p3_plan_progress = state.execution_tracker.as_ref()
+                .map(|t| { let (done, total, _) = t.progress(); if total > 0 { done as f64 / total as f64 } else { 0.0 } })
+                .unwrap_or(0.0);
+            let p3_sla_frac = state.sla_budget.as_ref()
+                .map(|s| s.fraction_consumed())
+                .unwrap_or(0.0);
+            let p3_cycle_detected = state.guards.semantic_cycle_detector.has_cycle();
+            let p3_max_rounds = state.sla_budget.as_ref()
+                .map(|s| s.max_rounds as usize)
+                .unwrap_or(20);
+            let strategy_signals = super::super::domain::mid_loop_strategy::StrategySignals {
+                evidence_coverage: p3_evidence_cov,
+                drift_score: state.convergence.cumulative_drift_score,
+                replan_attempts: state.convergence.replan_attempts,
+                max_replan_attempts: state.policy.max_replan_attempts,
+                consecutive_errors: tool_failures.len() as u32,
+                tool_failure_clustering: if !tool_failures.is_empty() && !tool_successes.is_empty() {
+                    tool_failures.len() as f32 / (tool_failures.len() + tool_successes.len()) as f32
+                } else if !tool_failures.is_empty() {
+                    1.0
+                } else {
+                    0.0
+                },
+                sla_fraction_consumed: p3_sla_frac,
+                execution_intent: state.synthesis.execution_intent,
+                plan_completion_fraction: p3_plan_progress as f32,
+                cycle_detected: p3_cycle_detected,
+                round,
+                max_rounds: p3_max_rounds,
+            };
+            let strategy_thresholds = super::super::domain::mid_loop_strategy::StrategyThresholds::from_policy(&state.policy);
+            let strategy_rationale = super::super::domain::mid_loop_strategy::select_mutation(
+                &strategy_signals, &strategy_thresholds,
+            );
+            tracing::info!(
+                round,
+                mutation = ?strategy_rationale.mutation,
+                signal = strategy_rationale.primary_signal,
+                confidence = %strategy_rationale.confidence,
+                "Phase3 MidLoopStrategy: selected mutation"
+            );
+
+            // Apply strategy mutation overrides
+            match strategy_rationale.mutation {
+                super::super::domain::mid_loop_strategy::StrategyMutation::ForceSynthesis => {
+                    // Skip replan entirely — force synthesis
+                    tracing::info!(round, "Phase3 Strategy: ForceSynthesis — bypassing replan");
+                    state.mark_synthesis_forced(SynthesisOrigin::OracleConvergence);
+                    state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                    return Ok(PhaseOutcome::NextRound);
+                }
+                super::super::domain::mid_loop_strategy::StrategyMutation::ContinueCurrentPlan => {
+                    // Skip replan — ambiguous signals
+                    tracing::info!(round, "Phase3 Strategy: ContinueCurrentPlan — skipping replan");
+                    return Ok(PhaseOutcome::NextRound);
+                }
+                _ => {
+                    // All other mutations: proceed with existing replan logic
+                    // (ReplanSameGranularity, ReplanWithDecomposition, CollapsePlan,
+                    //  SwitchInvestigation/ExecutionMode)
+                }
+            }
+
             match reason {
                 ReplanReason::ConvergenceControllerReplanAction => {
                     // ConvergenceController::Replan already injected the directive and set
@@ -718,18 +1114,18 @@ pub(super) async fn run(
                 ReplanReason::LoopGuardStagnationDetected
                 | ReplanReason::RoundScorerLowTrajectory => {
                     // Full stagnation replan: enforce budget then attempt replan.
-                    state.replan_attempts += 1;
-                    if state.replan_attempts > MAX_REPLAN_ATTEMPTS {
+                    state.convergence.replan_attempts += 1;
+                    if state.convergence.replan_attempts > state.policy.max_replan_attempts {
                         tracing::warn!(
-                            attempts = state.replan_attempts,
-                            max = MAX_REPLAN_ATTEMPTS,
+                            attempts = state.convergence.replan_attempts,
+                            max = state.policy.max_replan_attempts,
                             "Replan budget exhausted — escalating directly to synthesis"
                         );
                         if !state.silent {
                             render_sink.warning(
                                 &format!(
                                     "replan budget exhausted ({} attempts) — synthesizing response",
-                                    state.replan_attempts,
+                                    state.convergence.replan_attempts,
                                 ),
                                 Some("Agent replanned repeatedly without convergence; falling back to direct response"),
                             );
@@ -740,18 +1136,18 @@ pub(super) async fn run(
                         let synth_text_replan_budget = {
                             use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                             if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                                &mut state.evidence_bundle,
+                                &mut state.evidence.bundle,
                             ) {
-                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                 tracing::warn!(
                                     session_id = %state.session_id,
-                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                                     min_threshold = MIN_EVIDENCE_BYTES,
                                     "EvidenceGate FIRED (ReplanBudgetExhausted): synthesis replaced with limitation report"
                                 );
                                 gate_msg
                             } else {
-                                state.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
                                 "[System: Maximum replanning attempts reached without convergence. \
                                  Synthesize all information gathered so far and respond to the user directly. \
                                  Do NOT call any more tools.]"
@@ -770,9 +1166,9 @@ pub(super) async fn run(
                         // is an oracle-level decision — use ForcedByOracle so no subsequent
                         // heuristic (e.g. ConversationalDirectiveRule, ForceNoToolsRule) can
                         // override this synthesis injection with a weaker signal.
-                        state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                        state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         tracing::warn!(
-                            attempts = state.replan_attempts,
+                            attempts = state.convergence.replan_attempts,
                             "Replan budget exhausted → ForcedByOracle (oracle-level, non-downgradable)"
                         );
                         return Ok(PhaseOutcome::NextRound);
@@ -780,9 +1176,9 @@ pub(super) async fn run(
 
                     // Budget not exhausted — attempt stagnation replan.
                     tracing::warn!(
-                        consecutive_rounds = state.loop_guard.consecutive_rounds(),
-                        attempt = state.replan_attempts,
-                        max = MAX_REPLAN_ATTEMPTS,
+                        consecutive_rounds = state.guards.loop_guard.consecutive_rounds(),
+                        attempt = state.convergence.replan_attempts,
+                        max = state.policy.max_replan_attempts,
                         ?reason,
                         "Stagnation detected: read saturation with 0% plan progress — attempting replan"
                     );
@@ -823,10 +1219,10 @@ pub(super) async fn run(
                     };
 
                     // BRECHA-C: Inject blocked tools so the planner avoids retry loops.
-                    let blocked_tools_note = if state.blocked_tools.is_empty() {
+                    let blocked_tools_note = if state.evidence.blocked_tools.is_empty() {
                         String::new()
                     } else {
-                        let tools_list = state.blocked_tools
+                        let tools_list = state.evidence.blocked_tools
                             .iter()
                             .map(|(name, reason)| format!("  - `{name}`: {reason}"))
                             .collect::<Vec<_>>()
@@ -860,18 +1256,18 @@ pub(super) async fn run(
                         let synth_text_no_planner = {
                             use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                             if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                                &mut state.evidence_bundle,
+                                &mut state.evidence.bundle,
                             ) {
-                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                 tracing::warn!(
                                     session_id = %state.session_id,
-                                    text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                                     min_threshold = MIN_EVIDENCE_BYTES,
                                     "EvidenceGate FIRED (ReplanNoPlannerAvailable): synthesis replaced with limitation report"
                                 );
                                 gate_msg
                             } else {
-                                state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                 "[System: Cannot regenerate plan (no planner). \
                                  Synthesize your findings and respond to the user.]"
                                     .to_string()
@@ -887,7 +1283,7 @@ pub(super) async fn run(
                         // P2-A fix (2026-02-27): No planner available is a structural oracle-level
                         // constraint — promote to ForcedByOracle (was set_force_next). The planner
                         // is either not configured or was exhausted; this is not a transient heuristic.
-                        state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                        state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         return Ok(PhaseOutcome::NextRound);
                     };
 
@@ -910,7 +1306,7 @@ pub(super) async fn run(
                                 }
                                 hasher.finish()
                             };
-                            state.loop_guard.update_plan_hash(plan_hash);
+                            state.guards.loop_guard.update_plan_hash(plan_hash);
 
                             state.active_plan = Some(new_plan.clone());
                             if let Some(ref mut tracker) = state.execution_tracker {
@@ -926,15 +1322,15 @@ pub(super) async fn run(
                                 );
                             }
 
-                            state.loop_guard.reset_on_replan();
-                            state.adaptive_policy.reset_after_replan();
+                            state.guards.loop_guard.reset_on_replan();
+                            state.convergence.adaptive_policy.reset_after_replan();
 
-                            state.convergence_detector =
+                            state.convergence.convergence_detector =
                                 super::super::early_convergence::ConvergenceDetector::with_context_window(
-                                    state.pipeline_budget as u64,
+                                    state.tokens.pipeline_budget as u64,
                                 );
-                            state.last_convergence_ratio = 0.0;
-                            state.macro_plan_view = {
+                            state.convergence.last_convergence_ratio = 0.0;
+                            state.convergence.macro_plan_view = {
                                 let mode = if state.silent {
                                     super::super::macro_feedback::FeedbackMode::Silent
                                 } else {
@@ -946,9 +1342,9 @@ pub(super) async fn run(
                             };
 
                             {
-                                let report = state.coherence_checker.check(&new_plan);
-                                state.cumulative_drift_score += report.drift_score;
-                                state.drift_replan_count += 1;
+                                let report = state.convergence.coherence_checker.check(&new_plan);
+                                state.convergence.cumulative_drift_score += report.drift_score;
+                                state.convergence.drift_replan_count += 1;
                                 if report.drift_detected {
                                     tracing::warn!(
                                         drift_score = report.drift_score,
@@ -985,18 +1381,18 @@ pub(super) async fn run(
                             let synth_text_empty_plan = {
                                 use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                                 if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                                    &mut state.evidence_bundle,
+                                    &mut state.evidence.bundle,
                                 ) {
-                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     tracing::warn!(
                                         session_id = %state.session_id,
-                                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                        text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                                         min_threshold = MIN_EVIDENCE_BYTES,
                                         "EvidenceGate FIRED (ReplanEmptyPlan): synthesis replaced with limitation report"
                                     );
                                     gate_msg
                                 } else {
-                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     "[System: Plan regeneration did not succeed. \
                                      Synthesize the information you have gathered and respond to the user.]"
                                         .to_string()
@@ -1012,7 +1408,7 @@ pub(super) async fn run(
                             // P2-B fix (2026-02-27): Replan produced empty/no plan is a structural
                             // oracle-level failure — promote to ForcedByOracle (was set_force_next).
                             // Prevents subsequent heuristics from downgrading the synthesis directive.
-                            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                            state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         }
                         Ok(Err(e)) => {
                             tracing::error!(error = %e, "Replan failed — falling back to synthesis");
@@ -1026,18 +1422,18 @@ pub(super) async fn run(
                             let synth_text_replan_err = {
                                 use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                                 if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                                    &mut state.evidence_bundle,
+                                    &mut state.evidence.bundle,
                                 ) {
-                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     tracing::warn!(
                                         session_id = %state.session_id,
-                                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                        text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                                         min_threshold = MIN_EVIDENCE_BYTES,
                                         "EvidenceGate FIRED (ReplanError): synthesis replaced with limitation report"
                                     );
                                     gate_msg
                                 } else {
-                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     "[System: Plan regeneration failed. \
                                      Synthesize the information you have gathered and respond to the user.]"
                                         .to_string()
@@ -1052,7 +1448,7 @@ pub(super) async fn run(
                             session.add_message(synth_msg);
                             // P2-C fix (2026-02-27): Replan error is a hard structural failure —
                             // promote to ForcedByOracle. Planner returning Err is definitive.
-                            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                            state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         }
                         Err(_timeout) => {
                             tracing::error!(
@@ -1069,18 +1465,18 @@ pub(super) async fn run(
                             let synth_text_replan_timeout = {
                                 use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                                 if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                                    &mut state.evidence_bundle,
+                                    &mut state.evidence.bundle,
                                 ) {
-                                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                                     tracing::warn!(
                                         session_id = %state.session_id,
-                                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                                        text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                                         min_threshold = MIN_EVIDENCE_BYTES,
                                         "EvidenceGate FIRED (ReplanTimeout): synthesis replaced with limitation report"
                                     );
                                     gate_msg
                                 } else {
-                                    state.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
+                                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
                                     "[System: Plan regeneration timed out. \
                                      Synthesize the information you have gathered and respond to the user.]"
                                         .to_string()
@@ -1095,7 +1491,7 @@ pub(super) async fn run(
                             session.add_message(synth_msg);
                             // P2-D fix (2026-02-27): Replan timeout is deterministic and structural —
                             // promote to ForcedByOracle. Timeout will recur if heuristics allow retry.
-                            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+                            state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
                         }
                     }
                 }
@@ -1105,7 +1501,7 @@ pub(super) async fn run(
         // ── Precedence 4: ForceNoTools ──────────────────────────────────────
         TerminationDecision::ForceNoTools => {
             tracing::warn!(
-                consecutive_tool_rounds = state.loop_guard.consecutive_rounds(),
+                consecutive_tool_rounds = state.guards.loop_guard.consecutive_rounds(),
                 "Oracle: ForceNoTools — removing tools for next round"
             );
             if !state.silent {
@@ -1115,12 +1511,12 @@ pub(super) async fn run(
             let synth_text_force_no_tools = {
                 use super::super::evidence_pipeline::MIN_EVIDENCE_BYTES;
                 if let Some(gate_msg) = super::super::evidence_pipeline::enforce_evidence_boundary(
-                    &mut state.evidence_bundle,
+                    &mut state.evidence.bundle,
                 ) {
-                    state.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
                     tracing::warn!(
                         session_id = %state.session_id,
-                        text_bytes_extracted = state.evidence_bundle.text_bytes_extracted,
+                        text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
                         min_threshold = MIN_EVIDENCE_BYTES,
                         "EvidenceGate FIRED (ForceNoToolsOracle): synthesis replaced with limitation report"
                     );
@@ -1141,7 +1537,11 @@ pub(super) async fn run(
             session.add_message(synth_msg);
             // Oracle ForceNoTools is highest-authority — use ForcedByOracle so
             // subsequent heuristic set_force_next() calls cannot downgrade it.
-            state.tool_decision = ToolDecisionSignal::ForcedByOracle;
+            state.synthesis.tool_decision = ToolDecisionSignal::ForcedByOracle;
+            // FASE 6: TUI synthesis phase visibility.
+            if !state.silent {
+                render_sink.phase_started("synthesis", "Forced no-tools — synthesising...");
+            }
         }
 
         // ── Precedence 5: Continue ──────────────────────────────────────────
@@ -1157,11 +1557,11 @@ pub(super) async fn run(
     // `tracker.is_complete()` which checks `all(status.is_terminal())` — correctly covers
     // Completed + Failed + Skipped states, preventing the Execution→Complete transition
     // from stalling and synthesis from being permanently suppressed.
-    if state.execution_intent == ExecutionIntentPhase::Execution {
+    if state.synthesis.execution_intent == ExecutionIntentPhase::Execution {
         if let Some(ref tracker) = state.execution_tracker {
             let all_done = tracker.is_complete();
             if all_done {
-                state.execution_intent = ExecutionIntentPhase::Complete;
+                state.synthesis.execution_intent = ExecutionIntentPhase::Complete;
                 tracing::info!(
                     steps_total = tracker.tracked_steps().len(),
                     "ExecutionIntent: Execution → Complete (tracker.is_complete())"
@@ -1188,7 +1588,7 @@ pub(super) async fn run(
             .map(|(name, err)| format!("- {name}: {err}"))
             .collect();
 
-        let tripped_tools = state.failure_tracker.tripped_tools();
+        let tripped_tools = state.guards.failure_tracker.tripped_tools();
         let correction_text = if tripped_tools.is_empty() {
             format!(
                 "[System Note: {} tool(s) failed. Analyze the errors below and try a different approach.\n{}]",
@@ -1263,5 +1663,91 @@ pub(super) async fn run(
         state.trace_step_index,
     );
 
+    // FSM: if synthesis was injected this phase, transition to Synthesizing.
+    if state.synthesis.forced_synthesis_detected {
+        state.synthesis.phase = super::loop_state::transition(
+            state.synthesis.phase,
+            super::loop_state::AgentEvent::SynthesisStarted,
+        );
+        // phase already updated by fire() — no string sync needed.
+    }
+
     Ok(PhaseOutcome::Continue)
+}
+
+// ── Phase 6: Mini-Critic ────────────────────────────────────────────────────
+
+/// Action the mini-critic can recommend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiniCriticAction {
+    /// Force structural replanning — session is stalled.
+    ForceReplan,
+    /// Reduce tool scope (set force_next) — declining trajectory.
+    ReduceTools,
+    /// Force synthesis — budget nearly exhausted with insufficient progress.
+    ForceSynthesis,
+}
+
+/// Lightweight heuristic progress check — no LLM call.
+///
+/// Runs every `policy.mini_critic_interval` rounds (default 3). Uses 3 signals:
+/// - Plan completion ratio vs budget consumed (SLA or round-based)
+/// - Round scorer trend (rising vs declining)
+/// - Recent round scores (last 3)
+///
+/// Returns `None` when no intervention is needed (the common case).
+fn mini_critic_check(state: &LoopState, round: usize) -> Option<MiniCriticAction> {
+    let interval = state.policy.mini_critic_interval;
+    if interval == 0 || round < interval || round % interval != 0 {
+        return None;
+    }
+
+    // Compute budget fraction consumed (round-based).
+    // Use SLA max_rounds when available, else fall back to a conservative default.
+    let max_rounds = state.sla_budget.as_ref()
+        .map(|b| b.max_rounds as f64)
+        .unwrap_or(10.0)
+        .max(1.0);
+    let budget_fraction = round as f64 / max_rounds;
+
+    // Compute progress fraction (plan completion ratio).
+    let progress = if let Some(ref tracker) = state.execution_tracker {
+        let (completed, total, _) = tracker.progress();
+        if total > 0 { completed as f64 / total as f64 } else { 0.0 }
+    } else {
+        0.0
+    };
+
+    // Check round score trend: average of last 3 evaluations.
+    let recent_scores: Vec<f32> = state.convergence.round_evaluations.iter()
+        .rev()
+        .take(3)
+        .map(|e| e.combined_score)
+        .collect();
+    let avg_recent = if recent_scores.is_empty() {
+        0.5 // neutral
+    } else {
+        recent_scores.iter().sum::<f32>() / recent_scores.len() as f32
+    };
+    let declining = recent_scores.len() >= 2
+        && recent_scores[0] < recent_scores[recent_scores.len() - 1]; // latest < oldest
+
+    // Decision thresholds (Phase 6 spec):
+    // >80% budget + <80% complete → ForceSynthesis
+    if budget_fraction > 0.80 && progress < 0.80 {
+        return Some(MiniCriticAction::ForceSynthesis);
+    }
+
+    // >50% budget + <30% progress + low avg score → ForceReplan
+    let budget_threshold = state.policy.mini_critic_budget_fraction;
+    if budget_fraction > budget_threshold && progress < 0.30 && avg_recent < 0.40 {
+        return Some(MiniCriticAction::ForceReplan);
+    }
+
+    // >50% budget + declining trend → ReduceTools
+    if budget_fraction > budget_threshold && declining {
+        return Some(MiniCriticAction::ReduceTools);
+    }
+
+    None
 }

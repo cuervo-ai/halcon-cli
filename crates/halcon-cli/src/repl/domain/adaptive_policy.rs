@@ -226,6 +226,16 @@ mod tests {
             synthesis_advised: false,
             tool_round: true,
             had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: false,
+            evidence_coverage: 1.0,
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.5,
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
         }
     }
 

@@ -377,6 +377,9 @@ pub struct AppConfig {
     /// V3 Plugin system configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// Centralized policy thresholds (reward, critic, evidence, trust, retry, growth, mini-critic).
+    #[serde(default)]
+    pub policy: super::policy_config::PolicyConfig,
 }
 
 /// V3 Plugin system configuration.

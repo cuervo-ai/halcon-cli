@@ -2,7 +2,7 @@ mod budget_guards;
 // Phase 1: State Externalization — serializable LoopState snapshot, fire-and-forget persist.
 mod checkpoint;
 mod convergence_phase;
-mod loop_state;
+pub(crate) mod loop_state;
 // Phase 4: LoopState decomposition scaffolding — additive snapshot types.
 // Future migration will embed these as owned sub-structs inside LoopState.
 mod loop_state_roles;
@@ -18,7 +18,7 @@ pub(crate) mod repair;
 mod result_assembly;
 mod round_setup;
 
-use loop_state::{ExecutionIntentPhase, LoopState, SynthesisOrigin, ToolDecisionSignal};
+use loop_state::{AgentEvent, ExecutionIntentPhase, LoopState, SynthesisOrigin, ToolDecisionSignal};
 
 use plan_formatter::{
     format_plan_for_prompt, update_plan_in_system, validate_plan,
@@ -155,6 +155,8 @@ pub struct AgentContext<'a> {
     /// through `render_sink.provider_fallback()` so TUI users see the warning.
     /// `None` disables the check (sub-agents, replay runner, agent bridge).
     pub requested_provider: Option<String>,
+    /// Centralized policy thresholds (replaces module-local const values).
+    pub policy: std::sync::Arc<halcon_core::types::PolicyConfig>,
 }
 
 /// Action determined by checking the control channel.
@@ -250,6 +252,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         plugin_registry,
         is_sub_agent,
         requested_provider,
+        policy,
     } = ctx;
 
     let silent = render_sink.is_silent();
@@ -285,16 +288,14 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         render_sink.dry_run_active(true);
     }
 
-    // P4 FIX: Track real FSM state so every agent_state_transition call uses
-    // the actual from_state rather than a hardcoded value.
-    // Without this, the final transition at loop exit always emits "executing"
-    // as from_state even if the last state was "reflecting", "planning", etc.
-    let mut current_fsm_state = "idle";
+    // Pre-LoopState FSM tracking: use a local &str derived from phase until LoopState
+    // is constructed.  After LoopState is created, all transitions go through state.phase.
+    let mut pre_loop_phase = "idle";
 
     // Phase E5: Emit agent state transition: Idle → Planning/Executing.
     if !silent {
         render_sink.agent_state_transition("idle", "executing", "agent loop started");
-        current_fsm_state = "executing";
+        pre_loop_phase = "executing";
     }
 
     // Phase 43: auto_pause flag — set by StepOnce control action.
@@ -479,8 +480,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         let plan_result = if planning_decision != planning_policy::PlanningDecision::SkipPlanning {
             // Phase E5: Transition to Planning state.
             if !silent {
-                render_sink.agent_state_transition(current_fsm_state, "planning", "generating plan");
-                current_fsm_state = "planning";
+                render_sink.agent_state_transition(pre_loop_phase, "planning", "generating plan");
+                pre_loop_phase = "planning";
                 render_sink.phase_started("planning", "Generating execution plan...");
             }
             // Prefix user message with working directory context.
@@ -500,8 +501,8 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             render_sink.phase_ended(); // always fires regardless of result
             // Phase E5: Transition back to Executing after planning.
             if !silent {
-                render_sink.agent_state_transition(current_fsm_state, "executing", "plan generated");
-                current_fsm_state = "executing";
+                render_sink.agent_state_transition(pre_loop_phase, "executing", "plan generated");
+                pre_loop_phase = "executing";
             }
             result
         } else {
@@ -634,7 +635,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // Uses 8% of pipeline_budget as synthesis headroom (clamped to [4K, 20K] tokens).
     // Prevents mid-stream truncation and detects diminishing-returns early.
     let mut convergence_detector =
-        super::early_convergence::ConvergenceDetector::with_context_window(pipeline_budget as u64);
+        super::early_convergence::ConvergenceDetector::with_policy_context_window(pipeline_budget as u64, &policy);
 
     // Planning V3: MacroPlanView for user-facing [N/M] progress display.
     // Wraps the compressed plan; emits a plan summary on creation,
@@ -707,15 +708,48 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 "ToolSelector filtered tools for model request"
             );
         }
+        // FASE 5: Environment-aware tool filtering.
+        // Remove tools that depend on unavailable environment features (git, CI).
+        let env_ctx = super::tool_selector::EnvironmentContext::detect(working_dir);
+        let env_filtered = env_ctx.filter_tools(selected);
+        if env_filtered.len() < all_tools.len() {
+            tracing::info!(
+                is_git = env_ctx.is_git_repo,
+                has_ci = env_ctx.has_ci_config,
+                before = all_tools.len(),
+                after = env_filtered.len(),
+                "EnvironmentFilter applied"
+            );
+        }
         // Phase 42: record tool selection metrics.
         if let Some(metrics) = context_metrics {
-            metrics.record_tool_selection(all_tools.len(), selected.len());
+            metrics.record_tool_selection(all_tools.len(), env_filtered.len());
         }
         // Sprint 0-C: Cached preflight schema validation.
         // Validates each tool's input_schema exactly once per process lifetime.
         // Invalid schemas are logged and excluded — prevents confusing API-level errors.
-        super::schema_validator::preflight_validate(selected)
+        super::schema_validator::preflight_validate(env_filtered)
     };
+    // F2 DecisionLayer: classify task complexity for SLA/orchestration gating.
+    let orchestration_decision = if !is_sub_agent {
+        let d = super::decision_layer::estimate_complexity(&user_msg, &cached_tools);
+        tracing::info!(complexity = ?d.complexity, use_orch = d.use_orchestration, "DecisionLayer");
+        Some(d)
+    } else {
+        None
+    };
+
+    // F3 SlaManager: derive time/round budget from task complexity.
+    let sla_budget = if !is_sub_agent {
+        orchestration_decision.as_ref().map(|d| {
+            let b = super::sla_manager::SlaBudget::from_complexity(d);
+            tracing::info!(mode = ?b.mode, max_rounds = b.max_rounds, "SlaManager");
+            b
+        })
+    } else {
+        None
+    };
+
     // System prompt may update mid-session if instruction files (HALCON.md) change on disk.
     // Track instruction content separately for surgical replacement in the full system prompt.
     let mut cached_system = request.system.clone();
@@ -753,8 +787,14 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     }
 
     // Phase 37: Attempt delegation of eligible plan steps to sub-agents.
+    // F2 DecisionLayer gate: skip orchestration for Simple/Structured tasks.
+    // Phase 2 SLA: gate orchestration through SLA budget (Fast mode = 0 sub-agents).
+    let sla_allows_orch = sla_budget.as_ref().map_or(true, |b| b.allows_orchestration());
+    let delegation_enabled = orchestrator_config.enabled
+        && orchestration_decision.as_ref().map_or(true, |d| d.use_orchestration)
+        && sla_allows_orch;
     if let Some(ref mut tracker) = execution_tracker {
-        let delegation_router = super::delegation::DelegationRouter::new(orchestrator_config.enabled)
+        let delegation_router = super::delegation::DelegationRouter::new(delegation_enabled)
             .with_min_confidence(orchestrator_config.min_delegation_confidence);
         let decisions = delegation_router.analyze_plan(tracker.plan());
 
@@ -854,6 +894,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 false, // Sub-agents run non-interactively (perm_awaiter handles TUI).
                 false,
                 perm_awaiter_for_orch,
+                policy.clone(),
             )
             .await;
 
@@ -1107,34 +1148,41 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                     elapsed,
                 );
 
-                // FIX: Remove delegation-completed tools from coordinator's cached_tools.
-                // Prevents the coordinator from calling a tool (e.g. file_write) that a
-                // sub-agent already executed. In the Minecraft benchmark, deepseek-chat
-                // ignored the "don't redo" injection and called file_write a second time
-                // (131s wasted API + 45s permission timeout = 176s = 51% of total time).
-                // By removing the tool from the tool list, the model physically cannot
-                // call it — eliminating the hallucination at the protocol level.
+                // Post-delegation tool retention policy (FASE 1 remediation).
+                //
+                // Previous behavior: strip ALL delegated tools → coordinator left with
+                // tool_count=0 → forced text-only synthesis → speculative shell scripts.
+                //
+                // New behavior: use tool_policy to classify tools. Only EXECUTION tools
+                // (file_write, bash, git_commit, etc.) are removed. READ_ONLY tools
+                // (file_read, directory_tree, grep, glob) are RETAINED so the coordinator
+                // can verify sub-agent results before synthesising.
+                //
+                // This preserves the anti-redo protection for mutating tools while giving
+                // the coordinator evidence-gathering capability during synthesis.
                 if !delegated_ok_tools.is_empty() {
+                    let to_remove = crate::repl::tool_policy::tools_to_remove(&delegated_ok_tools);
                     let before = cached_tools.len();
-                    cached_tools.retain(|t| !delegated_ok_tools.contains(&t.name));
+                    cached_tools.retain(|t| !to_remove.contains(&t.name));
                     let removed = before - cached_tools.len();
-                    if removed > 0 {
+                    let retained_read_only: Vec<&str> = delegated_ok_tools
+                        .iter()
+                        .filter(|n| !to_remove.contains(n.as_str()))
+                        .map(|s| s.as_str())
+                        .collect();
+                    if removed > 0 || !retained_read_only.is_empty() {
                         tracing::info!(
-                            removed_tools = ?delegated_ok_tools,
+                            removed_execution_tools = ?to_remove,
                             removed_count = removed,
+                            retained_read_only = ?retained_read_only,
                             remaining_tools = cached_tools.len(),
-                            "Post-delegation: removed completed tools from coordinator tool list"
+                            "Post-delegation: tool policy applied — execution tools removed, read-only retained"
                         );
                         if !silent {
                             render_sink.info(&format!(
-                                "[post-delegation] removed {} completed tool(s) from coordinator list: [{}]",
+                                "[tool-policy] removed {} execution tool(s), retained {} read-only for synthesis",
                                 removed,
-                                delegated_ok_tools
-                                    .iter()
-                                    .filter(|n| !cached_tools.iter().any(|ct| &ct.name == *n))
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
+                                retained_read_only.len()
                             ));
                         }
                     }
@@ -1217,6 +1265,11 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     };
     tracing::debug!(intent = ?execution_intent, "ExecutionIntent derived from plan");
 
+    // Declared early so Phase 3A can set it before LoopState construction.
+    // Flag set when cross-type oscillation detection forces a synthesis break,
+    // or when Phase 3A detects all remaining steps are synthesis-only.
+    let mut forced_synthesis_detected = false;
+
     // ── Phase 3A: Pre-loop synthesis guard — MUST RUN BEFORE tool directive injection ──
     //
     // Root cause (vucem3-qa benchmark + session e2adfb4f analysis):
@@ -1245,20 +1298,38 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         if has_pending && all_pending_synthesis
             && execution_intent != ExecutionIntentPhase::Execution
         {
-            let removed = cached_tools.len();
-            cached_tools.clear();
-            if removed > 0 {
+            // FIX: Phase 3A must respect tool_policy — only remove EXECUTION tools,
+            // retain READ_ONLY tools so the coordinator can verify sub-agent results
+            // before synthesising. Previously `cached_tools.clear()` wiped everything,
+            // leaving the coordinator with tool_count=0 and no ability to investigate.
+            let before = cached_tools.len();
+            let execution_names: std::collections::HashSet<String> = cached_tools.iter()
+                .filter(|t| crate::repl::tool_policy::classify(&t.name)
+                    == crate::repl::tool_policy::ToolCategory::Execution)
+                .map(|t| t.name.clone())
+                .collect();
+            cached_tools.retain(|t| !execution_names.contains(&t.name));
+            let removed = before - cached_tools.len();
+            let retained = cached_tools.len();
+
+            // Signal to Phase 3C (round_setup) that this is a synthesis round.
+            // Without this flag, Phase 3C sees tools ≠ empty and no synthesis state,
+            // so it doesn't apply max_tokens cap or synthesis constraint.
+            forced_synthesis_detected = true;
+
+            if removed > 0 || retained > 0 {
                 tracing::info!(
-                    removed_tools = removed,
+                    removed_execution = removed,
+                    retained_read_only = retained,
                     "Pre-loop synthesis guard: all pending steps are synthesis-only — \
-                     clearing coordinator tool list to force pure-text synthesis mode \
+                     removed execution tools, retained read-only for verification \
                      (tool directives will NOT be injected into system prompt)"
                 );
                 if !silent {
                     render_sink.info(&format!(
-                        "[synthesis] coordinator tool list cleared ({} tools removed) — \
+                        "[synthesis] removed {} execution tool(s), retained {} read-only — \
                          all remaining steps are synthesis-only",
-                        removed
+                        removed, retained
                     ));
                 }
             }
@@ -1333,7 +1404,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // Phase 33: intelligent tool loop guard — multi-layered termination.
     // Replaces the blunt consecutive_tool_rounds >= 5 counter with graduated
     // escalation: synthesis directive → forced tool withdrawal → break.
-    let mut loop_guard = ToolLoopGuard::new();
+    let mut loop_guard = ToolLoopGuard::with_policy(&policy);
 
     // Sprint 1: CapabilityOrchestrationLayer — centralises 5 STRIP points.
     // Replaces: conversational directive injection, force_no_tools ModelRequest
@@ -1365,7 +1436,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             _ => "",
         })
         .unwrap_or("");
-    let mut round_scorer = super::round_scorer::RoundScorer::new(goal_text);
+    let mut round_scorer = super::round_scorer::RoundScorer::new(goal_text, policy.clone());
     // Phase 2 causal wiring: apply UCB1 replan_sensitivity so the scorer's structural
     // thresholds reflect the strategy plan (DirectExecution stays permissive, complex
     // PlanExecuteReflect strategies become hair-trigger on low-trajectory rounds).
@@ -1384,16 +1455,18 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
 
     // Step 8b (continued): PlanCoherenceChecker — Jaccard semantic drift detection.
     // Initialized with the user goal; checked after each structural replan to detect drift.
-    let coherence_checker = super::plan_coherence::PlanCoherenceChecker::new(goal_text);
+    let coherence_checker = super::plan_coherence::PlanCoherenceChecker::new_with_threshold(
+        goal_text,
+        policy.drift_threshold,
+    );
     let mut cumulative_drift_score = 0.0f32;
     let mut drift_replan_count = 0usize;
 
     // P2 FIX: Replan convergence budget.
     // Prevents infinite replan cascade: if ReplanRequired fires repeatedly and each
-    // new plan immediately stalls again, we cap total replan attempts and escalate
-    // to forced synthesis so the agent always terminates.
+    // new plan immediately stalls again, we cap total replan attempts (policy.max_replan_attempts)
+    // and escalate to forced synthesis so the agent always terminates.
     let mut replan_attempts: u32 = 0;
-    const MAX_REPLAN_ATTEMPTS: u32 = 2;
 
     // HICON Phase 4: Agent self-corrector for adaptive strategy adjustment.
     let mut self_corrector = super::self_corrector::AgentSelfCorrector::new();
@@ -1433,24 +1506,92 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // Phase L fix B6+B3: Enforce budget invariant — max_rounds must cover all plan steps.
     // Called AFTER plan creation (active_plan is set) and AFTER conv_ctrl is created.
     // Uses a local mutable copy so we can expand the budget without mutating AgentContext.
-    let mut effective_max_rounds = ctx.limits.max_rounds;
+    // F3 SLA: clamp rounds BEFORE K5-1 expansion — the invariant will override if the plan
+    // genuinely requires more rounds than the SLA permits.
+    let mut effective_max_rounds = match &sla_budget {
+        Some(b) => {
+            let clamped = b.clamp_rounds(ctx.limits.max_rounds as u32) as usize;
+            if clamped < ctx.limits.max_rounds {
+                tracing::info!(
+                    config = ctx.limits.max_rounds,
+                    sla_clamped = clamped,
+                    mode = ?b.mode,
+                    "SlaManager: clamped max_rounds"
+                );
+                conv_ctrl.set_max_rounds(clamped);
+            }
+            clamped
+        }
+        None => ctx.limits.max_rounds,
+    };
+    // Phase 2 SLA: clamp plan depth independently of rounds.
+    // max_plan_depth limits step count even if max_rounds would accommodate more.
+    if let Some(ref budget) = &sla_budget {
+        if let Some(ref mut plan) = active_plan {
+            let max_depth = budget.clamp_plan_depth(plan.steps.len() as u32) as usize;
+            if plan.steps.len() > max_depth {
+                tracing::info!(
+                    original = plan.steps.len(),
+                    clamped = max_depth,
+                    mode = ?budget.mode,
+                    "SLA: clamping plan depth via clamp_plan_depth()"
+                );
+                plan.steps.truncate(max_depth);
+                if let Some(ref mut tracker) = execution_tracker {
+                    tracker.truncate_to(max_depth);
+                }
+            }
+        }
+    }
+
     if !is_sub_agent {
-        if let Some(ref plan) = active_plan {
+        if let Some(ref mut plan) = active_plan {
             // INVARIANT K5-1: max_rounds ≥ plan.total_steps + critic_retries + 1 (synthesis)
             let max_critic_retries: u32 = 1; // ReasoningConfig::default max_retries
             let required = plan.steps.len() + max_critic_retries as usize + 1;
             if effective_max_rounds < required {
-                tracing::warn!(
-                    effective_max_rounds,
-                    required,
-                    plan_steps = plan.steps.len(),
-                    max_critic_retries,
-                    "Phase L K5-1: expanding effective_max_rounds to satisfy budget invariant"
-                );
-                effective_max_rounds = required;
-                // Use set_max_rounds (not cap) so the K5-1 expansion can exceed the
-                // initial config value when the plan genuinely requires more rounds.
-                conv_ctrl.set_max_rounds(effective_max_rounds);
+                // Phase 2 SLA: when SLA is active, truncate plan to fit budget
+                // instead of expanding rounds unboundedly. Leave room for critic + synthesis.
+                if let Some(ref budget) = sla_budget {
+                    let sla_max = budget.clamp_rounds(ctx.limits.max_rounds as u32) as usize;
+                    let max_plan_steps = sla_max.saturating_sub(2); // room for critic + synthesis
+                    if plan.steps.len() > max_plan_steps && max_plan_steps > 0 {
+                        tracing::warn!(
+                            plan_steps = plan.steps.len(),
+                            sla_max,
+                            truncated_to = max_plan_steps,
+                            mode = ?budget.mode,
+                            "Phase 2 SLA K5-1: truncating plan to fit SLA budget"
+                        );
+                        plan.steps.truncate(max_plan_steps);
+                        if let Some(ref mut tracker) = execution_tracker {
+                            tracker.truncate_to(max_plan_steps);
+                        }
+                        // Don't expand rounds beyond SLA — plan was truncated to fit.
+                    } else {
+                        // Plan fits within SLA budget or budget too small — expand as before.
+                        tracing::warn!(
+                            effective_max_rounds,
+                            required,
+                            plan_steps = plan.steps.len(),
+                            max_critic_retries,
+                            "Phase L K5-1: expanding effective_max_rounds to satisfy budget invariant"
+                        );
+                        effective_max_rounds = required;
+                        conv_ctrl.set_max_rounds(effective_max_rounds);
+                    }
+                } else {
+                    // No SLA — expand rounds as before.
+                    tracing::warn!(
+                        effective_max_rounds,
+                        required,
+                        plan_steps = plan.steps.len(),
+                        max_critic_retries,
+                        "Phase L K5-1: expanding effective_max_rounds to satisfy budget invariant"
+                    );
+                    effective_max_rounds = required;
+                    conv_ctrl.set_max_rounds(effective_max_rounds);
+                }
             }
         }
     }
@@ -1470,8 +1611,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         "SOTA 2026 pipeline: IntentScorer → ConvergenceController"
     );
 
-    // Flag set when cross-type oscillation detection forces a synthesis break inside the loop.
-    let mut forced_synthesis_detected = false;
+    // (forced_synthesis_detected declared earlier, before Phase 3A.)
     // Phase 113 SOTA: Prevents double-synthesis when ConvergenceController injects a Replan
     // directive AND ToolLoopGuard fires InjectSynthesis in the same round.  Both write a
     // User message — two conflicting instructions cause incoherent model behaviour.
@@ -1497,18 +1637,10 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         context_pipeline,
         full_text,
         rounds,
-        call_input_tokens,
-        call_output_tokens,
-        call_cost,
         session_id,
         trace_step_index,
-        pipeline_budget,
-        provider_context_window: model_context_window,
         active_plan,
         execution_tracker,
-        convergence_detector,
-        macro_plan_view,
-        last_convergence_ratio,
         compaction_model,
         cached_tools,
         cached_system,
@@ -1517,32 +1649,89 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         reflection_injector,
         last_reflection_id,
         tbac_pushed,
-        failure_tracker,
+        tool_trust: super::tool_trust::ToolTrustScorer::new(policy.clone()),
         fallback_adapted_model,
-        loop_guard,
-        capability_orchestrator,
-        round_scorer,
-        round_evaluations,
-        adaptive_policy,
-        coherence_checker,
-        cumulative_drift_score,
-        drift_replan_count,
-        replan_attempts,
-        self_corrector,
-        resource_predictor,
-        metacognitive_loop,
-        conv_ctrl,
-        forced_synthesis_detected,
-        convergence_directive_injected,
+        tokens: loop_state::TokenAccounting {
+            call_input_tokens,
+            call_output_tokens,
+            call_cost,
+            pipeline_budget,
+            provider_context_window: model_context_window,
+            tokens_planning: 0,
+            tokens_subagents: pre_loop_tokens_subagents,
+            tokens_critic: 0,
+            call_input_tokens_prev_round: 0,
+            tokens_per_round: Vec::new(),
+            consecutive_growth_violations: 0,
+            k5_2_compaction_needed: false,
+        },
+        evidence: loop_state::EvidenceState {
+            bundle: Default::default(),
+            graph: super::evidence_graph::EvidenceGraph::new(),
+            deterministic_boundary_enforced: false,
+            blocked_tools: Vec::new(),
+        },
+        synthesis: loop_state::SynthesisControl {
+            forced_synthesis_detected,
+            synthesis_origin: None,
+            tool_decision: ToolDecisionSignal::Allow,
+            execution_intent,
+            phase: loop_state::AgentPhase::Idle,
+            convergence_directive_injected,
+        },
+        convergence: loop_state::ConvergenceState {
+            convergence_detector,
+            conv_ctrl,
+            round_scorer,
+            round_evaluations,
+            adaptive_policy,
+            coherence_checker,
+            cumulative_drift_score,
+            drift_replan_count,
+            replan_attempts,
+            last_convergence_ratio,
+            macro_plan_view,
+            mid_loop_critic: super::domain::mid_loop_critic::MidLoopCritic::new(
+                policy.clone(),
+                effective_max_rounds,
+            ),
+            complexity_tracker: super::domain::complexity_feedback::ComplexityTracker::new(
+                orchestration_decision
+                    .as_ref()
+                    .map(|d| d.complexity.clone())
+                    .unwrap_or(super::decision_layer::TaskComplexity::StructuredTask),
+                effective_max_rounds,
+                policy.clone(),
+            ),
+            invariant_checker: super::domain::system_invariants::SystemInvariantChecker::new(),
+            decision_trace: super::domain::decision_trace::DecisionTraceCollector::new(),
+            metrics_collector: super::domain::system_metrics::MetricsCollector::new(),
+            adaptation_bounds: super::domain::adaptation_bounds::AdaptationBoundsChecker::new(
+                policy.clone(),
+            ),
+            problem_classifier: super::domain::problem_classifier::ProblemClassifier::new(
+                policy.clone(),
+            ),
+            strategy_weight_manager: super::domain::strategy_weights::StrategyWeightManager::new(
+                policy.clone(),
+            ),
+        },
+        guards: loop_state::LoopGuardState {
+            loop_guard,
+            failure_tracker,
+            capability_orchestrator,
+            semantic_cycle_detector: super::domain::semantic_cycle::SemanticCycleDetector::from_policy(&policy),
+        },
+        hicon: loop_state::HiconSubsystems {
+            self_corrector,
+            resource_predictor,
+            metacognitive_loop,
+        },
         environment_error_halt,
         auto_pause,
         ctrl_cancelled,
         model_downgrade_advisory_active: false,
         forced_routing_bias: None,
-        tool_decision: ToolDecisionSignal::Allow,
-        execution_intent,
-        synthesis_origin: None,
-        current_fsm_state,
         last_round_model_name,
         next_round_restarts: 0,
         loop_start,
@@ -1552,21 +1741,65 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         goal_text: goal_text.to_string(),
         l4_archive_path: l4_archive_path.clone(),
         strategy_context: strategy_context.clone(),
+        orchestration_decision,
+        sla_budget,
         tools_executed: Vec::new(),
-        blocked_tools: Vec::new(),
         failed_sub_agent_steps: pre_loop_failed_steps,
-        evidence_bundle: Default::default(),
-        deterministic_boundary_enforced: false,
-        tokens_planning: 0,
-        tokens_subagents: pre_loop_tokens_subagents,
-        tokens_critic: 0,
-        call_input_tokens_prev_round: 0,
+        policy: policy.clone(),
+        env_snapshot: super::domain::capability_validator::EnvironmentSnapshot::default(),
     };
+
+    // P5.5: Strategic initialization — data-driven round-0 configuration.
+    if state.policy.strategic_init_enabled {
+        let task_complexity = state.orchestration_decision.as_ref()
+            .map(|d| match d.complexity {
+                super::decision_layer::TaskComplexity::SimpleExecution
+                    => super::domain::strategic_init::Complexity::Simple,
+                super::decision_layer::TaskComplexity::StructuredTask
+                    => super::domain::strategic_init::Complexity::Structured,
+                super::decision_layer::TaskComplexity::MultiDomain
+                    => super::domain::strategic_init::Complexity::MultiDomain,
+                super::decision_layer::TaskComplexity::LongHorizon
+                    => super::domain::strategic_init::Complexity::LongHorizon,
+            })
+            .unwrap_or(super::domain::strategic_init::Complexity::Structured);
+        let available_tools: Vec<String> = state.cached_tools.iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let profile = super::domain::strategic_init::initialize(
+            task_complexity,
+            &state.user_msg,
+            &available_tools,
+        );
+        tracing::debug!(
+            problem_class = %profile.problem_class.label(),
+            granularity = %profile.granularity.label(),
+            exploration_budget = %profile.exploration_budget,
+            rationale = profile.rationale,
+            "Phase5 StrategicInit: data-driven round-0 configuration"
+        );
+        // Apply profile: set baseline weights
+        state.convergence.strategy_weight_manager.set_baseline(profile.weights);
+        // Apply profile: set initial sensitivity on AdaptivePolicy
+        state.convergence.adaptive_policy = super::domain::adaptive_policy::AdaptivePolicy::new(
+            profile.initial_sensitivity,
+        );
+    }
+
+    // Fire FSM events to replay prologue state transitions through the typed FSM.
+    // The plan was generated before LoopState existed — replay the transitions so the
+    // FSM properly enters Planning before settling in Executing.
+    if state.active_plan.is_some() {
+        state.synthesis.phase = state.synthesis.phase.fire(AgentEvent::PlanGenerated); // Idle → Planning
+        state.synthesis.phase = state.synthesis.phase.fire(AgentEvent::PlanGenerated); // Planning → Executing
+    } else {
+        state.synthesis.phase = state.synthesis.phase.fire(AgentEvent::PlanSkipped);   // Idle → Executing
+    }
 
     'agent_loop: for round in 0..effective_max_rounds {
         // Round separator is emitted after model selection (see below) so we can show provider info.
         // Reset per-round coordination flags.
-        state.convergence_directive_injected = false;
+        state.synthesis.convergence_directive_injected = false;
 
         let _round_span = tracing::info_span!(
             "gen_ai.agent.round",
@@ -1577,6 +1810,25 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         .entered();
         let round_start = Instant::now();
         let mut round_usage = TokenUsage::default();
+
+        // Phase 2 SLA: warn at 80% budget consumption, force synthesis on expiry.
+        if let Some(ref budget) = state.sla_budget {
+            let frac = budget.fraction_consumed();
+            if frac >= 0.80 && !budget.is_expired() {
+                tracing::warn!(
+                    mode = ?budget.mode,
+                    fraction_consumed = format!("{:.0}%", frac * 100.0),
+                    round,
+                    "SLA: 80% of time budget consumed — approaching limit"
+                );
+            }
+            if budget.is_expired() {
+                tracing::warn!(mode = ?budget.mode, "SLA: time expired, forcing synthesis");
+                state.synthesis.tool_decision.set_force_next();
+                state.synthesis.forced_synthesis_detected = true;
+                state.synthesis.synthesis_origin = Some(SynthesisOrigin::ReplanTimeout);
+            }
+        }
 
         // Phase 1: emit RoundStarted event (additive — fire-and-forget, no behavior change).
         loop_events::emit(
@@ -1636,12 +1888,15 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         .and_then(|arc_pr| arc_pr.lock().ok().map(|pr| pr.cost_snapshot()))
                         .unwrap_or_default(),
                     tools_executed: state.tools_executed,
-                    evidence_verified: !state.evidence_bundle.evidence_gate_fires(),
-                    content_read_attempts: state.evidence_bundle.content_read_attempts,
+                    evidence_verified: !state.evidence.bundle.evidence_gate_fires(),
+                    content_read_attempts: state.evidence.bundle.content_read_attempts,
                     last_provider_used: None,
-                    blocked_tools: state.blocked_tools,
+                    blocked_tools: state.evidence.blocked_tools,
                     failed_sub_agent_steps: state.failed_sub_agent_steps,
                     critic_unavailable: false,
+                    tool_trust_failures: state.tool_trust.failure_records(),
+                    sla_budget: state.sla_budget,
+                    evidence_coverage: state.evidence.graph.synthesis_coverage(),
                 });
             }
             round_setup::RoundSetupOutcome::Continue(out) => out,
@@ -1702,12 +1957,15 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                         .and_then(|arc_pr| arc_pr.lock().ok().map(|pr| pr.cost_snapshot()))
                         .unwrap_or_default(),
                     tools_executed: state.tools_executed,
-                    evidence_verified: !state.evidence_bundle.evidence_gate_fires(),
-                    content_read_attempts: state.evidence_bundle.content_read_attempts,
+                    evidence_verified: !state.evidence.bundle.evidence_gate_fires(),
+                    content_read_attempts: state.evidence.bundle.content_read_attempts,
                     last_provider_used: None,
-                    blocked_tools: state.blocked_tools,
+                    blocked_tools: state.evidence.blocked_tools,
                     failed_sub_agent_steps: state.failed_sub_agent_steps,
                     critic_unavailable: false,
+                    tool_trust_failures: state.tool_trust.failure_records(),
+                    sla_budget: state.sla_budget,
+                    evidence_coverage: state.evidence.graph.synthesis_coverage(),
                 });
             }
             provider_round::ProviderRoundOutcome::ToolUse(out) => out,
@@ -1823,6 +2081,28 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         if plan.steps.get(last_idx).map_or(false, |s| s.tool_name.is_none()) {
             tracker.mark_synthesis_complete(last_idx, state.rounds);
         }
+    }
+
+    // P5.1: Session retrospective — post-session diagnostic analysis.
+    {
+        let session_profile = super::domain::session_retrospective::analyze(
+            &state.convergence.decision_trace,
+            &state.convergence.metrics_collector,
+            &state.convergence.adaptation_bounds,
+            &state.convergence.invariant_checker,
+            &state.policy,
+        );
+        tracing::info!(
+            convergence_efficiency = %format!("{:.2}", session_profile.convergence_efficiency),
+            structural_instability = %format!("{:.2}", session_profile.structural_instability_score),
+            dominant_failure = ?session_profile.dominant_failure_mode,
+            inferred_class = %session_profile.inferred_problem_class.label(),
+            evidence_trajectory = ?session_profile.evidence_trajectory,
+            wasted_rounds = session_profile.wasted_rounds,
+            peak_utility = %format!("{:.3}", session_profile.peak_utility),
+            final_utility = %format!("{:.3}", session_profile.final_utility),
+            "Phase5 SessionRetrospective: post-session analysis"
+        );
     }
 
     result_assembly::build(

@@ -154,6 +154,7 @@ pub async fn run_replay(
         plugin_registry: None,
         is_sub_agent: false,
         requested_provider: None,
+        policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
     };
 
     let result = agent::run_agent_loop(ctx).await?;

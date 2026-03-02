@@ -231,11 +231,9 @@ impl PostBatchSupervisor {
 // Level 4: LoopCritic          — execution validation (should_halt → structural halt)
 // Level 5: Hard termination    — budget/interrupt signals (DurationBudget, TokenBudget)
 
-/// Confidence threshold above which a non-achieved verdict recommends immediate halt + retry.
-///
-/// When `!achieved && confidence >= HALT_CONFIDENCE_THRESHOLD`, the LoopCritic is highly
-/// confident the goal was NOT achieved. Continuing would likely deepen the failure.
-pub const HALT_CONFIDENCE_THRESHOLD: f32 = 0.80;
+// NOTE: HALT_CONFIDENCE_THRESHOLD (0.80), EXCERPT_LEN (1500), and critic timeout (20s→45s)
+// are now sourced from `PolicyConfig` and passed as parameters to `should_halt()`,
+// `should_halt_raw()`, and `evaluate()`.  See `halcon_core::types::PolicyConfig`.
 
 /// Structured verdict from an adversarial post-loop critic evaluation.
 ///
@@ -279,8 +277,8 @@ impl LoopCritic {
     /// A high-confidence failure verdict means continuing the current loop is
     /// unlikely to recover — halting early and retrying with the retry_instruction
     /// produces better outcomes than exhausting remaining rounds.
-    pub fn should_halt(verdict: &CriticVerdict) -> bool {
-        !verdict.achieved && verdict.confidence >= HALT_CONFIDENCE_THRESHOLD
+    pub fn should_halt(verdict: &CriticVerdict, threshold: f32) -> bool {
+        !verdict.achieved && verdict.confidence >= threshold
     }
 
     /// Same semantics as `should_halt` but operates on the raw fields from
@@ -288,19 +286,24 @@ impl LoopCritic {
     ///
     /// Used by mod.rs where only the summary is available (the full `CriticVerdict`
     /// returned by the async evaluate() call is not preserved across the await point).
-    pub fn should_halt_raw(achieved: bool, confidence: f32) -> bool {
-        !achieved && confidence >= HALT_CONFIDENCE_THRESHOLD
+    pub fn should_halt_raw(achieved: bool, confidence: f32, threshold: f32) -> bool {
+        !achieved && confidence >= threshold
     }
 
     /// Adversarially evaluate whether the original goal was truly achieved.
     ///
-    /// Returns `None` on timeout (20s), provider error, or malformed JSON
+    /// `excerpt_len`: number of chars from the end of `final_response` to evaluate.
+    /// `timeout_secs`: per-call timeout for the LLM invocation.
+    ///
+    /// Returns `None` on timeout, provider error, or malformed JSON
     /// so the caller can gracefully fall back to score-based retry.
     pub async fn evaluate(
         &self,
         original_request: &str,
         final_response: &str,
         step_summaries: &[String],
+        excerpt_len: usize,
+        timeout_secs: u64,
     ) -> Option<CriticVerdict> {
         let steps_text = if step_summaries.is_empty() {
             "  (no execution steps recorded)".to_string()
@@ -328,9 +331,8 @@ impl LoopCritic {
         // Using the last 1500 chars ensures the critic evaluates the synthesis output even
         // for multi-round sessions with large tool outputs.
         let total_chars = final_response.chars().count();
-        const EXCERPT_LEN: usize = 1500;
-        let final_excerpt: String = if total_chars > EXCERPT_LEN {
-            final_response.chars().skip(total_chars - EXCERPT_LEN).collect()
+        let final_excerpt: String = if total_chars > excerpt_len {
+            final_response.chars().skip(total_chars - excerpt_len).collect()
         } else {
             final_response.to_string()
         };
@@ -338,7 +340,7 @@ impl LoopCritic {
         let prompt = format!(
             "ORIGINAL GOAL:\n{original_request}\n\n\
              EXECUTION STEPS:\n{steps_text}\n\n\
-             FINAL RESPONSE (last {EXCERPT_LEN} chars):\n{final_excerpt}\n\n\
+             FINAL RESPONSE (last {excerpt_len} chars):\n{final_excerpt}\n\n\
              Evaluate strictly. A partial answer is NOT a success. Missing edge cases \
              is NOT a success. An error message is NOT a success even if politely phrased.\n\n\
              Respond ONLY with a JSON object (no markdown fences):\n\
@@ -370,7 +372,7 @@ impl LoopCritic {
 
         let mut text = String::new();
         match tokio::time::timeout(
-            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(timeout_secs),
             self.provider.invoke(&request),
         )
         .await
@@ -387,7 +389,10 @@ impl LoopCritic {
                 return None;
             }
             Err(_elapsed) => {
-                tracing::warn!("LoopCritic timed out after 20s — skipping critic verdict");
+                tracing::warn!(
+                    timeout_secs,
+                    "LoopCritic timed out — skipping critic verdict"
+                );
                 return None;
             }
         }
@@ -815,28 +820,31 @@ mod tests {
         }
     }
 
+    // Default threshold used by tests (matches PolicyConfig::default().halt_confidence_threshold).
+    const DEFAULT_HALT_THRESHOLD: f32 = 0.80;
+
     #[test]
     fn should_halt_fires_on_high_conf_failure() {
         // !achieved + confidence >= 0.80 → must halt.
-        assert!(LoopCritic::should_halt(&verdict(false, 0.80)));
-        assert!(LoopCritic::should_halt(&verdict(false, 0.95)));
-        assert!(LoopCritic::should_halt(&verdict(false, 1.00)));
+        assert!(LoopCritic::should_halt(&verdict(false, 0.80), DEFAULT_HALT_THRESHOLD));
+        assert!(LoopCritic::should_halt(&verdict(false, 0.95), DEFAULT_HALT_THRESHOLD));
+        assert!(LoopCritic::should_halt(&verdict(false, 1.00), DEFAULT_HALT_THRESHOLD));
     }
 
     #[test]
     fn should_halt_silent_below_threshold() {
         // !achieved but confidence < 0.80 → do NOT halt (uncertainty is high).
-        assert!(!LoopCritic::should_halt(&verdict(false, 0.79)));
-        assert!(!LoopCritic::should_halt(&verdict(false, 0.50)));
-        assert!(!LoopCritic::should_halt(&verdict(false, 0.00)));
+        assert!(!LoopCritic::should_halt(&verdict(false, 0.79), DEFAULT_HALT_THRESHOLD));
+        assert!(!LoopCritic::should_halt(&verdict(false, 0.50), DEFAULT_HALT_THRESHOLD));
+        assert!(!LoopCritic::should_halt(&verdict(false, 0.00), DEFAULT_HALT_THRESHOLD));
     }
 
     #[test]
     fn should_halt_never_fires_when_achieved() {
         // Even with confidence = 1.0, if achieved=true we must NOT halt.
-        assert!(!LoopCritic::should_halt(&verdict(true, 1.00)));
-        assert!(!LoopCritic::should_halt(&verdict(true, 0.95)));
-        assert!(!LoopCritic::should_halt(&verdict(true, 0.80)));
+        assert!(!LoopCritic::should_halt(&verdict(true, 1.00), DEFAULT_HALT_THRESHOLD));
+        assert!(!LoopCritic::should_halt(&verdict(true, 0.95), DEFAULT_HALT_THRESHOLD));
+        assert!(!LoopCritic::should_halt(&verdict(true, 0.80), DEFAULT_HALT_THRESHOLD));
     }
 
     #[test]
@@ -848,8 +856,8 @@ mod tests {
             (true, 0.95_f32),
             (false, 1.00_f32),
         ] {
-            let via_verdict = LoopCritic::should_halt(&verdict(achieved, conf));
-            let via_raw = LoopCritic::should_halt_raw(achieved, conf);
+            let via_verdict = LoopCritic::should_halt(&verdict(achieved, conf), DEFAULT_HALT_THRESHOLD);
+            let via_raw = LoopCritic::should_halt_raw(achieved, conf, DEFAULT_HALT_THRESHOLD);
             assert_eq!(
                 via_verdict, via_raw,
                 "should_halt and should_halt_raw disagree at achieved={achieved} conf={conf}"
@@ -858,9 +866,19 @@ mod tests {
     }
 
     #[test]
-    fn halt_threshold_constant_is_08() {
-        // The threshold must remain 0.80 — change here means reviewing all call sites.
-        assert!((HALT_CONFIDENCE_THRESHOLD - 0.80).abs() < f32::EPSILON);
+    fn halt_threshold_default_is_08() {
+        let policy = halcon_core::types::PolicyConfig::default();
+        assert!((policy.halt_confidence_threshold - 0.80).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn custom_policy_threshold_respected() {
+        // Custom threshold of 0.50 should cause halts at lower confidence.
+        let custom_threshold = 0.50_f32;
+        assert!(LoopCritic::should_halt(&verdict(false, 0.50), custom_threshold));
+        assert!(LoopCritic::should_halt(&verdict(false, 0.80), custom_threshold));
+        // Below custom threshold → no halt.
+        assert!(!LoopCritic::should_halt(&verdict(false, 0.49), custom_threshold));
     }
 
     // ── SuspendPlugin gate (Phase 7 V3 plugin architecture) ──────────────────

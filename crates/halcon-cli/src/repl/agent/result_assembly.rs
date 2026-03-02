@@ -43,6 +43,13 @@ pub(super) async fn build(
     plugin_registry: Option<Arc<std::sync::Mutex<PluginRegistry>>>,
     permissions: &mut ConversationalPermissionHandler,
 ) -> Result<AgentLoopResult> {
+    // FSM: entering evaluation phase.
+    state.synthesis.phase = super::loop_state::transition(
+        state.synthesis.phase,
+        super::loop_state::AgentEvent::SynthesisComplete,
+    );
+    // phase already updated by fire() — no string sync needed.
+
     // TBAC: pop the plan-derived context if we pushed one.
     if state.tbac_pushed {
         permissions.pop_context();
@@ -75,7 +82,7 @@ pub(super) async fn build(
     // Guard: still skip for purely conversational turns (no plan AND no tools AND no forced
     // synthesis) to avoid the 20s critic overhead on simple greetings/questions.
     let has_tool_work = !state.tools_executed.is_empty();
-    let has_forced_synthesis = state.forced_synthesis_detected;
+    let has_forced_synthesis = state.synthesis.forced_synthesis_detected;
     let should_run_critic = (has_plan_execution || has_tool_work || has_forced_synthesis)
         && !state.full_text.is_empty();
     if should_run_critic {
@@ -121,12 +128,14 @@ pub(super) async fn build(
                 critic_mdl_str.to_string(),
             );
 
-            // FASE 4: Wrap entire critic evaluation (primary + fallback) in a 45s timeout.
-            // Prevents critic hangs from blocking the agent loop indefinitely.
-            const CRITIC_TIMEOUT_SECS: u64 = 45;
+            // PolicyConfig-driven timeouts: per-call and overall envelope.
+            let critic_timeout_secs = state.policy.critic_timeout_secs;
+            let critic_excerpt_len = state.policy.excerpt_len;
+            // Per-call timeout is half the overall envelope (leaves room for fallback + backoff).
+            let per_call_timeout = (critic_timeout_secs / 2).max(10);
             let critic_future = async {
                 let mut verdict_opt = critic
-                    .evaluate(&original_request, &state.full_text, &step_summaries)
+                    .evaluate(&original_request, &state.full_text, &step_summaries, critic_excerpt_len, per_call_timeout)
                     .await;
 
                 // Fallback: if critic_provider was explicitly set (G2 separation) but failed,
@@ -143,20 +152,20 @@ pub(super) async fn build(
                         request.model.clone(),
                     );
                     verdict_opt = fallback_critic
-                        .evaluate(&original_request, &state.full_text, &step_summaries)
+                        .evaluate(&original_request, &state.full_text, &step_summaries, critic_excerpt_len, per_call_timeout)
                         .await;
                 }
                 verdict_opt
             };
 
             let verdict_opt = match tokio::time::timeout(
-                std::time::Duration::from_secs(CRITIC_TIMEOUT_SECS),
+                std::time::Duration::from_secs(critic_timeout_secs),
                 critic_future,
             ).await {
                 Ok(v) => v,
                 Err(_) => {
                     tracing::error!(
-                        timeout_secs = CRITIC_TIMEOUT_SECS,
+                        timeout_secs = critic_timeout_secs,
                         "LoopCritic: overall timeout exceeded — treating as unavailable"
                     );
                     None
@@ -226,14 +235,14 @@ pub(super) async fn build(
     // This catches any path that sets deterministic_boundary_enforced without setting
     // synthesis_blocked (which would indicate a broken gate implementation).
     #[cfg(debug_assertions)]
-    if state.deterministic_boundary_enforced {
+    if state.evidence.deterministic_boundary_enforced {
         debug_assert!(
-            state.evidence_bundle.synthesis_blocked,
+            state.evidence.bundle.synthesis_blocked,
             "INVARIANT: deterministic_boundary_enforced=true implies synthesis_blocked=true \
              (EBS-B2 gate must set both flags atomically)"
         );
         debug_assert!(
-            matches!(state.synthesis_origin, Some(super::loop_state::SynthesisOrigin::SupervisorFailure)),
+            matches!(state.synthesis.synthesis_origin, Some(super::loop_state::SynthesisOrigin::SupervisorFailure)),
             "INVARIANT: EBS-B2 gate must set synthesis_origin=SupervisorFailure for reward dampening"
         );
     }
@@ -256,7 +265,7 @@ pub(super) async fn build(
             );
         }
         StopCondition::MaxRounds
-    } else if state.forced_synthesis_detected || state.loop_guard.plan_complete() || state.loop_guard.detect_oscillation() {
+    } else if state.synthesis.forced_synthesis_detected || state.guards.loop_guard.plan_complete() || state.guards.loop_guard.detect_oscillation() {
         StopCondition::ForcedSynthesis
     } else {
         StopCondition::EndTurn
@@ -269,7 +278,7 @@ pub(super) async fn build(
         let termination_source = match stop_condition {
             StopCondition::EndTurn => TerminationSource::ModelEndTurn,
             StopCondition::ForcedSynthesis => {
-                if state.loop_guard.plan_complete() {
+                if state.guards.loop_guard.plan_complete() {
                     TerminationSource::PlanComplete
                 } else {
                     TerminationSource::ConvergenceForced
@@ -286,13 +295,13 @@ pub(super) async fn build(
         };
         let convergence_decision = if state.rounds >= limits.max_rounds {
             Some(ConvergenceDecision::MaxRoundsExhausted)
-        } else if state.loop_guard.detect_oscillation() {
+        } else if state.guards.loop_guard.detect_oscillation() {
             Some(ConvergenceDecision::Stagnated {
-                consecutive_rounds: state.loop_guard.consecutive_rounds() as u32,
+                consecutive_rounds: state.guards.loop_guard.consecutive_rounds() as u32,
             })
-        } else if state.loop_guard.plan_complete() {
+        } else if state.guards.loop_guard.plan_complete() {
             Some(ConvergenceDecision::NaturalEnd)
-        } else if state.forced_synthesis_detected {
+        } else if state.synthesis.forced_synthesis_detected {
             Some(ConvergenceDecision::OracleForcedSynthesis)
         } else {
             None
@@ -325,7 +334,7 @@ pub(super) async fn build(
     // ── END PHASE-1 INSTRUMENTATION ───────────────────────────────────────
 
     // Phase E5: Emit final agent state transition (Complete or Failed).
-    // P4 FIX: Use state.current_fsm_state (tracked throughout) as from_state instead of
+    // P4 FIX: Use state.synthesis.phase.as_str() (typed FSM) as from_state instead of
     // hardcoded "executing". The loop may have exited from "reflecting", "planning",
     // or "tool_wait" — emitting the wrong from_state caused "[state] INVALID" TUI warnings.
     if !state.silent {
@@ -347,7 +356,9 @@ pub(super) async fn build(
             StopCondition::CostBudget => ("failed", "cost budget exceeded"),
             StopCondition::SupervisorDenied => ("complete", "supervisor denied write"),
         };
-        render_sink.agent_state_transition(state.current_fsm_state, to_state, reason);
+        // FASE 6: Ensure any open synthesis phase is closed before FSM transition.
+        render_sink.phase_ended();
+        render_sink.agent_state_transition(state.synthesis.phase.as_str(), to_state, reason);
     }
 
     // Emit AgentCompleted event.
@@ -450,14 +461,14 @@ pub(super) async fn build(
     // Phase 7: Wire plan_coherence_score (avg drift from PlanCoherenceChecker) and
     // oscillation_penalty (fraction of force_threshold from ToolLoopGuard) into
     // AgentLoopResult so mod.rs can pass them to reward_pipeline::RawRewardSignals.
-    let avg_plan_drift = if state.drift_replan_count > 0 {
-        (state.cumulative_drift_score / state.drift_replan_count as f32).clamp(0.0, 1.0)
+    let avg_plan_drift = if state.convergence.drift_replan_count > 0 {
+        (state.convergence.cumulative_drift_score / state.convergence.drift_replan_count as f32).clamp(0.0, 1.0)
     } else {
         0.0 // No replanning occurred — coherence is undefined (treated as perfect in reward_pipeline)
     };
     // Oscillation intensity: consecutive tool rounds as fraction of the force threshold (8 rounds).
     // 0.0 = no sustained tool looping; 1.0 = at/above the hard-limit threshold.
-    let oscillation_penalty = (state.loop_guard.consecutive_rounds() as f32 / 8.0).clamp(0.0, 1.0);
+    let oscillation_penalty = (state.guards.loop_guard.consecutive_rounds() as f32 / 8.0).clamp(0.0, 1.0);
 
     // Phase 2 reward unification: `record_outcome()` has been MOVED to mod.rs so it uses
     // the reward_pipeline's continuous 5-signal reward instead of the coarse 4-value
@@ -473,25 +484,45 @@ pub(super) async fn build(
         .unwrap_or_default();
 
     // BRECHA-S1: populate evidence metadata from loop state.
-    let evidence_verified = !state.evidence_bundle.evidence_gate_fires();
-    let content_read_attempts = state.evidence_bundle.content_read_attempts;
+    let evidence_verified = !state.evidence.bundle.evidence_gate_fires();
+    let content_read_attempts = state.evidence.bundle.content_read_attempts;
 
     // BRECHA-S2: provider name for cost attribution.
     let last_provider_used = Some(provider.name().to_string());
+
+    // Phase 3 EvidenceGraph: heuristically mark Good nodes as referenced if the
+    // full_text contains fragments from tool output. This closes the write-only gap
+    // by giving synthesis_coverage() a realistic baseline before reward computation.
+    {
+        let text = &state.full_text;
+        let good_ids: Vec<_> = state.evidence.graph.unreferenced_evidence()
+            .iter()
+            .filter(|node| {
+                // Heuristic: if the tool_args_summary (e.g. file path) appears in
+                // the synthesis text, assume the evidence was incorporated.
+                !node.tool_args_summary.is_empty()
+                    && text.contains(&node.tool_args_summary)
+            })
+            .map(|node| node.id)
+            .collect();
+        if !good_ids.is_empty() {
+            state.evidence.graph.mark_referenced_batch(&good_ids);
+        }
+    }
 
     let mut result = AgentLoopResult {
         full_text: state.full_text,
         rounds: state.rounds,
         stop_condition,
-        input_tokens: state.call_input_tokens,
-        output_tokens: state.call_output_tokens,
-        cost_usd: state.call_cost,
+        input_tokens: state.tokens.call_input_tokens,
+        output_tokens: state.tokens.call_output_tokens,
+        cost_usd: state.tokens.call_cost,
         latency_ms: state.loop_start.elapsed().as_millis() as u64,
         execution_fingerprint,
         timeline_json: state.execution_tracker.as_ref().map(|t| t.to_json().to_string()),
         ctrl_rx,
         critic_verdict: critic_verdict_holder,
-        round_evaluations: state.round_evaluations,
+        round_evaluations: state.convergence.round_evaluations,
         plan_completion_ratio,
         avg_plan_drift,
         oscillation_penalty,
@@ -502,11 +533,17 @@ pub(super) async fn build(
         content_read_attempts,
         last_provider_used,
         // BRECHA-S3: propagate blocked tools for cross-turn session persistence.
-        blocked_tools: state.blocked_tools,
+        blocked_tools: state.evidence.blocked_tools,
         // BRECHA-R1: propagate failed sub-agent steps for retry planner awareness.
         failed_sub_agent_steps: state.failed_sub_agent_steps,
         // FASE 4: propagate critic unavailability for reward penalty.
         critic_unavailable,
+        // F4 RetryMutation: propagate tool failure records for structured retry.
+        tool_trust_failures: state.tool_trust.failure_records(),
+        // Phase 2 SLA: propagate budget so mod.rs can gate retries via allows_retry().
+        sla_budget: state.sla_budget,
+        // Phase 3 EvidenceGraph: propagate synthesis coverage for reward signal.
+        evidence_coverage: state.evidence.graph.synthesis_coverage(),
     };
 
     // BRECHA-A: DirectExecution hallucination guard.
@@ -523,6 +560,10 @@ pub(super) async fn build(
                       file contents, or line counts may be inaccurate.]";
         result.full_text.push_str(notice);
     }
+
+    // FSM: evaluation complete → Completed.
+    // Note: `state` fields were moved above, so we don't update state.synthesis.phase here.
+    // The phase transition is documented but not persisted since state is consumed.
 
     Ok(result)
 }

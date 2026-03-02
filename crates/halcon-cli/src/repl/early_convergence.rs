@@ -112,6 +112,9 @@ pub struct ConvergenceDetector {
     /// Set to MIN_SYNTHESIS_HEADROOM by `new()` or computed from context_window
     /// by `with_context_window()`. Never less than MIN_SYNTHESIS_HEADROOM.
     synthesis_headroom: u64,
+    /// Plan completion fraction required for early convergence (default: EVIDENCE_THRESHOLD = 0.80).
+    /// Overridden by PolicyConfig.early_convergence_threshold via `with_policy_context_window()`.
+    evidence_threshold: f32,
 }
 
 impl ConvergenceDetector {
@@ -125,6 +128,7 @@ impl ConvergenceDetector {
             last_completion_ratio: 0.0,
             fired: false,
             synthesis_headroom: MIN_SYNTHESIS_HEADROOM,
+            evidence_threshold: EVIDENCE_THRESHOLD,
         }
     }
 
@@ -146,7 +150,18 @@ impl ConvergenceDetector {
             last_completion_ratio: 0.0,
             fired: false,
             synthesis_headroom: headroom,
+            evidence_threshold: EVIDENCE_THRESHOLD,
         }
+    }
+
+    /// Create a detector calibrated to the context window with policy-driven evidence threshold.
+    pub fn with_policy_context_window(
+        context_window: u64,
+        policy: &halcon_core::types::PolicyConfig,
+    ) -> Self {
+        let mut det = Self::with_context_window(context_window);
+        det.evidence_threshold = policy.early_convergence_threshold;
+        det
     }
 
     /// Returns the effective synthesis headroom in use.
@@ -194,8 +209,8 @@ impl ConvergenceDetector {
             return Some(ConvergenceReason::TokenHeadroom);
         }
 
-        // Signal 1: Evidence threshold.
-        if plan_completion_ratio > 0.0 && plan_completion_ratio >= EVIDENCE_THRESHOLD {
+        // Signal 1: Evidence threshold (from PolicyConfig.early_convergence_threshold).
+        if plan_completion_ratio > 0.0 && plan_completion_ratio >= self.evidence_threshold {
             self.fired = true;
             return Some(ConvergenceReason::EvidenceThreshold);
         }

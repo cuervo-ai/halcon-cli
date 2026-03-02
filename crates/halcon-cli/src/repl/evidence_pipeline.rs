@@ -26,19 +26,11 @@
 /// when reading files indicate binary content, empty files, or permission errors.
 pub const MIN_EVIDENCE_BYTES: usize = 30;
 
-/// Tool names that are unambiguously for reading file content.
-///
-/// These tools are expected to return text content — short or empty results
-/// indicate the file is binary, empty, or inaccessible.
-const CONTENT_READ_TOOLS: &[&str] = &[
-    "read_file",
-    "read_multiple_files",
-    "file_read",
-    "read_multiple_files_content",
-];
+// Content-read tool detection is now centralised in `tool_aliases::is_content_read_tool()`.
+// This covers all known aliases: file_read, read_file, read_text_file, read_multiple_files, etc.
 
 /// Substrings in tool output that indicate binary or unreadable file content.
-const BINARY_INDICATORS: &[&str] = &[
+pub(crate) const BINARY_INDICATORS: &[&str] = &[
     "%PDF-",             // PDF magic header bytes
     "Binary file",       // grep binary-file detection message
     "binary file",       // lowercase variant
@@ -101,9 +93,7 @@ impl EvidenceBundle {
     /// search/listing tools (grep, ls, glob) are intentionally excluded because
     /// they return file *names* rather than file *content*.
     pub fn record_tool_result(&mut self, tool_name: &str, content: &str) {
-        let is_content_tool = CONTENT_READ_TOOLS
-            .iter()
-            .any(|t| tool_name == *t || tool_name.starts_with(*t));
+        let is_content_tool = super::tool_aliases::is_content_read_tool(tool_name);
 
         if !is_content_tool {
             return;

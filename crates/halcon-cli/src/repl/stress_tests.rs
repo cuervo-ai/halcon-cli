@@ -220,6 +220,7 @@ fn test_ctx<'a>(
         plugin_registry: None,
         is_sub_agent: false,
         requested_provider: None,
+        policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
     }
 }
 

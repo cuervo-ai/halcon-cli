@@ -51,6 +51,12 @@ pub(crate) mod runtime_bridge;
 pub mod orchestrator;
 pub mod orchestrator_metrics;
 pub mod model_quirks;
+pub(crate) mod decision_layer;
+pub(crate) mod retry_mutation;
+pub(crate) mod sla_manager;
+pub(crate) mod tool_aliases;
+pub(crate) mod tool_policy;
+pub(crate) mod tool_trust;
 
 // Anomaly detection and loop integrity.
 pub mod anomaly_detector;
@@ -89,6 +95,7 @@ pub mod delegation;
 /// Evidence Boundary System — Zero Evidence → Zero Output policy.
 /// Tracks textual evidence from file-reading tools; blocks synthesis on binary/empty files.
 pub mod evidence_pipeline;
+pub(crate) mod evidence_graph;
 pub mod execution_tracker;
 pub mod failure_tracker;
 pub mod health;
@@ -2794,6 +2801,7 @@ impl Repl {
                     plugin_registry: self.plugin_registry.clone(),
                     is_sub_agent: false,
                     requested_provider: Some(self.provider.clone()),
+                    policy: std::sync::Arc::new(self.config.policy.clone()),
                 };
                 // Fix: restore ctrl_rx before propagating any error so TUI controls
                 // (Pause/Step/Cancel) remain functional across agent loop failures.
@@ -2858,8 +2866,9 @@ impl Repl {
                             plan_completion_ratio: result.plan_completion_ratio,
                             plugin_snapshots: result.plugin_cost_snapshot.clone(),
                             critic_unavailable: result.critic_unavailable,
+                            evidence_coverage: result.evidence_coverage,
                         };
-                        let reward_computation = reward_pipeline::compute_reward(&raw_signals);
+                        let reward_computation = reward_pipeline::compute_reward(&raw_signals, &self.config.policy);
                         // Step 5 plugin blending: apply plugin success rate signal (10% weight).
                         let blended_reward = reward_pipeline::plugin_adjusted_reward(
                             reward_computation.final_reward as f64,
@@ -2951,6 +2960,7 @@ impl Repl {
                             let critic_halt = supervisor::LoopCritic::should_halt_raw(
                                 cv.achieved,
                                 cv.confidence,
+                                self.config.policy.halt_confidence_threshold,
                             );
                             // Minimum confidence required for a critic failure to
                             // justify re-running the entire agent loop.  A critic
@@ -2960,10 +2970,14 @@ impl Repl {
                             // the full agent loop, use `cv.gaps` to identify which
                             // plan steps failed and retry only those via the
                             // orchestrator's selective re-dispatch.
-                            const MIN_RETRY_CONFIDENCE: f32 = 0.40;
+                            let min_retry_confidence = self.config.policy.min_retry_confidence;
+                            // Phase 2 SLA: gate retries through SLA budget.
+                            // retry_attempt=0 means this is the first retry (critic_retry_needed triggers ONE retry).
+                            let sla_allows = result.sla_budget.as_ref().map_or(true, |b| b.allows_retry(0));
                             if !cv.achieved
-                                && cv.confidence >= MIN_RETRY_CONFIDENCE
+                                && cv.confidence >= min_retry_confidence
                                 && (score_says_retry || critic_halt)
+                                && sla_allows
                             {
                                 critic_retry_needed = true;
                                 critic_retry_info = Some((
@@ -3024,20 +3038,92 @@ impl Repl {
                             content: MessageContent::Text(retry_text),
                         });
 
-                        // Rebuild request with updated session messages.
+                        // F4 RetryMutation: compute structural mutation for the retry.
+                        // Derive plan_depth from actual plan (was hardcoded to 5).
+                        let actual_plan_depth = result.timeline_json.as_ref()
+                            .and_then(|json| {
+                                // Parse step count from timeline JSON.
+                                serde_json::from_str::<serde_json::Value>(json).ok()
+                                    .and_then(|v| v.get("steps")?.as_array().map(|a| a.len() as u32))
+                            })
+                            .unwrap_or(5);
+                        let mutation = {
+                            use crate::repl::retry_mutation::*;
+                            let params = RetryParams {
+                                temperature: request.temperature.unwrap_or(0.7),
+                                plan_depth: actual_plan_depth,
+                                model_name: request.model.clone(),
+                                available_tools: request.tools.iter().map(|t| t.name.clone()).collect(),
+                            };
+                            let fallbacks: Vec<String> = fallback_providers.iter().map(|(n, _)| n.clone()).collect();
+                            let failures = &result.tool_trust_failures;
+                            compute_mutation(&params, 1, failures, &fallbacks, &self.config.policy)
+                        };
+
+                        // Apply ALL mutation axes to build the retry request.
+                        let mut r_model = request.model.clone();
+                        let mut r_temp = request.temperature;
+                        let mut r_tools = request.tools.clone();
+                        let mut r_max_rounds = agent_limits.max_rounds;
+                        let mut retry_provider_override: Option<&Arc<dyn ModelProvider>> = None;
+                        if let Some(ref m) = mutation {
+                            for axis in &m.mutations {
+                                match axis {
+                                    crate::repl::retry_mutation::MutationAxis::ModelFallback { to, .. } => {
+                                        r_model = to.clone();
+                                        // Look up the actual provider Arc for the fallback model.
+                                        if let Some((_, fp)) = fallback_providers.iter().find(|(n, _)| n == to) {
+                                            retry_provider_override = Some(fp);
+                                            tracing::info!(to = %to, "RetryMutation: switching provider for retry");
+                                        }
+                                    }
+                                    crate::repl::retry_mutation::MutationAxis::TemperatureIncreased { to, .. } => {
+                                        r_temp = Some(*to);
+                                    }
+                                    crate::repl::retry_mutation::MutationAxis::ToolExposureReduced { removed } => {
+                                        r_tools.retain(|t| !removed.contains(&t.name));
+                                    }
+                                    crate::repl::retry_mutation::MutationAxis::PlanDepthReduced { from, to } => {
+                                        // Reduce max_rounds proportionally to plan depth reduction.
+                                        // This forces replanning with fewer steps on the retry.
+                                        if *from > 0 {
+                                            let ratio = *to as f64 / *from as f64;
+                                            r_max_rounds = ((r_max_rounds as f64 * ratio).ceil() as usize).max(3);
+                                            tracing::info!(
+                                                from_depth = from, to_depth = to,
+                                                new_max_rounds = r_max_rounds,
+                                                "RetryMutation: PlanDepthReduced — clamped max_rounds"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            tracing::info!(axes = m.mutations.len(), "RetryMutation: applied");
+                        }
+
+                        // Select the provider for the retry — fallback if ModelFallback fired, else original.
+                        let retry_provider_ref: &Arc<dyn ModelProvider> = retry_provider_override.unwrap_or(&p);
+
+                        // Rebuild request with updated session messages + mutation.
                         let retry_request = ModelRequest {
-                            model: request.model.clone(),
+                            model: r_model,
                             messages: self.session.messages.clone(),
-                            tools: request.tools.clone(),
+                            tools: r_tools,
                             max_tokens: request.max_tokens,
-                            temperature: request.temperature,
+                            temperature: r_temp,
                             system: request.system.clone(),
                             stream: true,
                         };
 
+                        // Build retry limits with PlanDepthReduced applied.
+                        let retry_limits = halcon_core::types::AgentLimits {
+                            max_rounds: r_max_rounds,
+                            ..agent_limits.clone()
+                        };
+
                         // Reconstruct AgentContext for the retry invocation.
                         let retry_ctx = agent::AgentContext {
-                            provider: &p,
+                            provider: retry_provider_ref,
                             session: &mut self.session,
                             request: &retry_request,
                             tool_registry: &self.tool_registry,
@@ -3045,7 +3131,7 @@ impl Repl {
                             working_dir: &working_dir,
                             event_tx: &self.event_tx,
                             trace_db: self.async_db.as_ref(),
-                            limits: agent_limits,
+                            limits: &retry_limits,
                             response_cache: self.response_cache.as_ref(),
                             resilience: &mut self.resilience,
                             fallback_providers: &fallback_providers,
@@ -3078,6 +3164,7 @@ impl Repl {
                             plugin_registry: None, // retry doesn't re-share plugin state
                             is_sub_agent: false,
                             requested_provider: Some(self.provider.clone()),
+                            policy: std::sync::Arc::new(self.config.policy.clone()),
                         };
 
                         let mut retry_loop_result = agent::run_agent_loop(retry_ctx).await;
@@ -3157,7 +3244,7 @@ impl Repl {
                     // Phase 7: Provider quality gate — warn when all tracked models are degraded.
                     // Fires after record_outcome() so the new outcome is included in the check.
                     // Min 5 interactions required to avoid false positives on cold-start.
-                    if let Some(warning) = sel.quality_gate_check(5) {
+                    if let Some(warning) = sel.quality_gate_check_with_threshold(5, self.config.policy.model_quality_gate) {
                         sink.warning(&warning, None);
                         tracing::warn!(
                             provider = p.name(),

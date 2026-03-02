@@ -90,6 +90,34 @@ pub struct RoundFeedback {
     pub tool_round: bool,
     /// `true` when at least one tool returned an error this round.
     pub had_errors: bool,
+    /// Mini-critic recommends forcing a replan (stalled session).
+    /// Fed as INPUT to oracle — oracle Halt always overrides this.
+    pub mini_critic_replan: bool,
+    /// Mini-critic recommends forcing synthesis (budget pressure).
+    /// Fed as INPUT to oracle — oracle Halt always overrides this.
+    pub mini_critic_synthesis: bool,
+    /// EvidenceGraph synthesis coverage [0.0, 1.0].
+    /// Low coverage signals the oracle to prefer Continue over InjectSynthesis
+    /// when budget remains (delay synthesis until more evidence is collected).
+    pub evidence_coverage: f64,
+
+    // ── Phase 3 fields ──────────────────────────────────────────────────
+    /// Semantic cycle detected this round (P3.3). Default: false.
+    pub semantic_cycle_detected: bool,
+    /// Cycle severity [0.0, 1.0] (P3.3). Default: 0.0.
+    pub cycle_severity: f32,
+    /// Convergence utility score (P3.6). Default: 0.5.
+    pub utility_score: f64,
+    /// Mid-loop critic action recommendation (P3.4). Default: None.
+    pub mid_critic_action: Option<super::mid_loop_critic::CriticAction>,
+    /// Whether complexity was upgraded this round (P3.5). Default: false.
+    pub complexity_upgraded: bool,
+
+    // ── Phase 5 fields ──────────────────────────────────────────────────
+    /// Problem class inferred for this session (P5.2). Default: None.
+    pub problem_class: Option<super::problem_classifier::ProblemClass>,
+    /// Estimated rounds remaining to convergence (P5.4). Default: None.
+    pub forecast_rounds_remaining: Option<usize>,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -115,6 +143,16 @@ mod tests {
             synthesis_advised,
             tool_round: true,
             had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: false,
+            evidence_coverage: 1.0,
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.5,
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
         }
     }
 

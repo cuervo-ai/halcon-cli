@@ -11,6 +11,9 @@
 //! the reward pipeline (replaces the coarse 4-value stop-condition mapping).
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+
+use halcon_core::types::PolicyConfig;
 
 use super::text_utils::extract_keywords;
 
@@ -43,8 +46,8 @@ pub struct RoundEvaluation {
 
 /// Number of consecutive low-score rounds required to trigger a structural replan.
 const REPLAN_CONSECUTIVE_ROUNDS: usize = 3;
-/// Score below which a round is considered "low trajectory".
-const REPLAN_SCORE_THRESHOLD: f32 = 0.15;
+// NOTE: REPLAN_SCORE_THRESHOLD now read from PolicyConfig (replan_score_threshold).
+// Kept as comment for documentation; runtime reads use self.policy.replan_score_threshold.
 /// Number of consecutive regression rounds required to inject synthesis.
 const SYNTHESIS_REGRESSION_ROUNDS: usize = 2;
 /// Number of consecutive zero-progress rounds required to set stagnation_flag.
@@ -65,10 +68,9 @@ const MAX_HISTORY: usize = 20;
 //
 // Sum: 0.45 + 0.30 + 0.10 + 0.15 = 1.00 ✓
 
-const W_PROGRESS: f32 = 0.45;
-const W_EFFICIENCY: f32 = 0.30;
-const W_COHERENCE: f32 = 0.10;
-const W_TOKEN: f32 = 0.15;
+// NOTE: W_PROGRESS, W_EFFICIENCY, W_COHERENCE, W_TOKEN are now read from PolicyConfig
+// (w_progress_round, w_efficiency_round, w_coherence_round, w_token_round).
+// Intentionally different from reward pipeline weights (see PolicyConfig docs).
 const ANOMALY_PENALTY_PER_FLAG: f32 = 0.10;
 
 /// Per-round evaluation and structural signal generator.
@@ -91,11 +93,13 @@ pub struct RoundScorer {
     /// Set via `set_replan_sensitivity()` from `StrategyContext.replan_sensitivity`
     /// after the UCB1 engine selects a strategy plan.
     replan_sensitivity: f32,
+    /// Per-round weights from PolicyConfig.
+    policy: Arc<PolicyConfig>,
 }
 
 impl RoundScorer {
     /// Create a new scorer seeded with goal keywords extracted from `goal`.
-    pub fn new(goal: &str) -> Self {
+    pub fn new(goal: &str, policy: Arc<PolicyConfig>) -> Self {
         Self {
             history: VecDeque::new(),
             max_history: MAX_HISTORY,
@@ -103,6 +107,7 @@ impl RoundScorer {
             last_progress_ratio: 0.0,
             consecutive_zero_progress: 0,
             replan_sensitivity: 0.0, // default: permissive (original thresholds)
+            policy,
         }
     }
 
@@ -184,11 +189,11 @@ impl RoundScorer {
         // Progress score: only positive deltas count.
         let progress_score = progress_delta.max(0.0);
 
-        // Weighted blend.
-        let combined_score = (W_PROGRESS * progress_score
-            + W_EFFICIENCY * tool_efficiency
-            + W_COHERENCE * coherence_score
-            + W_TOKEN * token_efficiency
+        // Weighted blend (weights from PolicyConfig — intentionally different from reward weights).
+        let combined_score = (self.policy.w_progress_round as f32 * progress_score
+            + self.policy.w_efficiency_round as f32 * tool_efficiency
+            + self.policy.w_coherence_round as f32 * coherence_score
+            + self.policy.w_token_round as f32 * token_efficiency
             - anomaly_penalty)
             .clamp(0.0, 1.0);
 
@@ -231,7 +236,7 @@ impl RoundScorer {
             .max(1.0)) as usize;
         // Scale score threshold up with sensitivity (more likely to trigger).
         // At sensitivity=0.0: 0.15 (original). At sensitivity=1.0: 0.25.
-        let effective_threshold = REPLAN_SCORE_THRESHOLD + self.replan_sensitivity * 0.10;
+        let effective_threshold = self.policy.replan_score_threshold + self.replan_sensitivity * 0.10;
 
         if self.history.len() < effective_rounds {
             return false;
@@ -310,7 +315,7 @@ mod tests {
     use super::*;
 
     fn make_scorer() -> RoundScorer {
-        RoundScorer::new("implement file reading with error handling")
+        RoundScorer::new("implement file reading with error handling", Arc::new(PolicyConfig::default()))
     }
 
     #[test]
@@ -437,7 +442,7 @@ mod tests {
 
     #[test]
     fn coherence_score_nonzero_when_keywords_overlap() {
-        let mut s = RoundScorer::new("implement file reading");
+        let mut s = RoundScorer::new("implement file reading", Arc::new(PolicyConfig::default()));
         let eval = s.score_round(
             0,
             1,

@@ -353,6 +353,7 @@ impl AgentBridgeImpl {
             plugin_registry: None,
             is_sub_agent: false,
             requested_provider: None,
+            policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
         };
 
         let loop_result = crate::repl::agent::run_agent_loop(ctx)
