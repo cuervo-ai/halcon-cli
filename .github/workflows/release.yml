@@ -194,9 +194,9 @@ jobs:
           ORT_STRATEGY: ${{ contains(matrix.target, 'musl') && 'compile' || 'download' }}
           LIBGIT2_SYS_USE_PKG_CONFIG: "0"
           LIBGIT2_STATIC: "1"
-          # GNU: use system zstd via pkg-config (libzstd-dev installed in pre-build)
-          # musl: compile from source (no shared libs in musl containers)
-          ZSTD_SYS_USE_PKG_CONFIG: ${{ contains(matrix.target, 'musl') && '0' || '1' }}
+          # zstd: do NOT set ZSTD_SYS_USE_PKG_CONFIG — zstd-sys treats any value (incl. "0")
+          # as "use pkg-config" (is_ok() check). Leaving it unset → compile from source,
+          # which works in all cross containers since cmake is installed via pre-build.
         run: |
           FEATURES="${{ matrix.features }}"
           if [ -n "$FEATURES" ]; then

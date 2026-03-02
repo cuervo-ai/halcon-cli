@@ -2,9 +2,8 @@
 # Install system dependencies common to all Linux targets (Debian/Ubuntu-based images).
 # These are needed for:
 #   keyring sync-secret-service → libdbus-1-dev (D-Bus headers)
-#   git2 HTTPS → libssl-dev (OpenSSL headers)
-#   zstd-sys / libgit2-sys → cmake, build-essential (C compilation)
-#   zstd via pkg-config → libzstd-dev
+#   git2 HTTPS → cmake, build-essential (OpenSSL compiled from source via vendored-openssl feature)
+#   zstd-sys → cmake (compiles from source; ZSTD_SYS_USE_PKG_CONFIG must NOT be set)
 pre-build = [
     "apt-get update -qq && apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || apk add --no-cache cmake build-base dbus-dev openssl-dev zstd-dev pkgconf 2>&1 || true",
 ]
@@ -19,22 +18,17 @@ passthrough = [
     "ORT_USE_CUDA",
     "LIBGIT2_SYS_USE_PKG_CONFIG",
     "LIBGIT2_STATIC",
-    "ZSTD_SYS_USE_PKG_CONFIG",
+    # ZSTD_SYS_USE_PKG_CONFIG intentionally absent: zstd-sys treats any value
+    # (including "0") as "use pkg-config" via is_ok(). Leaving it unset causes
+    # zstd-sys to compile from source, which works in all cross containers.
 ]
 
 # ── Linux x86_64 static (musl) ────────────────────────────────────────────────
-# musl cross image is Alpine-based → uses apk; static OpenSSL bundled with libgit2.
+# musl cross image is Alpine-based → uses apk; OpenSSL compiled via vendored-openssl feature.
 [target.x86_64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
 pre-build = [
     "apk add --no-cache cmake build-base dbus-dev openssl-dev zstd-dev pkgconf 2>&1 || apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || true",
-]
-
-[target.x86_64-unknown-linux-musl.env]
-passthrough = [
-    "ORT_STRATEGY",
-    "LIBGIT2_SYS_USE_PKG_CONFIG",
-    "LIBGIT2_STATIC",
 ]
 
 # ── Linux x86_64 dynamic (glibc) ─────────────────────────────────────────────
