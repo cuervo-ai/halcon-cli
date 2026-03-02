@@ -1,6 +1,6 @@
 {
   "version": "0.3.0",
-  "published_at": "2026-02-23T00:00:00Z",
+  "published_at": "2026-03-02T00:00:00Z",
   "artifacts": [
     {
       "name": "halcon-0.3.0-aarch64-apple-darwin.tar.gz",
@@ -8,8 +8,9 @@
       "os": "macos",
       "arch": "aarch64",
       "ext": "tar.gz",
-      "sha256": "",
-      "size": 0
+      "sha256": "878b543b1fb384dcb44b282d0a828e69e4b0a964a1d2285c042231e79e8bbf69",
+      "size": 15426298,
+      "url": "https://releases.cli.cuervo.cloud/latest/halcon-0.3.0-aarch64-apple-darwin.tar.gz"
     },
     {
       "name": "halcon-0.3.0-x86_64-apple-darwin.tar.gz",
@@ -18,7 +19,8 @@
       "arch": "x86_64",
       "ext": "tar.gz",
       "sha256": "",
-      "size": 0
+      "size": 0,
+      "url": "https://releases.cli.cuervo.cloud/latest/halcon-0.3.0-x86_64-apple-darwin.tar.gz"
     },
     {
       "name": "halcon-0.3.0-x86_64-unknown-linux-gnu.tar.gz",
@@ -27,7 +29,8 @@
       "arch": "x86_64",
       "ext": "tar.gz",
       "sha256": "",
-      "size": 0
+      "size": 0,
+      "url": "https://releases.cli.cuervo.cloud/latest/halcon-0.3.0-x86_64-unknown-linux-gnu.tar.gz"
     },
     {
       "name": "halcon-0.3.0-x86_64-unknown-linux-musl.tar.gz",
@@ -36,7 +39,8 @@
       "arch": "x86_64",
       "ext": "tar.gz",
       "sha256": "",
-      "size": 0
+      "size": 0,
+      "url": "https://releases.cli.cuervo.cloud/latest/halcon-0.3.0-x86_64-unknown-linux-musl.tar.gz"
     },
     {
       "name": "halcon-0.3.0-aarch64-unknown-linux-gnu.tar.gz",
@@ -45,7 +49,8 @@
       "arch": "aarch64",
       "ext": "tar.gz",
       "sha256": "",
-      "size": 0
+      "size": 0,
+      "url": "https://releases.cli.cuervo.cloud/latest/halcon-0.3.0-aarch64-unknown-linux-gnu.tar.gz"
     },
     {
       "name": "halcon-0.3.0-x86_64-pc-windows-msvc.zip",
@@ -54,7 +59,8 @@
       "arch": "x86_64",
       "ext": "zip",
       "sha256": "",
-      "size": 0
+      "size": 0,
+      "url": "https://releases.cli.cuervo.cloud/latest/halcon-0.3.0-x86_64-pc-windows-msvc.zip"
     }
   ],
   "checksums_url": "https://releases.cli.cuervo.cloud/latest/checksums.txt",

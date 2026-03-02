@@ -144,10 +144,13 @@ export default function SmartDownload({ releasesUrl }: SmartDownloadProps) {
 
   const archLabel = arch === 'aarch64' ? 'ARM64' : 'x86_64';
 
+  const hasSha256 = !!artifact?.sha256 && artifact.sha256.length === 64;
+  const hasSize   = !!artifact && artifact.size > 0;
+
   const tabContent: Record<string, string> = {
-    sha256: artifact
-      ? `${artifact.sha256}  ${artifactName}`
-      : `# SHA-256 not available for this platform`,
+    sha256: hasSha256
+      ? `${artifact!.sha256}  ${artifactName}`
+      : `# SHA-256 pending for this platform.\n# Check: ${releasesUrl}/latest/checksums.txt`,
     cosign: `cosign verify-blob \\
   --signature ${artifactName}.sig \\
   --certificate ${artifactName}.pem \\
@@ -217,9 +220,9 @@ export default function SmartDownload({ releasesUrl }: SmartDownloadProps) {
           <span>
             Download for {OS_ICONS[os]}
           </span>
-          {artifact && (
+          {hasSize && (
             <span className="text-sm font-normal opacity-80">
-              {formatBytes(artifact.size)}
+              {formatBytes(artifact!.size)}
             </span>
           )}
         </a>
