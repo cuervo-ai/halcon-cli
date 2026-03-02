@@ -289,6 +289,7 @@ impl ThemeColor {
     }
 
     /// Convert to a ratatui Color for TUI rendering.
+    #[cfg(feature = "tui")]
     pub fn to_ratatui_color(&self) -> ratatui::style::Color {
         let [r, g, b] = self.rgb;
         ratatui::style::Color::Rgb(r, g, b)

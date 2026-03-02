@@ -525,7 +525,10 @@ pub async fn run_orchestrator(
                     if let Some(awaiter) = perm_awaiter_clone {
                         let (sub_perm_tx, sub_perm_rx) =
                             tokio::sync::mpsc::unbounded_channel::<halcon_core::types::PermissionDecision>();
+                        #[cfg(feature = "tui")]
                         permissions.set_tui_channel(sub_perm_rx);
+                        #[cfg(not(feature = "tui"))]
+                        drop(sub_perm_rx);
                         sub_sink_holder = Some(crate::render::sink::SubAgentSink::new(awaiter, sub_perm_tx));
                     } else {
                         permissions.set_non_interactive();
