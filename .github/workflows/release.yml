@@ -199,10 +199,10 @@ jobs:
           FEATURES="${{ matrix.features }}"
           if [ -n "$FEATURES" ]; then
             cross build --release --target ${{ matrix.target }} \
-              --no-default-features --features "$FEATURES" --locked -p halcon-cli
+              --no-default-features --features "$FEATURES" -p halcon-cli
           else
             cross build --release --target ${{ matrix.target }} \
-              --no-default-features --locked -p halcon-cli
+              --no-default-features -p halcon-cli
           fi
 
       - name: Build (cargo)
@@ -216,10 +216,10 @@ jobs:
           FEATURES="${{ matrix.features }}"
           if [ -n "$FEATURES" ]; then
             cargo build --release --target ${{ matrix.target }} \
-              --no-default-features --features "$FEATURES" --locked -p halcon-cli
+              --no-default-features --features "$FEATURES" -p halcon-cli
           else
             cargo build --release --target ${{ matrix.target }} \
-              --no-default-features --locked -p halcon-cli
+              --no-default-features -p halcon-cli
           fi
 
       - name: Package (Unix)
