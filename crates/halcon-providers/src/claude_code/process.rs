@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+#[cfg(unix)]
 use libc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -211,9 +212,11 @@ pub fn build_command(config: &SpawnConfig) -> Command {
     // Automatically downgrade Auto→Chat when running as root so the subprocess
     // doesn't exit immediately with a privilege error.
     let effective_mode = if config.mode == SpawnMode::Auto {
-        // SAFETY: getuid() is always safe on POSIX; returns u32.
-        let uid = unsafe { libc::getuid() };
-        if uid == 0 {
+        #[cfg(unix)]
+        let is_root = unsafe { libc::getuid() } == 0;
+        #[cfg(not(unix))]
+        let is_root = false;
+        if is_root {
             warn!(
                 "claude-code: running as root — downgrading Auto mode to Chat \
                  (--dangerously-skip-permissions is blocked for uid 0)"
@@ -283,8 +286,11 @@ mod tests {
         cmd.arg("--verbose");
         cmd.arg("--include-partial-messages");
         let effective_mode = if config.mode == SpawnMode::Auto {
-            let uid = unsafe { libc::getuid() };
-            if uid == 0 { SpawnMode::Chat } else { SpawnMode::Auto }
+            #[cfg(unix)]
+            let is_root = unsafe { libc::getuid() } == 0;
+            #[cfg(not(unix))]
+            let is_root = false;
+            if is_root { SpawnMode::Chat } else { SpawnMode::Auto }
         } else {
             config.mode
         };
@@ -348,7 +354,10 @@ mod tests {
         let args = std_args(&cfg);
         // When running as root (uid==0), Auto mode is downgraded to Chat to
         // avoid the "cannot use --dangerously-skip-permissions as root" error.
+        #[cfg(unix)]
         let is_root = unsafe { libc::getuid() } == 0;
+        #[cfg(not(unix))]
+        let is_root = false;
         if is_root {
             assert!(!args.contains(&"--dangerously-skip-permissions".into()));
         } else {
