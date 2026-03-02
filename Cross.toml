@@ -2,10 +2,11 @@
 # Install system dependencies common to all Linux targets (Debian/Ubuntu-based images).
 # These are needed for:
 #   keyring sync-secret-service → libdbus-1-dev (D-Bus headers)
-#   git2 HTTPS → libssl-dev (OpenSSL headers, uses pkg-config in GNU targets)
-#   zstd → cmake / build-essential
+#   git2 HTTPS → libssl-dev (OpenSSL headers)
+#   zstd-sys / libgit2-sys → cmake, build-essential (C compilation)
+#   zstd via pkg-config → libzstd-dev
 pre-build = [
-    "apt-get update -qq && apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || apk add --no-cache dbus-dev openssl-dev 2>&1 || true",
+    "apt-get update -qq && apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || apk add --no-cache cmake build-base dbus-dev openssl-dev zstd-dev pkgconf 2>&1 || true",
 ]
 
 # ── Environment variables passed into every cross container ───────────────────
@@ -26,7 +27,7 @@ passthrough = [
 [target.x86_64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
 pre-build = [
-    "apk add --no-cache dbus-dev openssl-dev 2>&1 || apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+    "apk add --no-cache cmake build-base dbus-dev openssl-dev zstd-dev pkgconf 2>&1 || apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || true",
 ]
 
 [target.x86_64-unknown-linux-musl.env]
@@ -40,26 +41,26 @@ passthrough = [
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main"
 pre-build = [
-    "apt-get update -qq && apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+    "apt-get update -qq && apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || true",
 ]
 
 # ── Linux ARM64 dynamic (glibc) ───────────────────────────────────────────────
 [target.aarch64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 pre-build = [
-    "apt-get update -qq && apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+    "apt-get update -qq && apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || true",
 ]
 
 # ── Linux ARM64 static (musl) ─────────────────────────────────────────────────
 [target.aarch64-unknown-linux-musl]
 image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
 pre-build = [
-    "apk add --no-cache dbus-dev openssl-dev 2>&1 || apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+    "apk add --no-cache cmake build-base dbus-dev openssl-dev zstd-dev pkgconf 2>&1 || apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || true",
 ]
 
 # ── Linux ARMv7 static (musl) ─────────────────────────────────────────────────
 [target.armv7-unknown-linux-musleabihf]
 image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:main"
 pre-build = [
-    "apk add --no-cache dbus-dev openssl-dev 2>&1 || apt-get install -y -qq libdbus-1-dev libssl-dev 2>&1 || true",
+    "apk add --no-cache cmake build-base dbus-dev openssl-dev zstd-dev pkgconf 2>&1 || apt-get install -y -qq cmake build-essential libdbus-1-dev libssl-dev libzstd-dev pkg-config 2>&1 || true",
 ]

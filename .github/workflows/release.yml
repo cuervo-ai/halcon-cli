@@ -194,7 +194,9 @@ jobs:
           ORT_STRATEGY: ${{ contains(matrix.target, 'musl') && 'compile' || 'download' }}
           LIBGIT2_SYS_USE_PKG_CONFIG: "0"
           LIBGIT2_STATIC: "1"
-          ZSTD_SYS_USE_PKG_CONFIG: "0"
+          # GNU: use system zstd via pkg-config (libzstd-dev installed in pre-build)
+          # musl: compile from source (no shared libs in musl containers)
+          ZSTD_SYS_USE_PKG_CONFIG: ${{ contains(matrix.target, 'musl') && '0' || '1' }}
         run: |
           FEATURES="${{ matrix.features }}"
           if [ -n "$FEATURES" ]; then
