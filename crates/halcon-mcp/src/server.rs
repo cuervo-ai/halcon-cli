@@ -204,8 +204,11 @@ impl McpServer {
             working_directory: self.working_directory.clone(),
         };
 
+        tracing::info!(tool = %tool_name, transport = "stdio", "mcp_server.tool_call");
+
         match tool.execute(input).await {
             Ok(output) => {
+                tracing::info!(tool = %tool_name, success = !output.is_error, "mcp_server.tool_result");
                 let result = CallToolResult {
                     content: vec![ToolResultContent::Text {
                         text: output.content,
@@ -215,6 +218,7 @@ impl McpServer {
                 Self::success_response(id, serde_json::to_value(result).unwrap())
             }
             Err(e) => {
+                tracing::warn!(tool = %tool_name, error = %e, "mcp_server.tool_error");
                 let result = CallToolResult {
                     content: vec![ToolResultContent::Text {
                         text: format!("Tool execution error: {e}"),
