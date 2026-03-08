@@ -1,5 +1,9 @@
-// MIGRATION-2026: accumulator moved from repl/ root to agent/
+// MIGRATION-2026: files moved from repl/ root to agent/ (C-8g)
 pub mod accumulator;
+pub mod agent_scheduler;
+pub mod agent_task_manager;
+pub mod agent_utils;
+pub mod failure_tracker;
 mod budget_guards;
 // Phase 1: State Externalization — serializable LoopState snapshot, fire-and-forget persist.
 mod checkpoint;

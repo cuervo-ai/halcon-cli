@@ -30,9 +30,9 @@ pub mod agent;
 // Agent support types and utilities — part of the agent orchestration layer.
 // agent_comm moved to bridges/ (C-7)
 pub use bridges::agent_comm;
-pub mod agent_task_manager;
+pub use agent::agent_task_manager;
 pub mod agent_types;
-pub mod agent_utils;
+pub use agent::agent_utils;
 pub use agent::accumulator;
 
 // === INFRASTRUCTURE LAYER ===
@@ -115,7 +115,7 @@ pub mod delegation;
 pub use domain::evidence_pipeline;
 pub(crate) use domain::evidence_graph;
 pub use bridges::execution_tracker;
-pub mod failure_tracker;
+pub use agent::failure_tracker;
 // health, metrics_store moved to metrics/ (C-6)
 pub use metrics::health;
 pub use security::idempotency;
@@ -148,7 +148,7 @@ pub mod agent_registry;
 
 /// Cron-based background scheduler for agent tasks (PASO 4-C — US-scheduler).
 /// Uses a 60s tokio::time::interval tick and the croner crate for expression parsing.
-pub mod agent_scheduler;
+pub use agent::agent_scheduler;
 
 /// Semantic memory vector store context source (Feature 7 — Frontier Roadmap 2026).
 /// Pipeline-triggered retrieval from MEMORY.md via cosine similarity + MMR.
