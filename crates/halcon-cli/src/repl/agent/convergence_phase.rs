@@ -27,6 +27,36 @@ use crate::render::sink::RenderSink;
 
 // NOTE: MAX_REPLAN_ATTEMPTS now read from state.policy.max_replan_attempts (PolicyConfig).
 
+// ── B2 Migration: ConvergenceInput view struct ────────────────────────────────
+//
+// Planned: replace `state: &mut LoopState` parameter with `input: &mut ConvergenceInput<'_>`.
+// Blocked: convergence_phase::run() accesses 20+ distinct LoopState sub-fields with mixed
+// mutability. Safely splitting these into a view struct requires resolving lifetime conflicts
+// between the mutable borrows of state.convergence, state.guards, state.synthesis, state.tokens,
+// state.hicon, and the shared borrows of state.policy, state.active_plan, state.execution_tracker.
+// Borrow checker prevents holding `&mut ConvergenceState` and `&mut LoopGuardState` simultaneously
+// through a view struct without unsafe code or splitting LoopState into separate owned sub-structs.
+//
+// Partial extraction: the struct definition below captures the INTENT; full migration will follow
+// when LoopState is split into owned sub-structs (ARCH-001 decomposition).
+//
+/// View struct projecting the fields that convergence_phase reads from `LoopState`.
+///
+/// This is a B2 migration placeholder. Full migration will replace the `state: &mut LoopState`
+/// parameter with `input: &mut ConvergenceInput<'_>` once LoopState is decomposed into
+/// owned sub-structs (B2 is blocked on ARCH-001 LoopState decomposition).
+pub(super) struct ConvergenceInput<'a> {
+    pub convergence: &'a mut super::loop_state::ConvergenceState,
+    pub guards: &'a mut super::loop_state::LoopGuardState,
+    pub synthesis: &'a mut super::loop_state::SynthesisControl,
+    pub policy: &'a halcon_core::types::PolicyConfig,
+    pub round_number: u32,
+    pub silent: bool,
+    pub auto_pause: &'a mut bool,
+    pub ctrl_cancelled: &'a mut bool,
+    pub strategy_context: Option<&'a super::super::agent_types::StrategyContext>,
+}
+
 /// Run the convergence phase for one tool-use round.
 ///
 /// Called after tool execution + deduplication. Handles ConvergenceController,
