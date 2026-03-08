@@ -98,7 +98,7 @@ pub use security::adaptive_prompt;
 pub use security::rule_matcher;
 pub use security::schema_validator;
 pub use security::validation;
-pub mod backpressure;
+pub use planning::backpressure;
 // command_blacklist, permission_lifecycle, output_risk_scorer moved to security/
 pub use security::blacklist as command_blacklist;
 pub use security::lifecycle as permission_lifecycle;
@@ -118,15 +118,15 @@ pub mod execution_tracker;
 pub mod failure_tracker;
 // health, metrics_store moved to metrics/ (C-6)
 pub use metrics::health;
-pub mod idempotency;
+pub use security::idempotency;
 pub use metrics::integration_decision;
 // mcp_manager moved to bridges/ (C-7)
 pub(crate) use bridges::mcp_manager;
 pub use metrics::store as metrics_store;
-pub mod model_selector;
-pub mod optimizer;
+pub use planning::model_selector;
+pub use planning::optimizer;
 pub mod resilience;
-pub mod response_cache;
+pub use security::response_cache;
 // router moved to planning/router (C-3)
 pub use planning::router;
 
@@ -192,7 +192,7 @@ pub use bridges::replay_runner;
 // search_engine_global moved to bridges/ (C-7)
 pub use bridges::search as search_engine_global;
 pub use domain::self_corrector;
-pub mod speculative;
+pub use planning::speculative;
 // evaluator moved to metrics/ (C-6)
 pub use metrics::evaluator;
 // === APPLICATION LAYER ===
@@ -203,7 +203,7 @@ pub use application::reasoning_engine;
 // plan_coherence moved to planning/coherence (C-3)
 pub use planning::coherence as plan_coherence;
 // capability_index/orchestrator/resolver moved to plugins/ (C-1)
-pub(crate) mod provider_normalization;
+pub(crate) use planning::provider_normalization;
 pub mod plugins;
 // reward_pipeline, round_scorer, strategy_metrics moved to metrics/ (C-6)
 pub use metrics::reward as reward_pipeline;

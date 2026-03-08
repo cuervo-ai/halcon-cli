@@ -1,6 +1,7 @@
 // planning/ — planificación, routing, normalización de input
 // MIGRATION-2026: archivos movidos desde repl/ raíz
 
+pub mod backpressure;
 pub mod decision_layer;
 pub mod input_boundary;
 pub mod normalizer;
@@ -8,11 +9,15 @@ pub mod coherence;
 pub mod compressor;
 pub(crate) mod diagnostics;
 pub mod metrics;
+pub mod model_selector;
+pub mod optimizer;
+pub mod provider_normalization;
 pub mod source;
 pub mod playbook;
 pub mod llm_planner;
 pub mod router;
 pub(crate) mod sla;
+pub mod speculative;
 
 // Re-exports — preserve API surface for callers in repl/
 // decision_layer: pub(crate) types — access via module path
