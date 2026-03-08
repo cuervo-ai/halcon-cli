@@ -477,7 +477,7 @@ impl ExecutionTracker {
 /// Delegates to `tool_aliases::are_equivalent()` which resolves both names
 /// to canonical form before comparison.
 fn tool_names_are_equivalent(a: &str, b: &str) -> bool {
-    super::tool_aliases::are_equivalent(a, b)
+    super::super::tool_aliases::are_equivalent(a, b)
 }
 
 // ── Timeline types ──
