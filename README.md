@@ -41,7 +41,7 @@
 
 Halcon is a production-grade AI development platform built in Rust and TypeScript. The core is a terminal agent that routes each task through a **Boundary Decision Engine** — intent classification, SLA budget calibration, model selection — before the first LLM call. A **FASE-2 security gate** enforces 18 catastrophic-pattern guards at the tool layer, independent of any agent configuration.
 
-The platform ships as four integrated surfaces: a **CLI/REPL**, a **VS Code extension**, a **desktop control plane**, and a **bilingual website** — all sharing the same underlying agent loop and tool registry over a common protocol.
+The platform ships as seven integrated surfaces: a **CLI/REPL**, a **VS Code extension**, a **desktop control plane**, a **bilingual website**, a **GitHub Actions native action**, a **MCP server**, and an **LSP server** — all sharing the same underlying agent loop and tool registry over a common protocol.
 
 <p align="center">
   <img alt="Halcon CLI TUI — activity timeline, working memory, conversational overlay" src="img/uxui.png" width="800">
@@ -59,15 +59,18 @@ The platform ships as four integrated surfaces: a **CLI/REPL**, a **VS Code exte
   - [Agent Loop](#agent-loop)
   - [Memory Systems](#memory-systems)
   - [TUI](#tui)
+- [CI/CD Integration](#cicd-integration)
 - [VS Code Extension](#vs-code-extension)
 - [Desktop App](#desktop-app)
 - [MCP Integration](#mcp-integration)
+- [Agent Network](#agent-network)
 - [LSP Server](#lsp-server)
 - [Website](#website)
 - [Providers](#providers)
 - [Tools](#tools)
 - [Configuration](#configuration)
-- [Security](#security)
+- [Security & Compliance](#security--compliance)
+- [Enterprise](#enterprise)
 - [Architecture](#architecture)
 - [Contributing](#contributing)
 
@@ -95,10 +98,10 @@ The platform ships as four integrated surfaces: a **CLI/REPL**, a **VS Code exte
 <td>In-editor AI assistant via JSON-RPC subprocess</td>
 </tr>
 <tr>
-<td><b>Desktop App</b></td>
-<td>Rust · egui</td>
-<td>🚧 Alpha</td>
-<td>Native GUI control plane for remote halcon-api instances</td>
+<td><b>GitHub Actions</b></td>
+<td>YAML composite action</td>
+<td>✅ Production</td>
+<td>Official action for autonomous CI/CD agents</td>
 </tr>
 <tr>
 <td><b>MCP Server</b></td>
@@ -107,16 +110,10 @@ The platform ships as four integrated surfaces: a **CLI/REPL**, a **VS Code exte
 <td>Expose all tools as MCP endpoint (stdio or HTTP)</td>
 </tr>
 <tr>
-<td><b>LSP Server</b></td>
-<td>Rust · stdio</td>
-<td>🚧 Alpha</td>
-<td>Language Server Protocol bridge for IDEs</td>
-</tr>
-<tr>
 <td><b>Control Plane API</b></td>
 <td>Rust · axum · WebSocket</td>
 <td>✅ Production</td>
-<td>REST + streaming API for remote integrations</td>
+<td>REST + streaming API, RBAC, analytics</td>
 </tr>
 <tr>
 <td><b>Website</b></td>
@@ -124,13 +121,26 @@ The platform ships as four integrated surfaces: a **CLI/REPL**, a **VS Code exte
 <td>✅ Production</td>
 <td>Bilingual marketing site + documentation hub</td>
 </tr>
+<tr>
+<td><b>Desktop App</b></td>
+<td>Rust · egui</td>
+<td>🚧 Alpha</td>
+<td>Native GUI control plane for remote halcon-api instances</td>
+</tr>
+<tr>
+<td><b>LSP Server</b></td>
+<td>Rust · stdio</td>
+<td>🚧 Alpha</td>
+<td>Language Server Protocol bridge for IDEs</td>
+</tr>
 </table>
 
 **Protocol spine:** all surfaces connect to the agent loop through one of three transports:
 
 ```
 VS Code extension  ──JSON-RPC stdin/stdout──▶  halcon-cli  ─┐
-Desktop app        ──WebSocket /api/v1/ws──────▶ halcon-api  ├─▶ Agent Loop
+GitHub Actions     ──NDJSON stdout (CiSink)──▶  halcon-cli  ├─▶ Agent Loop
+Desktop app        ──WebSocket /api/v1/ws──────▶ halcon-api  │
 MCP clients        ──stdio or HTTP Bearer──────▶ halcon mcp ─┘
 ```
 
@@ -150,6 +160,8 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 halcon                                           # interactive REPL
 halcon --tui                                     # 3-panel TUI mode
 halcon "refactor the auth module to TokenStore"  # one-shot task
+halcon --output-format json "list files"         # CI/CD mode (NDJSON)
+halcon --air-gap "analyze this code"             # offline mode (Ollama only)
 ```
 
 ---
@@ -230,36 +242,41 @@ halcon doctor                                      system diagnostics
 halcon update [--check] [--force]                 self-update
 halcon theme                                       theme generation
 
-halcon auth   login|logout|status PROVIDER        API key management (OS keychain)
-halcon config show|get|set|path                   configuration CRUD
+halcon auth     login|logout|status PROVIDER      API key management (OS keychain)
+halcon config   show|get|set|path                 configuration CRUD
 
-halcon agents list|validate                        sub-agent registry
-halcon memory list|search|prune|stats|clear       persistent memory
-halcon tools  list|validate|doctor|add|remove     tool registry
-halcon audit  export|list|verify                  SOC 2 audit log
-halcon metrics show|export|prune|decide           performance baselines
+halcon agents   list|validate                      sub-agent registry
+halcon memory   list|search|prune|stats|clear      persistent memory
+halcon tools    list|validate|doctor|add|remove    tool registry
+halcon users    add|list|revoke                    user management (RBAC)
 
-halcon trace  export SESSION_ID                   JSONL session export
-halcon replay SESSION_ID [--verify]               deterministic replay
+halcon audit    export|list|verify|compliance      SOC 2 audit log + compliance reports
+halcon metrics  show|export|prune|decide           performance baselines
+halcon schedule add|list|disable|enable|run        scheduled agent tasks
 
-halcon mcp    add|remove|list|get|auth|serve      MCP server management
-halcon lsp                                         Language Server (stdio)
-halcon plugin list|install|remove|status          plugin management
+halcon trace    export SESSION_ID                  JSONL session export
+halcon replay   SESSION_ID [--verify]              deterministic replay
+
+halcon mcp      add|remove|list|get|auth|serve     MCP server management
+halcon lsp                                          Language Server (stdio)
+halcon plugin   list|install|remove|status         plugin management
 ```
 
 <details>
 <summary><b>Global flags</b></summary>
 
 ```
---model MODEL          model override
---provider PROVIDER    provider override (anthropic|openai|ollama|deepseek|gemini|claude-code)
---verbose              debug logging
---log-level LEVEL      trace|debug|info|warn|error
---config PATH          alternate config file
---no-banner            suppress startup banner
---mode MODE            interactive|json-rpc
---max-turns N          agent loop turn limit
---trace-json PATH      write JSON trace
+--model MODEL              model override
+--provider PROVIDER        provider override (anthropic|openai|ollama|bedrock|vertex|azure|deepseek|gemini)
+--output-format FORMAT     human|json|junit|plain  (json = NDJSON for CI/CD)
+--air-gap                  offline mode — Ollama only, all external network blocked
+--verbose                  debug logging
+--log-level LEVEL          trace|debug|info|warn|error
+--config PATH              alternate config file
+--no-banner                suppress startup banner
+--mode MODE                interactive|json-rpc
+--max-turns N              agent loop turn limit
+--trace-json PATH          write JSON trace
 ```
 
 </details>
@@ -291,6 +308,20 @@ Before any LLM call, `IntentPipeline::resolve()` runs:
 - T2: tool failure rate ≥ 60%
 - T3: evidence coverage < 25% at round ≥ 4
 - T4: combined convergence score > 0.90 at round ≥ 3
+
+**SynthesisGate → TerminationOracle ordering:** `synthesis_gate::evaluate()` runs *before* `oracle.adjudicate()` — the gate can rescue a session with `governance_rescue_active=true` before the oracle emits `Converged`.
+
+</details>
+
+<details>
+<summary><b>PlaybookPlanner + LlmPlanner</b></summary>
+
+Planning uses a two-stage pipeline:
+
+1. **PlaybookPlanner** — deterministic, no LLM call. For high-frequency tasks (code review, test run, PR creation), a matching playbook resolves in milliseconds with zero token cost.
+2. **LlmPlanner** — LLM-driven planning for novel tasks. Only invoked if PlaybookPlanner returns `None`.
+
+This chain gives 10–100× faster planning for repetitive workflows while retaining full capability for unknown tasks.
 
 </details>
 
@@ -381,13 +412,68 @@ halcon --tui          # or: halcon chat --tui
 | `Enter` | Submit prompt |
 | `Shift+Enter` | Newline in prompt |
 | `Tab` | Cycle focus zones |
-| `Ctrl+C` | Cancel in-progress request |
+| `Ctrl+C` | Cancel in-progress request (graceful, audit-logged) |
 | `Ctrl+L` | Clear activity timeline |
 | `Ctrl+Y` | Copy last response to clipboard |
 | `↑/↓/PgUp/PgDn` | Scroll activity timeline |
 | `Esc` | Dismiss modal / overlay |
 
 Features: conversational permission overlay (inline tool approval), sub-agent progress badges, context budget bar, toast notifications, clipboard support (arboard), panic hook restores terminal.
+
+---
+
+## CI/CD Integration
+
+### `--output-format` flag
+
+All agent runs can emit structured NDJSON for scripting and CI pipelines:
+
+```sh
+halcon --output-format json "run the test suite and summarize failures"
+```
+
+**Event stream (one JSON object per line):**
+```json
+{"type":"session_start","timestamp":"2026-03-08T00:00:00Z","session_id":"abc123"}
+{"type":"tool_call","tool":"bash","input":"cargo test","round":1}
+{"type":"tool_result","tool":"bash","success":true,"output":"...","duration_ms":4200}
+{"type":"response","text":"All 1,840 tests pass. One flaky test in...","round":1}
+{"type":"session_end","rounds":3,"tokens_used":1840,"cost_usd":0.004}
+```
+
+Parse with `jq`:
+```sh
+halcon --output-format json "check for security issues" \
+  | jq 'select(.type=="response") | .text'
+```
+
+### GitHub Actions official action
+
+`.github/actions/halcon/action.yml` is bundled in this repository:
+
+```yaml
+- uses: cuervo-ai/halcon-cli/.github/actions/halcon@main
+  with:
+    prompt: "Review this PR for security issues and comment on findings"
+    model: claude-sonnet-4-6
+    max-turns: "20"
+  env:
+    ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+**Inputs:**
+
+| Input | Default | Description |
+|---|---|---|
+| `prompt` | required | Task to run |
+| `model` | `claude-sonnet-4-6` | Model to use |
+| `max-turns` | `20` | Maximum agent turns |
+| `output-format` | `json` | Output format |
+| `working-directory` | `.` | Directory to run in |
+
+**Outputs:** `result` (final response text), `session-id` (audit trail reference), `cost-usd` (estimated run cost).
+
+**Supported providers in CI:** Anthropic (default), AWS Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`), Vertex AI (`CLAUDE_CODE_USE_VERTEX=1`), Azure AI Foundry (`CLAUDE_CODE_USE_AZURE=1`).
 
 ---
 
@@ -429,7 +515,7 @@ code --install-extension halcon-*.vsix
 
 ### Context Injection
 
-On each request, the extension automatically appends a `context` object:
+On each request, the extension automatically appends:
 
 ```json
 {
@@ -447,8 +533,6 @@ On each request, the extension automatically appends a `context` object:
 
 ### JSON-RPC Protocol
 
-The extension communicates via NDJSON over subprocess stdin/stdout:
-
 **Extension → halcon:**
 ```json
 {"id": 1, "method": "ping"}
@@ -460,7 +544,6 @@ The extension communicates via NDJSON over subprocess stdin/stdout:
 ```json
 {"event": "pong", "id": 1}
 {"event": "token",       "data": {"text": "streamed text"}}
-{"event": "thinking",    "data": {"text": "..."}}
 {"event": "tool_call",   "data": {"name": "bash", "input": {...}}}
 {"event": "tool_result", "data": {"success": true, "output": "..."}}
 {"event": "done"}
@@ -515,20 +598,7 @@ halcon-desktop
 | Metrics | Performance dashboard — memory, latency, token counts |
 | Logs | Structured logging view |
 
-### Technical Details
-
-- **UI framework:** `egui` 0.29 (immediate-mode) + `eframe` (native window)
-- **Async runtime:** tokio workers with mpsc channels (256-slot commands, 1024-slot messages)
-- **Connection:** WebSocket at `/api/v1/ws`, REST at `/api/v1/`, Bearer token auth
-- **Frame rate:** 60 FPS; token streaming rate-limited to 10 tokens/frame (~600 tokens/s) to maintain <16ms frame time
-- **Config:** TOML-backed `AppConfig` (server URL, auth token, theme, window state)
-
-### Environment Variables
-
-```sh
-HALCON_SERVER_URL=http://127.0.0.1:9849   # API server address
-HALCON_API_TOKEN=<token>                   # Bearer token
-```
+**Technical details:** `egui` 0.29 + `eframe`, tokio workers with mpsc channels (256-slot commands, 1024-slot messages), WebSocket at `/api/v1/ws`, 60 FPS, streaming rate-limited to 10 tokens/frame (~600 tokens/s).
 
 ---
 
@@ -578,7 +648,66 @@ auth.env  = "MY_API_TOKEN"   # ${VAR:-default} expansion supported
 
 3-scope config: local `.halcon/mcp.toml` > project > user `~/.halcon/mcp.toml`.
 
-**Tool discovery:** `ToolSearchIndex` (nucleo-matcher fuzzy search) defers full tool listing above 10% context threshold. A synthetic `search_tools_definition` tool lets the agent search for tools by name/description.
+**Tool discovery:** `ToolSearchIndex` (nucleo-matcher fuzzy search) defers full tool listing above 10% context threshold. A synthetic `search_tools_definition` tool lets the agent search by name/description.
+
+---
+
+## Agent Network
+
+Halcon supports multi-agent teams where a **Lead** agent delegates work to **Teammate** and **Specialist** agents through a SQLite-backed mailbox.
+
+### Agent Roles
+
+| Role | Timeout | Max Rounds | Tool Access | Notes |
+|---|---|---|---|---|
+| `Lead` | 1.0× | 1.0× | Full | Can cancel teammates, read all state |
+| `Teammate` | 0.6× | 0.7× | Full | Receives initial context from lead |
+| `Specialist` | 0.8× | 0.5× | Full | On-demand, domain-scoped |
+| `Observer` | 0.1× | 0× | None | Audit-only, records all events |
+
+Roles are set per `SubAgentTask`:
+```toml
+[[agents]]
+name  = "security-specialist"
+role  = "Specialist"
+model = "claude-opus-4-6"
+```
+
+### Mailbox P2P
+
+Agents communicate asynchronously through a persistent message store:
+
+- **Broadcast:** lead → all teammates (team-wide)
+- **Point-to-point:** teammate → lead with partial results
+- **TTL:** messages auto-expire; `purge_expired()` runs in the background
+- **Audit:** every message is recorded in the audit log
+
+```rust
+// Agent code can send:
+mailbox.broadcast(from, team_id, json!({"status": "analysis_complete"})).await?;
+mailbox.receive("lead-agent", team_id).await?;
+```
+
+### Scheduled Tasks
+
+Run agents on a cron schedule — no external scheduler required:
+
+```sh
+# Schedule a security scan every Monday at 2 AM
+halcon schedule add \
+  --name "weekly-security-scan" \
+  --cron "0 2 * * 1" \
+  --instruction "Scan main branch for new vulnerabilities and create GitHub issues"
+
+halcon schedule list          # show all tasks with next-run times
+halcon schedule run <id>      # force immediate execution
+halcon schedule disable <id>  # pause without deleting
+halcon schedule enable <id>   # re-enable
+```
+
+The scheduler runs as a background tokio task (60s tick) inside the REPL — no external daemon needed. Tasks persist in SQLite and survive restarts.
+
+**Use case (government):** compliance officer programs a weekly agent to generate the SOC 2 report every Friday at 17:00, automatically emailing the PDF to auditors.
 
 ---
 
@@ -596,7 +725,7 @@ Content-Length: 42\r\n\r\n{"jsonrpc":"2.0","method":"initialize",...}
 
 Routes to `DevGateway` for `textDocument/*` and custom `$/halcon/*` methods.
 
-> **Status: Alpha** — framing and exit detection are complete; method handlers (`textDocument/didOpen`, `textDocument/definition`, etc.) are under active development. The harness is stable; suitable for integration testing.
+> **Status: Alpha** — framing and exit detection are complete; method handlers (`textDocument/didOpen`, `textDocument/definition`, etc.) are under active development.
 
 ---
 
@@ -605,8 +734,6 @@ Routes to `DevGateway` for `textDocument/*` and custom `$/halcon/*` methods.
 **[halcon.cuervo.cloud](https://halcon.cuervo.cloud)**
 
 Built with **Astro 5** (static output) + **React 19** + **Tailwind CSS**. No backend — purely static, CDN-served.
-
-### Pages
 
 | Route | Content |
 |---|---|
@@ -619,34 +746,54 @@ Built with **Astro 5** (static output) + **React 19** + **Tailwind CSS**. No bac
 | `/playground` | Interactive REPL simulator (React) |
 | `/materials` | Research papers and blog links |
 
-### Smart Download
-
-The `/download` page auto-detects platform (macOS arm64/x64, Linux x64, Windows x64) and shows the matching binary, checksum verification steps, and platform-specific install instructions.
-
-### Build
-
-```sh
-cd website
-npm ci
-npm run build    # outputs to dist/
-npm run preview  # local preview
-```
+The `/download` page auto-detects platform (macOS arm64/x64, Linux x64, Windows x64) and shows the matching binary, checksum steps, and platform-specific install instructions.
 
 ---
 
 ## Providers
 
-| Provider | Models | Transport | Vision | Tool Use |
-|---|---|---|:---:|:---:|
-| **Anthropic** | Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 | SSE | ✓ | ✓ |
-| **OpenAI** | GPT-4o, o1, o3-mini | SSE | ✓ | ✓ |
-| **Ollama** | Llama, Mistral, Qwen, Phi, CodeLlama… | NDJSON | ✓ | ✓ |
-| **DeepSeek** | DeepSeek Coder, Chat, Reasoner | OpenAI-compat | — | ✓ |
-| **Google Gemini** | Gemini Pro, Flash, Ultra | SSE | ✓ | ✓ |
-| **Claude Code** | claude CLI subprocess | Stdio JSON-RPC | — | ✓ |
-| **OpenAI-compat** | Any OpenAI-compatible API | SSE | ✓ | ✓ |
-| **Echo** | Debug / testing | Sync | — | — |
-| **Replay** | Deterministic trace reproduction | Offline | — | — |
+| Provider | Activation | Models | Auth |
+|---|---|---|---|
+| **Anthropic** | default | Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 | `ANTHROPIC_API_KEY` |
+| **AWS Bedrock** | `CLAUDE_CODE_USE_BEDROCK=1` | Claude via Bedrock | `AWS_ACCESS_KEY_ID` + SigV4 |
+| **Google Vertex AI** | `CLAUDE_CODE_USE_VERTEX=1` | Claude via Vertex | ADC / `GOOGLE_APPLICATION_CREDENTIALS` |
+| **Azure AI Foundry** | `CLAUDE_CODE_USE_AZURE=1` | Claude via Azure | `AZURE_API_KEY` or Entra ID |
+| **OpenAI** | `--provider openai` | GPT-4o, o1, o3-mini | `OPENAI_API_KEY` |
+| **Ollama** | `--provider ollama` | Llama, Mistral, Qwen, Phi… | local |
+| **DeepSeek** | `--provider deepseek` | DeepSeek Coder, Chat, Reasoner | `DEEPSEEK_API_KEY` |
+| **Google Gemini** | `--provider gemini` | Gemini Pro, Flash, Ultra | `GEMINI_API_KEY` |
+| **Claude Code** | `--provider claude-code` | claude CLI subprocess | stdio |
+| **OpenAI-compat** | `--provider compat` | Any OpenAI-compatible API | `OPENAI_COMPAT_API_KEY` |
+
+<details>
+<summary><b>Cloud provider details</b></summary>
+
+**AWS Bedrock:**
+```sh
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+# Cross-region inference: model IDs accept us./eu./ap. prefix
+# LLM gateway override: ANTHROPIC_BEDROCK_BASE_URL=https://...
+```
+
+**Google Vertex AI:**
+```sh
+export CLAUDE_CODE_USE_VERTEX=1
+export ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+export CLOUD_ML_REGION=us-east5    # default: us-east5
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+```
+
+**Azure AI Foundry:**
+```sh
+export CLAUDE_CODE_USE_AZURE=1
+export AZURE_AI_ENDPOINT=https://my-instance.openai.azure.com
+export AZURE_API_KEY=...           # or use Entra ID Bearer token
+```
+
+</details>
 
 ---
 
@@ -734,30 +881,95 @@ CLI flags  →  env vars  →  ./.halcon/config.toml  →  ~/.halcon/config.toml
 ### Environment variables
 
 ```sh
+# Providers — core
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 DEEPSEEK_API_KEY=sk-...
 GEMINI_API_KEY=...
 OLLAMA_HOST=http://localhost:11434
 
+# Providers — cloud
+CLAUDE_CODE_USE_BEDROCK=1          # activate Bedrock
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...              # optional
+ANTHROPIC_BEDROCK_BASE_URL=...     # LLM gateway override
+
+CLAUDE_CODE_USE_VERTEX=1           # activate Vertex AI
+ANTHROPIC_VERTEX_PROJECT_ID=...
+CLOUD_ML_REGION=us-east5
+GOOGLE_APPLICATION_CREDENTIALS=...
+
+CLAUDE_CODE_USE_AZURE=1            # activate Azure AI Foundry
+AZURE_AI_ENDPOINT=...
+AZURE_API_KEY=...
+
+# Runtime
 HALCON_MODEL=claude-sonnet-4-6
 HALCON_PROVIDER=anthropic
 HALCON_LOG=debug
+HALCON_AIR_GAP=1                   # set by --air-gap (also blockable in env)
 
-# MCP / Desktop
+# Server / Enterprise
 HALCON_MCP_SERVER_API_KEY=...
 HALCON_SERVER_URL=http://127.0.0.1:9849
 HALCON_API_TOKEN=...
+HALCON_ADMIN_API_KEY=...           # admin REST endpoints
+HALCON_AUDIT_HMAC_KEY=...          # audit chain verification (derived from machine ID if unset)
 ```
 
 ---
 
-## Security
+## Security & Compliance
 
-**FASE-2 gate** — 18 catastrophic patterns in `halcon-core/src/security.rs`:
-filesystem destruction, credential exfiltration, fork bombs, kernel module loading, raw disk access, `/proc/sysrq-trigger`.
+### FASE-2 security gate
 
-**DANGEROUS_COMMAND_PATTERNS** — 12 named G7 patterns (crypto miners, reverse shells, privilege escalation). Both lists compile from a single source file shared by `bash.rs` and `command_blacklist.rs`.
+18 catastrophic patterns in `halcon-core/src/security.rs`: filesystem destruction, credential exfiltration, fork bombs, kernel module loading, raw disk access, `/proc/sysrq-trigger`. Cannot be bypassed by configuration, hooks, or provider choice.
+
+```sh
+halcon "ejecuta: rm -rf /"
+# → BLOCKED by FASE-2 · event recorded in audit log · agent receives refusal reason
+```
+
+### Audit log
+
+Append-only SQLite audit trail with HMAC-SHA256 chain validation:
+
+```sh
+halcon audit export --format jsonl  --output audit.jsonl    # HMAC-chained NDJSON
+halcon audit export --format csv    --output audit.csv      # Excel/Sheets ready
+halcon audit export --format pdf    --output audit.pdf      # self-contained PDF
+halcon audit verify                                         # verify HMAC chain integrity
+```
+
+The PDF is **self-contained** — an auditor can open it without installing Halcon or any other tool.
+
+### Compliance reports
+
+```sh
+halcon audit compliance --format soc2    --output compliance-soc2.pdf
+halcon audit compliance --format fedramp --output compliance-fedramp.pdf
+halcon audit compliance --format iso27001 --output compliance-iso27001.pdf
+```
+
+Reports include: session activity, tool usage by risk tier, FASE-2 activation count per pattern, HMAC integrity verification, user access log, and failed access attempts. PDF format, no dependencies.
+
+### Air-gap mode
+
+```sh
+halcon --air-gap "analyze src/main.rs"
+```
+
+In air-gap mode:
+- Only the **Ollama** provider is active (defaults to `http://localhost:11434`)
+- All non-localhost network connections are blocked at the provider factory
+- Audit log writes to local file only (no telemetry)
+- A visible banner is displayed: `⚠ MODO AIR-GAP ACTIVO — Sin conexiones externas`
+
+Suitable for military installations, classified laboratories, and any air-gapped environment.
+
+### Additional security layers
 
 **TBAC** — every tool declares `PermissionLevel` (ReadOnly / ReadWrite / Destructive) and `AllowedDirectories`. Violations reject before execution.
 
@@ -765,11 +977,50 @@ filesystem destruction, credential exfiltration, fork bombs, kernel module loadi
 
 **Keychain** — API keys stored in OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager). Never written to config files unless explicitly overridden.
 
-**Audit log** — append-only SQLite audit trail with HMAC-SHA256 chain validation. SOC 2-compatible export: `halcon audit export --format jsonl`, `halcon audit verify SESSION_ID`.
-
-**Lifecycle hooks** — shell or Rhai sandboxed scripts on 6 events. Exit code 2 = Deny (stdout → reason shown to user). FASE-2 is structurally independent of hook outcomes.
+**Lifecycle hooks** — shell or Rhai sandboxed scripts on 6 events (UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, Stop, SessionEnd). Exit code 2 = Deny. FASE-2 is structurally independent of hook outcomes.
 
 See [SECURITY.md](SECURITY.md) for vulnerability disclosure policy.
+
+---
+
+## Enterprise
+
+### RBAC — Role-Based Access Control
+
+Four roles control access to all API endpoints and CLI capabilities:
+
+| Role | Agent invocation | Audit export | Admin analytics | User management |
+|---|:---:|:---:|:---:|:---:|
+| `Admin` | ✓ | ✓ | ✓ | ✓ |
+| `Developer` | ✓ | — | — | — |
+| `AuditViewer` | — | ✓ | ✓ | — |
+| `ReadOnly` | — | — | — | — |
+
+```sh
+# Manage users (stored in ~/.halcon/users.toml + API key per user)
+halcon users add    --email dev@org.com      --role Developer
+halcon users add    --email auditor@org.com  --role AuditViewer
+halcon users list
+halcon users revoke --email dev@org.com
+```
+
+Roles are enforced by an axum middleware layer on all `/api/v1/` routes. The Bearer JWT contains a `role` claim validated on every request.
+
+### Admin analytics API
+
+Track usage across your team:
+
+```sh
+# Per-user usage for the period
+curl -H "Authorization: Bearer $HALCON_ADMIN_API_KEY" \
+  "https://your-halcon-api/api/v1/admin/usage/claude-code?starting_at=2026-01-01"
+
+# Org-level summary
+curl -H "Authorization: Bearer $HALCON_ADMIN_API_KEY" \
+  "https://your-halcon-api/api/v1/admin/usage/summary?from=2026-01-01&to=2026-03-31"
+```
+
+**Response fields per user:** `sessions`, `tokens_in`, `tokens_out`, `cost_usd`, `tool_calls`, `rounds_avg`, `lines_added`, `lines_removed`, `commits`, `prs`.
 
 ---
 
@@ -781,19 +1032,19 @@ See [SECURITY.md](SECURITY.md) for vulnerability disclosure policy.
 ```
 halcon-cli/
 ├── crates/
-│   ├── halcon-cli/          # binary — REPL, TUI, commands, agent loop (337 files, ~40K LOC)
+│   ├── halcon-cli/          # binary — REPL, TUI, commands, agent loop
 │   ├── halcon-core/         # domain types, traits, security — zero I/O
-│   ├── halcon-providers/    # AI adapters: 7 providers (Anthropic, OpenAI, Ollama, DeepSeek, Gemini, ClaudeCode, compat)
-│   ├── halcon-tools/        # 60+ tool implementations (75 files)
-│   ├── halcon-mcp/          # MCP client + HTTP server, OAuth 2.1, tool search (13 files)
-│   ├── halcon-context/      # 7-tier context engine, embeddings, vector store (18 files)
-│   ├── halcon-storage/      # SQLite persistence, migrations, audit, cache, metrics (33 files)
-│   ├── halcon-runtime/      # DAG executor for parallel tool batches (21 files)
-│   ├── halcon-search/       # BM25 + PageRank search engine (35 files)
-│   ├── halcon-agent-core/   # GDEM experimental agent loop (26 files)
-│   ├── halcon-multimodal/   # image, audio, document processing (20 files)
-│   ├── halcon-api/          # axum REST + WebSocket control plane API (25 files)
-│   ├── halcon-auth/         # keychain, OAuth device flow, JWT
+│   ├── halcon-providers/    # AI adapters: Anthropic, OpenAI, Bedrock, Vertex, Azure, Ollama, DeepSeek, Gemini, ClaudeCode, compat
+│   ├── halcon-tools/        # 60+ tool implementations
+│   ├── halcon-mcp/          # MCP client + HTTP server, OAuth 2.1, tool search
+│   ├── halcon-context/      # 7-tier context engine, embeddings, vector store
+│   ├── halcon-storage/      # SQLite persistence, migrations, audit, mailbox, scheduler
+│   ├── halcon-runtime/      # DAG executor for parallel tool batches
+│   ├── halcon-search/       # BM25 + PageRank search engine
+│   ├── halcon-agent-core/   # GDEM experimental agent loop
+│   ├── halcon-multimodal/   # image, audio, document processing
+│   ├── halcon-api/          # axum REST + WebSocket + RBAC + admin analytics
+│   ├── halcon-auth/         # keychain, OAuth device flow, JWT, RBAC roles
 │   ├── halcon-security/     # guardrails, PII detection
 │   ├── halcon-files/        # file access controls, 12 format handlers
 │   ├── halcon-client/       # async typed HTTP + WebSocket SDK
@@ -802,6 +1053,7 @@ halcon-cli/
 │   └── halcon-integrations/ # plugin extensibility framework
 ├── halcon-vscode/           # VS Code extension — TypeScript, xterm.js, JSON-RPC
 ├── website/                 # Astro 5 + React 19 marketing site
+├── .github/actions/halcon/  # official GitHub Actions composite action
 ├── config/default.toml      # built-in defaults
 ├── docs/                    # documentation
 └── scripts/                 # install, release, test scripts
@@ -815,7 +1067,7 @@ halcon-cli/
 `halcon-core` is a strict boundary — zero I/O, zero async, zero network. All 32 domain modules compile with no infrastructure dependencies.
 
 ```
-halcon-cli / halcon-desktop / halcon-vscode (surfaces)
+halcon-cli / halcon-desktop / halcon-vscode / GitHub Actions (surfaces)
           ↓
 halcon-providers, halcon-tools, halcon-mcp, halcon-context, halcon-storage, halcon-api
           ↓
@@ -830,18 +1082,17 @@ halcon-core  (pure domain — types, traits, events, security patterns)
 ```
 crates/halcon-cli/src/repl/
 ├── agent/
-│   ├── mod.rs               # run_agent_loop() — 2,537 lines
+│   ├── mod.rs               # run_agent_loop()
 │   ├── loop_state.rs        # LoopState (62 fields)
-│   ├── context.rs           # AgentContext → 3 sub-structs
 │   ├── round_setup.rs       # per-round init, HALCON.md hot-reload
 │   ├── provider_round.rs    # LLM API call, retry, circuit breaker
 │   ├── post_batch.rs        # tool execution + FASE-2 gate
-│   ├── convergence_phase.rs # SynthesisGate → TerminationOracle → RoutingAdaptor
+│   ├── convergence_phase.rs # SynthesisGate (before) → TerminationOracle → RoutingAdaptor
 │   ├── result_assembly.rs   # output + auto-memory scoring
 │   └── checkpoint.rs        # session persistence + trace
 ├── decision_engine/
-│   ├── intent_pipeline.rs   # IntentPipeline::resolve()
-│   ├── routing_adaptor.rs   # 4-trigger escalation
+│   ├── intent_pipeline.rs   # IntentPipeline::resolve() — single source of effective_max_rounds
+│   ├── routing_adaptor.rs   # 4-trigger escalation (T1–T4)
 │   ├── policy_store.rs      # runtime SLA constants
 │   └── ...
 ├── domain/
@@ -851,8 +1102,9 @@ crates/halcon-cli/src/repl/
 │   └── ...
 ├── auto_memory/             # scorer, writer, injector
 ├── instruction_store/       # HALCON.md 4-scope loader + hot-reload
-├── hooks/                   # lifecycle hooks — shell + Rhai
+├── hooks/                   # lifecycle hooks — shell + Rhai (6 events)
 ├── agent_registry/          # sub-agent loader, validator, skills
+├── scheduler.rs             # AgentScheduler — cron-based background tasks
 └── vector_memory_source.rs  # VectorMemoryStore ContextSource
 ```
 
@@ -860,11 +1112,9 @@ crates/halcon-cli/src/repl/
 
 ### Platform integration roadmap
 
-The full proposal for expanding to 11 user surfaces, 6 cloud providers, CI/CD native integration, and Agent Network (Lead/Teammate roles, Mailbox P2P) is documented in:
+Full proposal for next-phase expansion (Voice/TTS, Slack bot, Chrome Native Messaging, GitLab CI, additional cloud providers):
 
 **[`docs/03-architecture/05-platform-integration-proposal.md`](docs/03-architecture/05-platform-integration-proposal.md)**
-
-Covers: AWS Bedrock · Vertex AI · Azure AI Foundry · GitHub Actions · GitLab CI · Slack bot · Voice/TTS · Chrome Native Messaging · Web App · Agent Teams REST API · 5-phase roadmap.
 
 ---
 
@@ -885,7 +1135,7 @@ cd halcon-vscode && npm ci && npm run build
 # Build website
 cd website && npm ci && npm run build
 
-# Test suite (4,300+ tests, ~2 min on M-series)
+# Test suite (3,100+ tests, ~2 min on M-series)
 cargo test --workspace --no-default-features
 
 # Lint
@@ -896,7 +1146,7 @@ cargo fmt --all -- --check
 **Commit format** ([Conventional Commits](https://www.conventionalcommits.org/)):
 `feat` · `fix` · `refactor` · `docs` · `test` · `chore` · `ci`
 
-**Branch strategy:** `feature/*` → PR → `main`. CI gates on Linux; macOS runs post-merge.
+**Branch strategy:** `feature/*` → PR → `main`. CI gates on Linux; macOS runs post-merge only (cost optimization).
 
 ---
 
