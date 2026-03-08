@@ -239,6 +239,11 @@ pub mod onboarding;
 // Pure domain types and algorithms — zero infrastructure dependencies.
 // Future extraction candidate: could become a standalone `halcon-domain` crate.
 pub mod domain;
+pub mod planning;
+pub mod context;
+pub mod git_tools;
+pub mod metrics;
+pub mod bridges;
 // Backward-compatible re-exports so all existing `super::X` import paths remain valid:
 pub use domain::intent_scorer;
 pub use domain::convergence_controller;
