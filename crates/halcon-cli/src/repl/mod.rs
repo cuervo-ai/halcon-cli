@@ -153,7 +153,7 @@ pub mod session_manager;
 pub mod planner;
 pub mod playbook_planner;
 pub mod planning_metrics;
-pub mod tool_manifest;
+// tool_manifest moved to plugins/tool_manifest (C-1)
 pub mod planning_source;
 pub mod provenance_tracker;
 mod prompt;
@@ -180,9 +180,7 @@ pub mod application;
 // Backward-compat re-export so `super::reasoning_engine::*` paths remain valid:
 pub use application::reasoning_engine;
 pub mod plan_coherence;
-pub mod capability_index;
-pub mod capability_orchestrator;
-pub mod capability_resolver;
+// capability_index/orchestrator/resolver moved to plugins/ (C-1)
 pub(crate) mod provider_normalization;
 pub mod plugins;
 pub mod reward_pipeline;
@@ -692,7 +690,7 @@ impl Repl {
         };
 
         // P1.2: Load external tools from ~/.halcon/tools/*.toml.
-        tool_manifest::load_external_tools_default(&mut tool_registry);
+        plugins::tool_manifest::load_external_tools_default(&mut tool_registry);
 
         // FASE 3.2: Initialize MCP resource manager (lazy discovery, safe fallback).
         let mcp_manager = if config.mcp.servers.is_empty() {

@@ -37,3 +37,15 @@ pub use circuit_breaker::{PluginCircuitBreaker, CircuitState};
 pub use cost_tracker::{PluginCostTracker, PluginCostSnapshot, PluginBudgetError};
 pub use recommendation::{PluginRecommendation, PluginRecommendationEngine, RecommendationTier};
 pub use auto_bootstrap::{AutoPluginBootstrap, BootstrapOptions, BootstrapResult};
+
+// C-1: capability files migrated from repl/ root
+pub mod capability_index;
+pub mod capability_orchestrator;
+pub mod capability_resolver;
+pub mod tool_manifest;
+
+// Re-exports for capability types
+pub use capability_index::CapabilityIndex;
+pub use capability_orchestrator::{CapabilityOrchestrationLayer, OrchestrationDecision, SuppressReason};
+pub use capability_resolver::{CapabilityResolver, CapabilitySource, ResolvedCapability};
+pub use tool_manifest::{ToolManifest, ExternalTool, load_external_tools_default};
