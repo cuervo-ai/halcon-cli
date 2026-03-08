@@ -558,6 +558,29 @@ enum AuditAction {
         #[arg(long)]
         db: Option<std::path::PathBuf>,
     },
+
+    /// Generate a compliance report (SOC 2 / FedRAMP / ISO 27001)
+    Compliance {
+        /// Compliance framework: soc2, fedramp, or iso27001
+        #[arg(long, short = 'f', default_value = "soc2")]
+        format: String,
+
+        /// Output file path (default: halcon-compliance-<format>-<date>.pdf)
+        #[arg(long, short = 'o')]
+        output: Option<std::path::PathBuf>,
+
+        /// Start of reporting period (YYYY-MM-DD, default: 30 days ago)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End of reporting period (YYYY-MM-DD, default: today)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Override database path (default: ~/.halcon/halcon.db)
+        #[arg(long)]
+        db: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -913,6 +936,9 @@ async fn main() -> Result<()> {
             ),
             AuditAction::List { json, db } => commands::audit::list(db, json),
             AuditAction::Verify { session_id, db } => commands::audit::verify(&session_id, db),
+            AuditAction::Compliance { format, output, from, to, db } => {
+                commands::audit::compliance(&format, output, from, to, db)
+            }
         },
         Some(Commands::Users { action }) => match action {
             UsersAction::Add { email, role } => commands::users::add(&email, &role),

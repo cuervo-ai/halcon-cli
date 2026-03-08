@@ -18,6 +18,7 @@
 //!   mod.rs             — AuditExporter public façade
 //! ```
 
+pub mod compliance;
 pub mod events;
 pub mod export_csv;
 pub mod export_jsonl;
