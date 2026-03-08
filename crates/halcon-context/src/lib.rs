@@ -19,8 +19,10 @@ pub mod instruction_cache;
 pub mod pipeline;
 pub mod segment;
 pub mod repo_map;
+pub mod embedding;
 pub mod semantic_store;
 pub mod sliding_window;
+pub mod vector_store;
 
 pub use assembler::{assemble_context, chunks_to_system_prompt, estimate_tokens};
 pub use instruction::{find_instruction_files, load_instructions};
@@ -37,7 +39,9 @@ pub use instruction_cache::InstructionCache;
 pub use pipeline::{ContextPipeline, ContextPipelineConfig};
 pub use segment::{extract_segment_from_message, ContextSegment};
 pub use repo_map::{RepoMap, build_repo_map};
+pub use embedding::{cosine_sim, EmbeddingEngine, TfIdfHashEngine, DIMS};
 pub use semantic_store::SemanticStore;
+pub use vector_store::{MemoryEntry, SearchResult, VectorMemoryStore};
 pub use sliding_window::SlidingWindow;
 
 pub fn version() -> &'static str {
