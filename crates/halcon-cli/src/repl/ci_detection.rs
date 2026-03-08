@@ -8,6 +8,52 @@ use crate::repl::authorization::{AuthorizationPolicy, AuthorizationState};
 use halcon_core::types::{PermissionDecision, PermissionLevel, ToolInput};
 use std::env;
 
+/// Result of CI environment detection.
+#[derive(Debug, Clone)]
+pub struct CiEnvironment {
+    /// Whether a CI environment was detected.
+    pub is_ci: bool,
+    /// The specific CI variable that triggered detection (for logging).
+    pub detected_via: Option<String>,
+}
+
+/// Detect the current CI environment.
+///
+/// Checks both generic `CI=true` and platform-specific variables.
+/// Returns a `CiEnvironment` with `is_ci = true` if any CI indicator is found.
+///
+/// This is the standalone detect function for session initialization, separate
+/// from the `CIDetectionPolicy` (which is used in the authorization chain).
+pub fn detect() -> CiEnvironment {
+    // Generic CI indicator
+    if env::var("CI").is_ok_and(|v| v == "true" || v == "1") {
+        return CiEnvironment { is_ci: true, detected_via: Some("CI".to_string()) };
+    }
+
+    // Platform-specific CI variables
+    const CI_VARS: &[&str] = &[
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CIRCLECI",
+        "JENKINS_HOME",
+        "TRAVIS",
+        "BUILDKITE",
+        "DRONE",
+        "TEAMCITY_VERSION",
+        "CIRRUS_CI",
+        "SEMAPHORE",
+        "CODEBUILD_BUILD_ID",
+    ];
+
+    for &var in CI_VARS {
+        if env::var(var).is_ok() {
+            return CiEnvironment { is_ci: true, detected_via: Some(var.to_string()) };
+        }
+    }
+
+    CiEnvironment { is_ci: false, detected_via: None }
+}
+
 /// Auto-approves all tools when running in a CI environment.
 ///
 /// Detects CI by checking standard environment variables:
@@ -107,6 +153,37 @@ impl AuthorizationPolicy for CIDetectionPolicy {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn detect_returns_is_ci_true_for_github_actions() {
+        std::env::set_var("GITHUB_ACTIONS", "true");
+        let env = detect();
+        assert!(env.is_ci);
+        assert_eq!(env.detected_via.as_deref(), Some("GITHUB_ACTIONS"));
+        std::env::remove_var("GITHUB_ACTIONS");
+    }
+
+    #[test]
+    #[serial]
+    fn detect_returns_is_ci_false_when_no_ci_vars() {
+        for var in &["CI", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "JENKINS_HOME"] {
+            std::env::remove_var(var);
+        }
+        let env = detect();
+        assert!(!env.is_ci);
+        assert!(env.detected_via.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn detect_returns_generic_ci_var() {
+        std::env::set_var("CI", "true");
+        let env = detect();
+        assert!(env.is_ci);
+        assert_eq!(env.detected_via.as_deref(), Some("CI"));
+        std::env::remove_var("CI");
+    }
 
     fn dummy_input(args: serde_json::Value) -> ToolInput {
         ToolInput {

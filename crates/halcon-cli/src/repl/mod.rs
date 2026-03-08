@@ -603,12 +603,24 @@ impl Repl {
         let session =
             resume_session.unwrap_or_else(|| Session::new(model.clone(), provider.clone(), cwd));
 
-        let permissions = ConversationalPermissionHandler::with_config(
+        let mut permissions = ConversationalPermissionHandler::with_config(
             config.tools.confirm_destructive,
             config.security.tbac_enabled,
             config.tools.auto_approve_in_ci,
             config.tools.prompt_timeout_secs,
         );
+
+        // FASE 3-A: Detect CI environment at session init and set non-interactive mode.
+        // CIDetectionPolicy handles tool auto-approval in the authorization chain, but
+        // set_non_interactive() additionally disables TTY permission prompts that would
+        // otherwise hang indefinitely in headless CI environments.
+        let ci_env = ci_detection::detect();
+        if ci_env.is_ci {
+            if let Some(ref var) = ci_env.detected_via {
+                tracing::info!(ci_var = %var, "CI environment detected at session init — setting non-interactive mode");
+            }
+            permissions.set_non_interactive();
+        }
 
         // Build async database wrapper (for async call sites).
         let async_db = db.as_ref().map(|db_ref| AsyncDatabase::new(Arc::clone(db_ref)));

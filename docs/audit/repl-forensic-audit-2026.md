@@ -720,3 +720,48 @@ Semana 4 (2026-03-30 a 2026-04-03)
 ---
 
 *Audit generado el 2026-03-08. Basado en análisis estático de grep + read de 233 archivos en repl/. No incluye análisis de performance o profiling.*
+
+---
+
+## ADDENDUM-1 — authorization.rs es ACTIVO (encontrado en STEP 1-B, 2026-03-08)
+
+**Finding**: El audit original clasificó `authorization.rs` como sistema paralelo muerto. Esto es INCORRECTO.
+
+**Evidencia corregida**:
+- `permissions.rs:3`: `use super::authorization::AuthorizationMiddleware;` — uso activo
+- `permissions.rs:20`: campo `middleware: AuthorizationMiddleware` — instanciado en cada sesión
+- `permissions.rs:75`: `AuthorizationMiddleware::new(confirm_destructive, auto_approve_in_ci, prompt_timeout_secs)` — llamado en constructor
+- `permission_lifecycle.rs:215`: `crate::repl::authorization::AuthorizationState::new(true)` — uso activo
+- `rule_matcher.rs:9`: `use crate::repl::authorization::AuthorizationState;` — uso activo
+- `ci_detection.rs:7`: `use crate::repl::authorization::{AuthorizationPolicy, AuthorizationState};` — uso activo
+
+**Arquitectura real**: `authorization.rs` (1,063 LOC) es la implementación base; `permissions.rs` es la fachada que executor.rs usa via `permissions.authorize()`. Son dos capas de una misma pipeline, no dos sistemas paralelos.
+
+**Corrección en tabla maestra**: authorization.rs → Status: COMPLETE, Acción: KEEP (no DELETE).
+**STEP 1-B**: SKIPPED — authorization.rs está activo y wired correctamente.
+
+---
+
+## ADDENDUM-1: FASE 2 — std::sync::Mutex audit result (2026-03-08)
+
+**Finding**: The FASE 2 plan assumed `model_selector.rs`, `idempotency.rs`, `response_cache.rs`, `schema_validator.rs`, and `permission_lifecycle.rs` were incorrectly using `std::sync::Mutex` in async contexts (Tokio thread starvation risk).
+
+**Actual audit result**: All five files are correctly implemented per Tokio documentation:
+
+- **`model_selector.rs`**: Three `std::sync::Mutex` fields (`live_latency_overrides`, `quality_stats`, `selection_history`). All `.lock()` calls are in synchronous methods (`record_observed_latency`, `record_outcome`, `select_model`, etc.). None of these methods are `async`. While they ARE called from async callers (e.g., `provider_round::run`), the lock is held only for brief, synchronous operations with no `.await` inside the critical section. Per [Tokio docs](https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html): "If the mutex is not held across an await point, `std::sync::Mutex` should be preferred". This is the correct pattern.
+
+- **`idempotency.rs`**: `Mutex<HashMap>` — only synchronous methods (`lookup`, `record`, `len`). No async functions. Correct.
+
+- **`response_cache.rs`**: `Mutex<LruCache>` — L1 cache lock is acquired in scoped `{}` blocks that drop BEFORE any `.await` call (lines 88-108 and 202-205). This is the correct pattern and was previously noted as COUPLING-001 fix.
+
+- **`schema_validator.rs`**: `static std::sync::LazyLock<Mutex<HashSet>>` — a process-global static. Synchronous functions only. The correct choice for a global static.
+
+- **`permission_lifecycle.rs`**: Contains comment "COUPLING-001 fix: release the std::sync::Mutex BEFORE calling load_rules().await" — already fixed to not hold lock across await.
+
+**Also noted**: `apply_diversity_guard` in `model_selector.rs` acquires `selection_history.lock()` then calls `self.avg_reward_for()` which acquires `quality_stats.lock()`. While this is a nested lock pattern (potential deadlock risk if order is reversed elsewhere), the two locks are always acquired in the same order in this codebase, avoiding deadlock. This is a minor code smell but not a runtime bug.
+
+**Decision**: FASE 2-A and FASE 2-B migrations are **SKIPPED** — the existing code is correct per Tokio guidelines. Migrating to `tokio::sync::Mutex` would require making all methods async (cascading API change) with no safety benefit since no lock is held across an await point.
+
+**FASE 3-A status**: `ci_detection.rs` is NOT unwired as the plan assumed. It IS wired via `authorization.rs:240` as `CIDetectionPolicy::new(auto_approve_in_ci)`. The gap is that it does not additionally call `set_non_interactive()` when CI is detected. FASE 3-A will add a `detect()` function and wire it into session initialization to also set non-interactive mode.
+
+**FASE 3-B**: Pending analysis.
