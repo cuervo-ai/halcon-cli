@@ -178,14 +178,7 @@ pub mod capability_index;
 pub mod capability_orchestrator;
 pub mod capability_resolver;
 pub(crate) mod provider_normalization;
-pub mod plugin_circuit_breaker;
-pub mod plugin_cost_tracker;
-pub mod plugin_manifest;
-pub mod plugin_permission_gate;
-pub mod plugin_registry;
-pub mod plugin_loader;
-pub mod plugin_transport_runtime;
-pub mod plugin_proxy_tool;
+pub mod plugins;
 pub mod reward_pipeline;
 pub mod round_scorer;
 pub mod supervisor;
@@ -233,9 +226,7 @@ pub mod early_convergence;
 pub mod project_inspector;
 pub mod onboarding;
 
-// Phase 95 — Plugin Auto-Implantation & Suggestion
-pub mod plugin_recommendation;
-pub mod plugin_auto_bootstrap;
+// Phase 95 — Plugin Auto-Implantation & Suggestion (now in plugins/ subdir)
 
 // === DOMAIN LAYER ===
 // Pure domain types and algorithms — zero infrastructure dependencies.
@@ -343,10 +334,10 @@ pub struct Repl {
     /// Plugin registry for V3 plugin system. None until plugins are configured.
     /// Wrapped in Arc<Mutex<>> so it can be shared safely with the parallel executor.
     /// Initialized as None in Repl::new() — activated when plugins are loaded.
-    pub(crate) plugin_registry: Option<std::sync::Arc<std::sync::Mutex<plugin_registry::PluginRegistry>>>,
+    pub(crate) plugin_registry: Option<std::sync::Arc<std::sync::Mutex<plugins::PluginRegistry>>>,
     /// Transport runtime for V3 plugins (shared handle pool for Stdio/HTTP/Local plugins).
     /// None until plugins are lazy-initialized on first message with config.plugins.enabled.
-    pub(crate) plugin_transport_runtime: Option<std::sync::Arc<plugin_transport_runtime::PluginTransportRuntime>>,
+    pub(crate) plugin_transport_runtime: Option<std::sync::Arc<plugins::PluginTransportRuntime>>,
     /// Whether plugin UCB1 metrics have been loaded from DB this session (load-once guard).
     pub(crate) plugin_metrics_db_loaded: bool,
     /// Phase 5 Dev Ecosystem: DevGateway coordinates IDE buffers, git context, and CI
@@ -1059,8 +1050,8 @@ impl Repl {
                                                 let loaded: std::collections::HashSet<String> = reg.loaded_plugin_ids().map(|s| s.to_string()).collect();
                                                 let rewards = reg.ucb1_rewards_snapshot();
                                                 drop(reg);
-                                                let recs = plugin_recommendation::PluginRecommendationEngine::recommend(&analysis, &loaded, &rewards);
-                                                println!("{}", plugin_recommendation::PluginRecommendationEngine::format_report(&recs));
+                                                let recs = plugins::PluginRecommendationEngine::recommend(&analysis, &loaded, &rewards);
+                                                println!("{}", plugins::PluginRecommendationEngine::format_report(&recs));
                                             }
                                         } else {
                                             println!("[plugins] Plugin system not active. Use --full to enable.");
@@ -1328,7 +1319,7 @@ impl Repl {
                                 reg.loaded_plugin_ids().map(|s| s.to_string()).collect();
                             let rewards = reg.ucb1_rewards_snapshot();
                             drop(reg);
-                            let recs = plugin_recommendation::PluginRecommendationEngine::recommend(
+                            let recs = plugins::PluginRecommendationEngine::recommend(
                                 &analysis, &loaded, &rewards,
                             );
                             let total_new =
@@ -1338,7 +1329,7 @@ impl Repl {
                                 .filter(|r| {
                                     !r.already_installed
                                         && r.tier
-                                            == plugin_recommendation::RecommendationTier::Essential
+                                            == plugins::RecommendationTier::Essential
                                 })
                                 .count();
                             if total_new > 0 {
@@ -1756,7 +1747,7 @@ impl Repl {
                                     } else {
                                         Default::default()
                                     };
-                                    let recs = plugin_recommendation::PluginRecommendationEngine::recommend(&analysis, &loaded, &rewards);
+                                    let recs = plugins::PluginRecommendationEngine::recommend(&analysis, &loaded, &rewards);
                                     let suggestions: Vec<crate::tui::events::PluginSuggestionItem> = recs.iter().map(|r| {
                                         crate::tui::events::PluginSuggestionItem {
                                             plugin_id: r.plugin_id.clone(),
@@ -1791,18 +1782,18 @@ impl Repl {
                                     } else {
                                         Default::default()
                                     };
-                                    let recs = plugin_recommendation::PluginRecommendationEngine::recommend(&analysis, &loaded, &rewards);
+                                    let recs = plugins::PluginRecommendationEngine::recommend(&analysis, &loaded, &rewards);
                                     let count = recs.iter().filter(|r| !r.already_installed).count();
                                     let _ = ui_tx2.send(UiEvent::PluginBootstrapStarted { count, dry_run });
-                                    let opts = plugin_auto_bootstrap::BootstrapOptions {
+                                    let opts = plugins::BootstrapOptions {
                                         dry_run,
                                         ..Default::default()
                                     };
                                     let result = tokio::task::spawn_blocking(move || {
-                                        plugin_auto_bootstrap::AutoPluginBootstrap::bootstrap(&recs, &opts)
+                                        plugins::AutoPluginBootstrap::bootstrap(&recs, &opts)
                                     })
                                     .await
-                                    .unwrap_or(plugin_auto_bootstrap::BootstrapResult {
+                                    .unwrap_or(plugins::BootstrapResult {
                                         installed: vec![],
                                         skipped: vec![],
                                         failed: vec![("unknown".into(), "spawn error".into())],
@@ -2107,7 +2098,7 @@ impl Repl {
                         reg.loaded_plugin_ids().map(|s| s.to_string()).collect();
                     let rewards = reg.ucb1_rewards_snapshot();
                     drop(reg); // release lock before calling sink
-                    let recs = plugin_recommendation::PluginRecommendationEngine::recommend(
+                    let recs = plugins::PluginRecommendationEngine::recommend(
                         &analysis,
                         &loaded,
                         &rewards,
@@ -2118,7 +2109,7 @@ impl Repl {
                         .filter(|r| {
                             !r.already_installed
                                 && r.tier
-                                    == plugin_recommendation::RecommendationTier::Essential
+                                    == plugins::RecommendationTier::Essential
                         })
                         .count();
                     if total_new > 0 {
@@ -2584,12 +2575,12 @@ impl Repl {
                     // P9: Honour config.plugins.plugin_dir override; fall back to default
                     // ~/.halcon/plugins/ when not set.
                     let loader = if let Some(ref dir) = self.config.plugins.plugin_dir {
-                        plugin_loader::PluginLoader::new(vec![std::path::PathBuf::from(dir)])
+                        plugins::PluginLoader::new(vec![std::path::PathBuf::from(dir)])
                     } else {
-                        plugin_loader::PluginLoader::default()
+                        plugins::PluginLoader::default()
                     };
-                    let mut runtime = plugin_transport_runtime::PluginTransportRuntime::new();
-                    let mut registry = plugin_registry::PluginRegistry::new();
+                    let mut runtime = plugins::PluginTransportRuntime::new();
+                    let mut registry = plugins::PluginRegistry::new();
                     let load_result = loader.load_into(&mut registry, &mut runtime);
                     if load_result.loaded > 0 {
                         tracing::info!(
@@ -2614,7 +2605,7 @@ impl Repl {
                                 30_000
                             };
                             for cap in &manifest.capabilities {
-                                let proxy = plugin_proxy_tool::PluginProxyTool::new(
+                                let proxy = plugins::PluginProxyTool::new(
                                     cap.name.clone(),
                                     plugin_id.to_string(),
                                     cap.clone(),

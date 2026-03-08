@@ -7,7 +7,7 @@
 //! 4. Whether the cost budget is exhausted
 
 use std::collections::HashMap;
-use super::plugin_manifest::{RiskTier, ToolCapabilityDescriptor};
+use super::manifest::{RiskTier, ToolCapabilityDescriptor};
 
 // ─── Decision ─────────────────────────────────────────────────────────────────
 

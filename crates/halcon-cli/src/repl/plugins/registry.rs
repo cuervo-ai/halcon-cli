@@ -13,12 +13,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::capability_index::CapabilityIndex;
-use super::capability_resolver::CapabilityResolver;
-use super::plugin_circuit_breaker::PluginCircuitBreaker;
-use super::plugin_cost_tracker::{PluginCostSnapshot, PluginCostTracker};
-use super::plugin_manifest::{PluginManifest, RiskTier};
-use super::plugin_permission_gate::{PluginPermissionDecision, PluginPermissionGate};
+use super::super::capability_index::CapabilityIndex;
+use super::super::capability_resolver::CapabilityResolver;
+use super::circuit_breaker::PluginCircuitBreaker;
+use super::cost_tracker::{PluginCostSnapshot, PluginCostTracker};
+use super::manifest::{PluginManifest, RiskTier};
+use super::permission_gate::{PluginPermissionDecision, PluginPermissionGate};
 
 // ─── UCB1 Arm ─────────────────────────────────────────────────────────────────
 
@@ -563,7 +563,7 @@ impl Default for PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::plugin_manifest::{PluginManifest, ToolCapabilityDescriptor};
+    use super::super::manifest::{PluginManifest, ToolCapabilityDescriptor};
 
     fn make_manifest(id: &str) -> PluginManifest {
         PluginManifest::new_local(id, id, "1.0.0", vec![
@@ -877,8 +877,8 @@ mod tests {
     #[tokio::test]
     async fn proxy_tool_registered_in_tool_registry_is_callable() {
         use std::sync::Arc;
-        use crate::repl::plugin_transport_runtime::{PluginTransportRuntime, TransportHandle};
-        use crate::repl::plugin_proxy_tool::PluginProxyTool;
+        use crate::repl::plugins::transport::{PluginTransportRuntime, TransportHandle};
+        use crate::repl::plugins::proxy_tool::PluginProxyTool;
         use halcon_tools::ToolRegistry;
         use halcon_core::types::ToolInput;
 

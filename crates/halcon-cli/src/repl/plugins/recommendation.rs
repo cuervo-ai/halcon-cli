@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::project_inspector::ProjectAnalysis;
+use super::super::project_inspector::ProjectAnalysis;
 
 // ─── Recommendation Tier ─────────────────────────────────────────────────────
 

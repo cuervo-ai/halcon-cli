@@ -11,8 +11,8 @@ use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::Tool;
 use halcon_core::types::{PermissionLevel, ToolInput, ToolOutput};
 
-use super::plugin_manifest::ToolCapabilityDescriptor;
-use super::plugin_transport_runtime::PluginTransportRuntime;
+use super::manifest::ToolCapabilityDescriptor;
+use super::transport::PluginTransportRuntime;
 
 // ─── Proxy Tool ───────────────────────────────────────────────────────────────
 
@@ -110,8 +110,8 @@ impl Tool for PluginProxyTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::plugin_manifest::{RiskTier, ToolCapabilityDescriptor};
-    use crate::repl::plugin_transport_runtime::{PluginTransportRuntime, TransportHandle};
+    use crate::repl::plugins::manifest::{RiskTier, ToolCapabilityDescriptor};
+    use crate::repl::plugins::transport::{PluginTransportRuntime, TransportHandle};
 
     fn make_runtime(plugin_id: &str) -> Arc<PluginTransportRuntime> {
         let mut rt = PluginTransportRuntime::new();

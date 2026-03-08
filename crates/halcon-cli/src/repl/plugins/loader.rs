@@ -10,9 +10,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::plugin_manifest::{PluginManifest, PluginTransport};
-use super::plugin_registry::PluginRegistry;
-use super::plugin_transport_runtime::{PluginTransportRuntime, TransportHandle};
+use super::manifest::{PluginManifest, PluginTransport};
+use super::registry::PluginRegistry;
+use super::transport::{PluginTransportRuntime, TransportHandle};
 
 // ─── Result ───────────────────────────────────────────────────────────────────
 
@@ -300,7 +300,7 @@ fn validate_stdio_command(command: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::plugin_manifest::{
+    use crate::repl::plugins::manifest::{
         PluginCategory, PluginMeta, PluginPermissions, RiskTier, SandboxContract,
         SupervisorPolicy, ToolCapabilityDescriptor,
     };

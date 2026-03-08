@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use super::plugin_recommendation::{PluginRecommendation, RecommendationTier};
+use super::recommendation::{PluginRecommendation, RecommendationTier};
 
 // ─── Bootstrap Options ────────────────────────────────────────────────────────
 
@@ -175,7 +175,7 @@ impl AutoPluginBootstrap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::plugin_recommendation::{PluginRecommendation, RecommendationTier};
+    use crate::repl::plugins::recommendation::{PluginRecommendation, RecommendationTier};
     use std::collections::HashSet;
 
     fn make_rec(id: &str, tier: RecommendationTier, installed: bool) -> PluginRecommendation {
