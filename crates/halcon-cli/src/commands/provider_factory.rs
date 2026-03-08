@@ -143,6 +143,44 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
         }
     }
 
+    // DECISION: Bedrock is activated when CLAUDE_CODE_USE_BEDROCK=1 is set,
+    // matching the Claude Code SDK convention for Bedrock usage.
+    // This allows users to switch providers by changing a single env var.
+    // See US-bedrock (PASO 2-B).
+    #[cfg(feature = "bedrock")]
+    if std::env::var("CLAUDE_CODE_USE_BEDROCK").is_ok() {
+        if let Some(provider) = halcon_providers::BedrockProvider::from_env() {
+            registry.register(provider);
+            tracing::info!("Registered Bedrock provider (CLAUDE_CODE_USE_BEDROCK is set)");
+        } else {
+            tracing::warn!("CLAUDE_CODE_USE_BEDROCK is set but AWS credentials are missing (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)");
+        }
+    }
+
+    // DECISION: Vertex is activated when CLAUDE_CODE_USE_VERTEX=1 is set,
+    // matching the Claude Code SDK convention for Vertex usage.
+    // See US-vertex (PASO 2-C).
+    #[cfg(feature = "vertex")]
+    if std::env::var("CLAUDE_CODE_USE_VERTEX").is_ok() {
+        if let Some(provider) = halcon_providers::VertexProvider::from_env() {
+            registry.register(Arc::new(provider));
+            tracing::info!("Registered Vertex AI provider (CLAUDE_CODE_USE_VERTEX is set)");
+        } else {
+            tracing::warn!("CLAUDE_CODE_USE_VERTEX is set but ANTHROPIC_VERTEX_PROJECT_ID is missing");
+        }
+    }
+
+    // DECISION: Azure is activated when CLAUDE_CODE_USE_AZURE=1 is set.
+    // See US-foundry (PASO 2-D).
+    if std::env::var("CLAUDE_CODE_USE_AZURE").is_ok() {
+        if let Some(provider) = halcon_providers::AzureFoundryProvider::from_env() {
+            registry.register(Arc::new(provider));
+            tracing::info!("Registered Azure AI Foundry provider (CLAUDE_CODE_USE_AZURE is set)");
+        } else {
+            tracing::warn!("CLAUDE_CODE_USE_AZURE is set but AZURE_AI_ENDPOINT is missing");
+        }
+    }
+
     // P0.3: Load dynamic providers from ~/.halcon/providers.d/*.toml
     if let Some(providers_dir) = dirs::home_dir()
         .map(|h| h.join(".halcon").join("providers.d"))

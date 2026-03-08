@@ -105,6 +105,10 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 
+# Cloud provider auth (Bedrock + Vertex) — optional in consuming crates
+aws-sigv4 = { version = "1" }
+gcp_auth = { package = "gcp_auth", version = "0.12" }
+
 # Compliance export (Feature 8)
 printpdf = "0.7"
 

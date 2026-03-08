@@ -623,6 +623,35 @@ impl ModelProvider for AnthropicProvider {
     }
 }
 
+// --- Public helpers for cross-provider reuse (Bedrock, Vertex) ---
+// These wrappers expose private methods so Bedrock/Vertex can reuse
+// the Anthropic request format without duplicating serialization logic.
+impl AnthropicProvider {
+    /// Public wrapper for `build_api_request` — used by BedrockProvider.
+    pub fn build_api_request_pub(request: &ModelRequest) -> ApiRequest {
+        Self::build_api_request(request)
+    }
+
+    /// Public wrapper for `map_sse_event` — used by BedrockProvider.
+    pub fn map_sse_event_pub(event: &SseEvent) -> Vec<ModelChunk> {
+        Self::map_sse_event(event)
+    }
+
+    /// Public cost estimation without self — used by BedrockProvider.
+    pub fn estimate_cost_pub(request: &ModelRequest) -> TokenCost {
+        let input_chars: usize = request
+            .messages
+            .iter()
+            .map(|m| message_to_text(m).len())
+            .sum();
+        let estimated_tokens = (input_chars / 4) as u32;
+        TokenCost {
+            estimated_input_tokens: estimated_tokens,
+            estimated_cost_usd: estimated_tokens as f64 * (3.0 / 1_000_000.0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
