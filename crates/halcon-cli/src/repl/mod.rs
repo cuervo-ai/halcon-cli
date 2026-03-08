@@ -28,7 +28,8 @@ use response_cache::ResponseCache;
 pub mod agent;
 
 // Agent support types and utilities — part of the agent orchestration layer.
-pub mod agent_comm;
+// agent_comm moved to bridges/ (C-7)
+pub use bridges::agent_comm;
 pub mod agent_task_manager;
 pub mod agent_types;
 pub mod agent_utils;
@@ -49,7 +50,8 @@ pub(crate) use security::subagent_contract as subagent_contract_validator;
 /// Provides `CliToolRuntime` — a `HalconRuntime` pre-populated with `LocalToolAgent`
 /// wrappers for every `ToolRegistry` entry. Parallel tool batches become single-wave
 /// `TaskDAG`s, executed concurrently via `RuntimeExecutor`.
-pub(crate) mod runtime_bridge;
+// runtime_bridge moved to bridges/runtime (C-7)
+pub(crate) use bridges::runtime as runtime_bridge;
 /// Multi-agent wave orchestration — parallel task scheduling with dependency resolution.
 pub mod orchestrator;
 // orchestrator_metrics moved to metrics/ (C-6)
@@ -118,7 +120,8 @@ pub mod failure_tracker;
 pub use metrics::health;
 pub mod idempotency;
 pub mod integration_decision;
-pub mod mcp_manager;
+// mcp_manager moved to bridges/ (C-7)
+pub(crate) use bridges::mcp_manager;
 pub use metrics::store as metrics_store;
 pub mod model_selector;
 pub mod optimizer;
@@ -182,7 +185,8 @@ pub use servers::support as support_server;
 pub use git_tools::sdlc_phase as sdlc_phase_detector;
 pub mod replay_executor;
 pub mod replay_runner;
-pub mod search_engine_global;
+// search_engine_global moved to bridges/ (C-7)
+pub use bridges::search as search_engine_global;
 pub mod self_corrector;
 pub mod speculative;
 // evaluator moved to metrics/ (C-6)
@@ -203,7 +207,8 @@ pub use metrics::scorer as round_scorer;
 pub mod supervisor;
 pub use metrics::strategy as strategy_metrics;
 pub mod task_backlog;
-pub mod task_bridge;
+// task_bridge moved to bridges/ (C-7)
+pub(crate) use bridges::task as task_bridge;
 pub mod task_scheduler;
 // schema_validator moved to security/ (C-2)
 pub mod tool_selector;
@@ -229,7 +234,8 @@ pub use git_tools::ci_ingestor as ci_result_ingestor;
 // Phase 5 — IDE Protocol Handler
 pub use git_tools::unsaved_buffer as unsaved_buffer_tracker;
 pub use git_tools::ide_protocol as ide_protocol_handler;
-pub mod dev_gateway;
+// dev_gateway moved to bridges/ (C-7)
+pub use bridges::dev_gateway;
 // Phase 6 — AST Symbol Extractor (feature-gated ast-symbols; regex backend compiles always)
 // ast_symbol_extractor moved to git_tools/ (C-5)
 pub use git_tools::ast_symbols as ast_symbol_extractor;
