@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 halcon-core = { workspace = true }
+halcon-context = { workspace = true }
 halcon-files = { workspace = true }
 halcon-storage = { workspace = true }
 halcon-search = { path = "../halcon-search" }

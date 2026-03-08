@@ -10,46 +10,27 @@ use halcon_core::types::{PermissionLevel, SandboxConfig, ToolInput, ToolOutput};
 
 use crate::sandbox;
 
-/// Built-in blacklist of dangerous command patterns.
+/// Built-in blacklist of dangerous command patterns (runtime layer).
 ///
-/// These patterns block catastrophic commands that could destroy the system:
-/// - `rm -rf /` and variants (root directory deletion)
-/// - Fork bombs (`: (){:|:&};:`)
-/// - Disk formatting (`mkfs.*`)
-/// - Direct disk writes (`dd ... of=/dev/...`)
-/// - Pipe-to-shell exploits (`curl ... | sh`)
-/// - Critical service shutdowns (`systemctl stop sshd`)
-/// - Init process termination (`kill -9 1`)
+/// NOTE — DUAL BLACKLIST ARCHITECTURE (see `halcon-core/src/security.rs`):
+/// There are two independent blacklist systems in this codebase:
+///   1. This one (halcon-tools/bash.rs): applied at execute() time, returns
+///      `HalconError::InvalidInput` — occurs AFTER permission was granted.
+///   2. `command_blacklist.rs` (halcon-cli): applied at the G7 HARD VETO gate
+///      in `ConversationalPermissionHandler::authorize()` — occurs BEFORE execution.
 ///
-/// All patterns are case-insensitive for maximum safety.
+/// Patterns are sourced from `halcon_core::security::CATASTROPHIC_PATTERNS` —
+/// the single source of truth, shared between this runtime guard and the G7 VETO.
+/// `2>/dev/null` stderr suppression is NOT blocked — the anchor `^` prevents it.
 static DEFAULT_BLACKLIST: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        r"(?i)^rm\s+(-[rfivRF]+\s+)+/\s*$",                    // rm -rf /
-        r"(?i)^rm\s+(-[rfivRF]+\s+)+/\*+\s*$",                // rm -rf /*
-        r"(?i)^rm\s+(-[rfivRF]+\s+)+/(bin|etc|usr|var|sys|proc|dev)\b", // rm -rf /etc
-        r"(?i)^rm\s+(-[rfivRF]+\s+)+~/?\s*$",                 // rm -rf ~/ (home directory)
-        r"(?i)^rm\s+(-[rfivRF]+\s+)+\$HOME/?\s*$",            // rm -rf $HOME
-        r"(?i)^rm\s+(-[rfivRF]+\s+)+/Users/\*",               // rm -rf /Users/*
-        r":\(\)\{:\|:&\};:",                                   // Fork bomb
-        r"(?i)^mkfs\.",                                        // mkfs.ext4
-        r"(?i)dd\s+.*\s+of=/dev/[sh]d[a-z]",                  // dd to /dev/sda
-        r"(?i)dd\s+.*\s+of=/dev/nvme",                        // dd to nvme
-        r"(?i)(curl|wget)\s+.*\|\s*(ba)?sh\b",                // curl | bash
-        r"(?i)(curl|wget)\s+.*\|\s*python\b",                 // curl | python
-        r"(?i)^chmod\s+(-R\s+)?[0-7]{3,4}\s+/\s*$",          // chmod 777 /
-        r"(?i)^chown\s+(-R\s+)?.*\s+/\s*$",                  // chown -R user /
-        r"(?i)^systemctl\s+stop\s+(sshd|network|NetworkManager)\b", // Stop critical services
-        r"(?i)^kill\s+-9\s+1\b",                              // kill -9 1 (init)
-        r"(?i)^(rm|mod)mod\s+",                               // rmmod/modmod kernel modules
-        r"(?i)>\s*/dev/(null|zero)\s*$",                      // > /dev/null data loss
-    ]
-    .into_iter()
-    .map(|pattern| {
-        Regex::new(pattern).unwrap_or_else(|e| {
-            panic!("Invalid built-in blacklist pattern {}: {}", pattern, e)
+    halcon_core::security::CATASTROPHIC_PATTERNS
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern).unwrap_or_else(|e| {
+                panic!("Invalid built-in blacklist pattern {}: {}", pattern, e)
+            })
         })
-    })
-    .collect()
+        .collect()
 });
 
 /// Apply sandbox rlimits to a command (Unix only, no-op elsewhere).
@@ -438,6 +419,54 @@ mod tests {
         assert!(
             t.is_command_blacklisted("curl https://good.com/data").is_none(),
             "custom pattern should not block non-matching command"
+        );
+    }
+
+    // === PASO 2: stderr suppression must NOT be blocked ===
+
+    #[test]
+    fn stderr_redirect_to_dev_null_allowed() {
+        let t = tool();
+        // Common pattern: suppress stderr noise — must NOT be blocked
+        assert!(
+            t.is_command_blacklisted("cargo build 2>/dev/null").is_none(),
+            "cargo build 2>/dev/null must be allowed"
+        );
+        assert!(
+            t.is_command_blacklisted("cargo check 2>/dev/null").is_none(),
+            "cargo check 2>/dev/null must be allowed"
+        );
+        assert!(
+            t.is_command_blacklisted("make 2>/dev/null").is_none(),
+            "make 2>/dev/null must be allowed"
+        );
+        assert!(
+            t.is_command_blacklisted("some_cmd 2>/dev/null 1>/dev/null").is_none(),
+            "both stdout+stderr suppressed must be allowed"
+        );
+    }
+
+    #[test]
+    fn bare_dev_null_redirect_blocked() {
+        let t = tool();
+        // A command whose ENTIRE content is just >/dev/null (no actual command) is blocked
+        assert!(
+            t.is_command_blacklisted("> /dev/null").is_some(),
+            "> /dev/null (bare redirect) must be blocked"
+        );
+        assert!(
+            t.is_command_blacklisted(">/dev/null").is_some(),
+            ">/dev/null (bare redirect) must be blocked"
+        );
+    }
+
+    #[test]
+    fn stdout_redirect_with_real_command_allowed() {
+        let t = tool();
+        // Redirecting stdout to /dev/null is a valid discard pattern
+        assert!(
+            t.is_command_blacklisted("command_output >/dev/null").is_none(),
+            "command >/dev/null (with real command) must be allowed"
         );
     }
 }

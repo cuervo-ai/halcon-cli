@@ -51,6 +51,7 @@ pub mod process_monitor;
 pub mod regex_test;
 pub mod registry;
 pub mod sandbox;
+pub mod search_memory;
 pub mod secret_scan;
 pub mod semantic_grep;
 pub mod sql_query;
