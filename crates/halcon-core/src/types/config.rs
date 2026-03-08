@@ -332,6 +332,60 @@ impl Default for MultimodalConfig {
     }
 }
 
+/// Halcon-as-MCP-server configuration (Feature 9).
+///
+/// Configures how Halcon exposes its tools and agents to external MCP clients.
+/// When `enabled = true`, start the server with `halcon mcp serve`.
+/// Distinct from `McpServerConfig` (which configures client connections to external MCP servers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServeConfig {
+    /// Enable the MCP server (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Transport mode: "stdio" or "http" (default: "stdio").
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    /// HTTP port for http transport (default: 7777).
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    /// Expose agent-registry agents as `agent_*` MCP tools (default: true).
+    #[serde(default = "default_true")]
+    pub expose_agents: bool,
+    /// Require Bearer token auth in http transport (default: true).
+    #[serde(default = "default_true")]
+    pub require_auth: bool,
+    /// Allowed MCP client IDs (empty = allow all).
+    #[serde(default)]
+    pub allowed_clients: Vec<String>,
+    /// Session idle timeout in seconds (default: 1800 = 30 min).
+    #[serde(default = "default_mcp_session_ttl")]
+    pub session_ttl_secs: u64,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
+}
+fn default_mcp_port() -> u16 {
+    7777
+}
+fn default_mcp_session_ttl() -> u64 {
+    1800
+}
+
+impl Default for McpServeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            transport: default_mcp_transport(),
+            port: default_mcp_port(),
+            expose_agents: true,
+            require_auth: true,
+            allowed_clients: Vec::new(),
+            session_ttl_secs: default_mcp_session_ttl(),
+        }
+    }
+}
+
 /// Top-level application configuration.
 ///
 /// Layered loading order: defaults → global (~/.halcon/config.toml) → project (.halcon/config.toml) → env vars.
@@ -380,6 +434,9 @@ pub struct AppConfig {
     /// Centralized policy thresholds (reward, critic, evidence, trust, retry, growth, mini-critic).
     #[serde(default)]
     pub policy: super::policy_config::PolicyConfig,
+    /// MCP Server configuration (Feature 9 — Halcon as MCP server).
+    #[serde(default)]
+    pub mcp_server: McpServeConfig,
 }
 
 /// V3 Plugin system configuration.

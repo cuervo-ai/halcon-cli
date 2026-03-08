@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::types::ToolDefinition;
+use crate::types::capability_types::{CapabilityDescriptor, Modality};
+use crate::types::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionNode, NodeId};
 
 /// Outcome of executing a plan step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,11 @@ pub struct ExecutionPlan {
     /// Tools explicitly blocked for this plan (propagated from session).
     #[serde(default)]
     pub blocked_tools: Vec<String>,
+    /// Declared execution requirements for the Step 7 capability gate.
+    /// Populated post-parse via `derive_capability_descriptor()` — never set by LLM directly.
+    /// Default: all-empty → gate always passes → zero-drift for existing plans.
+    #[serde(default)]
+    pub capability_descriptor: CapabilityDescriptor,
 }
 
 impl Default for ExecutionPlan {
@@ -106,6 +113,7 @@ impl Default for ExecutionPlan {
             mode: ExecutionMode::PlanExecuteReflect,
             requires_evidence: false,
             blocked_tools: vec![],
+            capability_descriptor: CapabilityDescriptor::default(),
         }
     }
 }
@@ -121,6 +129,86 @@ impl ExecutionPlan {
             return 1.0;
         }
         self.steps.iter().map(|s| s.confidence).sum::<f64>() / self.steps.len() as f64
+    }
+
+    /// Auto-derive `CapabilityDescriptor` from plan step tool names (Step 7/8.1/10).
+    ///
+    /// Extracts unique, non-empty tool names from all steps. Infers `ToolUse`
+    /// modality when any step references a tool; `Text` is always included.
+    ///
+    /// `avg_input_tokens_per_step`: base per-step token estimate from `PolicyConfig`.
+    /// `tool_cost_multiplier`: multiplier applied to ToolUse/Vision nodes.
+    /// Pass `(0, _)` to disable Rule 3 budget checking (e.g., in tests or sub-agents).
+    ///
+    /// `estimated_token_cost` is now topology-aware via graph cost propagation (Step 10):
+    ///   Text node → `avg`; ToolUse node → `avg × multiplier`; sum over reachable nodes.
+    ///
+    /// Called post-parse in `agent/mod.rs` and after replanning in `convergence_phase.rs`.
+    pub fn derive_capability_descriptor(
+        &mut self,
+        avg_input_tokens_per_step: usize,
+        tool_cost_multiplier: usize,
+    ) {
+        // Step 1: Compute required_tools (deduped) and modalities from step metadata.
+        let mut seen = std::collections::HashSet::new();
+        let required_tools: Vec<String> = self.steps.iter()
+            .filter_map(|s| s.tool_name.as_deref())
+            .filter(|t| seen.insert(*t))
+            .map(|t| t.to_string())
+            .collect();
+
+        let required_modalities = if required_tools.is_empty() {
+            vec![Modality::Text]
+        } else {
+            vec![Modality::Text, Modality::ToolUse]
+        };
+
+        // Step 2: Set descriptor with required_tools populated so to_execution_graph()
+        // can read them for declared_tools. estimated_token_cost set to 0 as placeholder.
+        self.capability_descriptor = CapabilityDescriptor {
+            required_tools,
+            required_modalities,
+            estimated_token_cost: 0,
+        };
+
+        // Step 3: Graph-based cost propagation (Step 10).
+        // Builds the linear graph, assigns topology-aware node costs, sums reachable cost.
+        let mut graph = self.to_execution_graph();
+        graph.assign_base_costs(avg_input_tokens_per_step, tool_cost_multiplier);
+        self.capability_descriptor.estimated_token_cost = graph.total_cost();
+    }
+
+    /// Convert this plan into an `ExecutionGraph` for structural validation (Step 9).
+    ///
+    /// Nodes correspond 1:1 to plan steps (by index).
+    /// Edges are linear: node 0→1, 1→2, ..., (n-2)→(n-1).
+    /// `declared_tools` mirrors `capability_descriptor.required_tools`.
+    ///
+    /// Produces an acyclic graph by construction. Call `GraphValidator::validate()`
+    /// on the result to enforce all 4 structural rules before execution.
+    pub fn to_execution_graph(&self) -> ExecutionGraph {
+        let nodes: Vec<ExecutionNode> = self.steps.iter().enumerate()
+            .map(|(i, step)| ExecutionNode {
+                id: NodeId(i),
+                tool: step.tool_name.clone(),
+                modality: if step.tool_name.is_some() {
+                    Modality::ToolUse
+                } else {
+                    Modality::Text
+                },
+                base_cost: 0, // Populated by assign_base_costs() — default 0 until then.
+            })
+            .collect();
+
+        let edges: Vec<ExecutionEdge> = (0..nodes.len().saturating_sub(1))
+            .map(|i| ExecutionEdge { from: NodeId(i), to: NodeId(i + 1) })
+            .collect();
+
+        ExecutionGraph {
+            declared_tools: self.capability_descriptor.required_tools.clone(),
+            nodes,
+            edges,
+        }
     }
 }
 

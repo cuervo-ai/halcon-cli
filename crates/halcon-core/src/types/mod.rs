@@ -24,6 +24,8 @@ pub mod sla_types;
 pub mod evidence_types;
 pub mod complexity_types;
 pub mod mutation_types;
+pub mod capability_types;
+pub mod execution_graph;
 
 pub use agent::*;
 pub use agent_state::*;
@@ -55,3 +57,5 @@ pub use sla_types::*;
 pub use evidence_types::*;
 pub use complexity_types::*;
 pub use mutation_types::*;
+pub use capability_types::*;
+pub use execution_graph::*;

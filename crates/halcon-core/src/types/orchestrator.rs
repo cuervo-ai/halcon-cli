@@ -33,6 +33,10 @@ pub struct SubAgentTask {
     /// Priority within a wave (higher = run first). Default 0.
     #[serde(default)]
     pub priority: u32,
+    /// Optional system prompt prefix injected by the agent registry (Feature 4).
+    /// Contains combined skill bodies + agent body from the .md definition file.
+    #[serde(default)]
+    pub system_prompt_prefix: Option<String>,
 }
 
 /// Result of a single sub-agent execution.
@@ -217,6 +221,7 @@ mod tests {
             limits_override: None,
             depends_on: vec![],
             priority: 10,
+            system_prompt_prefix: None,
         };
         assert_eq!(task.instruction, "List files");
         assert_eq!(task.agent_type, AgentType::Coder);
@@ -236,6 +241,7 @@ mod tests {
             limits_override: None,
             depends_on: vec![Uuid::new_v4()],
             priority: 5,
+            system_prompt_prefix: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         let parsed: SubAgentTask = serde_json::from_str(&json).unwrap();
