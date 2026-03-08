@@ -71,18 +71,18 @@ pub mod arima_predictor;
 pub mod metacognitive_loop;
 pub mod loop_guard;
 
-// Context assembly and management.
+// Context assembly and management — moved to context/ (C-4)
 pub mod artifact_store;
-pub mod context_governance;
-pub mod context_manager;
-pub mod context_metrics;
-pub mod episodic_source;
-pub mod hybrid_retriever;
-pub mod memory_consolidator;
-pub mod memory_source;
-pub mod reflection_source;
+pub(crate) use context::governance as context_governance;
+pub(crate) use context::manager as context_manager;
+pub(crate) use context::metrics as context_metrics;
+pub use context::episodic as episodic_source;
+pub use context::hybrid_retriever;
+pub use context::consolidator as memory_consolidator;
+pub use context::memory as memory_source;
+pub use context::reflection as reflection_source;
 pub mod reflexion;
-pub mod repo_map_source;
+pub use context::repo_map as repo_map_source;
 
 // Commands and authorization and security.
 pub mod commands;
@@ -142,7 +142,8 @@ pub mod agent_registry;
 
 /// Semantic memory vector store context source (Feature 7 — Frontier Roadmap 2026).
 /// Pipeline-triggered retrieval from MEMORY.md via cosine similarity + MMR.
-pub mod vector_memory_source;
+// vector_memory_source moved to context/vector_memory (C-4)
+pub use context::vector_memory as vector_memory_source;
 
 // Communication and protocol.
 // rule_matcher, adaptive_prompt, validation, conversational_permission moved to security/ (C-2)
