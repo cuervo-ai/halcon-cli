@@ -31,12 +31,18 @@ body:
       label: Area
       options:
         - CLI / REPL
+        - Agent Loop
         - Tools
         - Providers
         - Context / Memory
-        - Security
+        - Planning
+        - Plugins
+        - Security / Permissions
+        - Metrics / Observability
         - TUI
-        - MCP
-        - Desktop
+        - MCP Server
+        - VS Code Extension
+        - Desktop App
+        - Git / CI Integration
         - Documentation
         - Other

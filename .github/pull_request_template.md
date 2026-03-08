@@ -1,19 +1,21 @@
 ## Summary
 
-<!-- Brief description of the changes -->
+<!-- One paragraph: what does this PR do and why? -->
 
 ## Changes
 
+<!-- Bullet list of concrete changes -->
 -
 
 ## Type of Change
 
-- [ ] Bug fix (non-breaking change that fixes an issue)
-- [ ] New feature (non-breaking change that adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] Refactor (code change that neither fixes a bug nor adds a feature)
+- [ ] Bug fix (non-breaking, fixes an issue)
+- [ ] New feature (non-breaking, adds functionality)
+- [ ] Breaking change (existing behavior changes)
+- [ ] Refactor (no functional change)
 - [ ] Documentation
 - [ ] CI/CD
+- [ ] Security fix
 
 ## Testing
 
@@ -22,10 +24,27 @@
 - [ ] Clippy clean (`cargo clippy --workspace -- -D warnings`)
 - [ ] Formatted (`cargo fmt --all -- --check`)
 
-## Checklist
+## Security Checklist
 
-- [ ] My code follows the project's coding standards
-- [ ] I have updated documentation as needed
-- [ ] I have not introduced security vulnerabilities (see SECURITY.md)
-- [ ] Destructive tool changes require user confirmation
-- [ ] No API keys or secrets in the diff
+- [ ] No credentials, API keys, or tokens in the diff
+- [ ] Destructive operations require explicit user confirmation
+- [ ] New tools go through FASE-2 gate in `executor.rs`
+- [ ] No new `unsafe` without `// SAFETY:` justification
+- [ ] See [SECURITY.md](docs/security/SECURITY.md) for full guidelines
+
+## Affected Subsystem (if touching `repl/`)
+
+- [ ] `agent/` — agent loop core
+- [ ] `security/` — permissions, auth, blacklist
+- [ ] `planning/` — planner, router, SLA
+- [ ] `context/` — memory sources, vector store
+- [ ] `plugins/` — plugin system
+- [ ] `git_tools/` — git, CI, IDE
+- [ ] `metrics/` — reward, scorer, health
+- [ ] `bridges/` — MCP, task, runtime
+- [ ] `domain/` — strategy, convergence
+- [ ] `decision_engine/` — BDE pipeline
+
+## Related Issues
+
+<!-- Closes #N / Fixes #N -->

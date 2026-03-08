@@ -1,0 +1,75 @@
+name: Refactoring / Tech Debt
+description: Propose a code refactor, architecture improvement, or tech debt item
+labels: ["refactor", "tech-debt"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for refactoring proposals, architecture improvements,
+        or tech debt that doesn't map to a bug or feature request.
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: Which files, modules, or subsystems are affected?
+      placeholder: |
+        e.g. crates/halcon-cli/src/repl/executor.rs
+        or: repl/planning/ subdirectory
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Current Problem
+      description: What is wrong or suboptimal about the current code?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Change
+      description: What should it look like after the refactor?
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk Level
+      options:
+        - Low (no behavioral change, pure rename/move)
+        - Medium (internal restructure, same external API)
+        - High (API changes, caller updates needed)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Subsystem
+      options:
+        - repl/agent/ — agent loop
+        - repl/security/ — permissions, auth
+        - repl/planning/ — planner, router
+        - repl/context/ — memory sources
+        - repl/plugins/ — plugin system
+        - repl/git_tools/ — git integration
+        - repl/metrics/ — reward, health
+        - repl/bridges/ — MCP, runtime
+        - repl/domain/ — strategy, convergence
+        - repl/decision_engine/ — BDE pipeline
+        - halcon-tools
+        - halcon-context
+        - halcon-mcp
+        - halcon-security
+        - halcon-core
+        - halcon-storage
+        - Cross-crate
+        - Other
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test Plan
+      description: How will you verify the refactor is safe?
+      placeholder: |
+        - cargo test --workspace must pass with same count
+        - Specific integration tests to run
+        - Manual smoke test steps

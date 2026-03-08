@@ -1,22 +1,39 @@
 # Default owners for everything
 * @cuervo-ai/core
 
-# Security-sensitive paths require security team review
-crates/halcon-security/                  @cuervo-ai/security
-crates/halcon-auth/                      @cuervo-ai/security
-crates/halcon-sandbox/                   @cuervo-ai/security
-crates/halcon-tools/src/path_security.rs @cuervo-ai/security
-crates/halcon-tools/src/sandbox.rs       @cuervo-ai/security
-crates/halcon-core/src/security.rs       @cuervo-ai/security
-SECURITY.md                              @cuervo-ai/security
+# ── Security — requires @cuervo-ai/security review ───────────────────────────
+crates/halcon-security/                          @cuervo-ai/security
+crates/halcon-auth/                              @cuervo-ai/security
+crates/halcon-sandbox/                           @cuervo-ai/security
+crates/halcon-tools/src/bash.rs                  @cuervo-ai/security
+crates/halcon-tools/src/path_security.rs         @cuervo-ai/security
+crates/halcon-tools/src/sandbox.rs               @cuervo-ai/security
+crates/halcon-core/src/security.rs               @cuervo-ai/security
+crates/halcon-cli/src/repl/security/             @cuervo-ai/security
+crates/halcon-cli/src/repl/executor.rs           @cuervo-ai/security
+docs/security/                                   @cuervo-ai/security
+SECURITY.md                                      @cuervo-ai/security
 
-# CI/CD changes
-.github/ @cuervo-ai/core
+# ── Agent loop core — requires senior review ──────────────────────────────────
+crates/halcon-cli/src/repl/agent/                @cuervo-ai/core
+crates/halcon-cli/src/repl/orchestrator.rs       @cuervo-ai/core
+crates/halcon-cli/src/repl/delegation.rs         @cuervo-ai/core
 
-# Release & distribution
-dist/     @cuervo-ai/core
-packaging/ @cuervo-ai/core
-homebrew/  @cuervo-ai/core
-workers/   @cuervo-ai/core
+# ── MCP server ────────────────────────────────────────────────────────────────
+crates/halcon-mcp/                               @cuervo-ai/core
+
+# ── Context & memory pipeline ────────────────────────────────────────────────
+crates/halcon-context/                           @cuervo-ai/core
+crates/halcon-cli/src/repl/context/             @cuervo-ai/core
+crates/halcon-cli/src/repl/auto_memory/         @cuervo-ai/core
+
+# ── CI/CD ─────────────────────────────────────────────────────────────────────
+.github/                                         @cuervo-ai/core
+
+# ── Release & distribution ───────────────────────────────────────────────────
+dist/                      @cuervo-ai/core
+packaging/                 @cuervo-ai/core
+homebrew/                  @cuervo-ai/core
+workers/                   @cuervo-ai/core
 scripts/install-binary.sh  @cuervo-ai/core
 scripts/install.sh         @cuervo-ai/core
