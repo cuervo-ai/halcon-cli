@@ -5,6 +5,7 @@ pub(crate) mod anomaly;
 pub(crate) mod arima;
 pub mod evaluator;
 pub mod health;
+pub mod integration_decision;
 pub mod macro_feedback;
 pub mod store;
 pub mod orchestrator;

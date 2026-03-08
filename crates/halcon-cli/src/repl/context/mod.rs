@@ -1,6 +1,7 @@
 // context/ — context sources, memory retrieval, governance
 // MIGRATION-2026: archivos movidos desde repl/ raíz
 
+pub mod compaction;
 pub(crate) mod governance;
 pub(crate) mod manager;
 pub(crate) mod metrics;

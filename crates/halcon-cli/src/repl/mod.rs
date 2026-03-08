@@ -107,7 +107,7 @@ pub use security::output_risk as output_risk_scorer;
 // Session and resilience.
 // ci_detection moved to git_tools/ (C-5)
 pub use git_tools::ci_detection;
-pub mod compaction;
+pub use context::compaction;
 pub mod console;
 pub mod delegation;
 /// Evidence Boundary System — Zero Evidence → Zero Output policy.
@@ -119,7 +119,7 @@ pub mod failure_tracker;
 // health, metrics_store moved to metrics/ (C-6)
 pub use metrics::health;
 pub mod idempotency;
-pub mod integration_decision;
+pub use metrics::integration_decision;
 // mcp_manager moved to bridges/ (C-7)
 pub(crate) use bridges::mcp_manager;
 pub use metrics::store as metrics_store;
@@ -187,8 +187,8 @@ pub use servers::security as security_server;
 pub use servers::support as support_server;
 // sdlc_phase_detector moved to git_tools/ (C-5)
 pub use git_tools::sdlc_phase as sdlc_phase_detector;
-pub mod replay_executor;
-pub mod replay_runner;
+pub use bridges::replay_executor;
+pub use bridges::replay_runner;
 // search_engine_global moved to bridges/ (C-7)
 pub use bridges::search as search_engine_global;
 pub use domain::self_corrector;

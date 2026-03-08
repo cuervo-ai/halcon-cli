@@ -4,6 +4,8 @@
 pub mod agent_comm;
 pub mod dev_gateway;
 pub(crate) mod mcp_manager;
+pub mod replay_executor;
+pub mod replay_runner;
 pub(crate) mod runtime;
 pub mod search;
 pub(crate) mod task;
