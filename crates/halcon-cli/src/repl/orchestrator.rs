@@ -13,9 +13,9 @@ use uuid::Uuid;
 use halcon_core::traits::ModelProvider;
 #[allow(unused_imports)]
 use halcon_core::types::{
-    AgentLimits, AgentResult, AgentType, ChatMessage, DomainEvent, EventPayload, MessageContent,
-    ModelRequest, OrchestratorConfig, OrchestratorResult, ResilienceConfig, Role, RoutingConfig,
-    Session, SubAgentResult, SubAgentTask, TaskContext,
+    AgentLimits, AgentResult, AgentRole, AgentType, ChatMessage, DomainEvent, EventPayload,
+    MessageContent, ModelRequest, OrchestratorConfig, OrchestratorResult, ResilienceConfig, Role,
+    RoutingConfig, Session, SubAgentResult, SubAgentTask, TaskContext,
 };
 use halcon_core::EventSender;
 use halcon_storage::AsyncDatabase;
@@ -352,7 +352,27 @@ pub async fn run_orchestrator(
                 let agent_type = task.agent_type;
                 let instruction = task.instruction.clone();
                 let allowed_tools = task.allowed_tools.clone();
-                let limits = task.limits_override.clone().unwrap_or_else(|| sub_limits.clone());
+                let mut limits = task.limits_override.clone().unwrap_or_else(|| sub_limits.clone());
+                // Apply role-based timeout multiplier (PASO 4-B — US-agent-roles).
+                // DECISION: roles affect BEHAVIOR (limits), not CAPABILITY (tools).
+                // The multiplier is applied after any explicit limits_override so that
+                // callers can set a precise budget and roles scale it proportionally.
+                {
+                    let role = &task.role;
+                    if limits.max_duration_secs > 0 {
+                        limits.max_duration_secs = (limits.max_duration_secs as f64
+                            * role.timeout_multiplier()) as u64;
+                    }
+                    // Apply max_rounds cap for non-Lead roles.
+                    let rounds_mult = role.max_rounds_multiplier();
+                    if rounds_mult < 1.0 {
+                        limits.max_rounds = ((limits.max_rounds as f64) * rounds_mult).ceil() as usize;
+                    }
+                    // Observer: hard-zero rounds so it never enters the tool loop.
+                    if !role.can_execute_tools() {
+                        limits.max_rounds = 0;
+                    }
+                }
                 let model = task.model.clone().unwrap_or_else(|| model.to_string());
                 let working_dir = working_dir.to_string();
                 // Clone the Option<Arc<...>> so the async move block owns it.
@@ -1067,6 +1087,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: Uuid::new_v4(),
@@ -1079,6 +1102,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1103,6 +1129,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b,
@@ -1115,6 +1144,9 @@ mod tests {
                 depends_on: vec![a],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: c,
@@ -1127,6 +1159,9 @@ mod tests {
                 depends_on: vec![b],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1154,6 +1189,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b,
@@ -1166,6 +1204,9 @@ mod tests {
                 depends_on: vec![a],
                 priority: 10,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: c,
@@ -1178,6 +1219,9 @@ mod tests {
                 depends_on: vec![a],
                 priority: 5,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: d,
@@ -1190,6 +1234,9 @@ mod tests {
                 depends_on: vec![b, c],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1218,6 +1265,9 @@ mod tests {
                 depends_on: vec![b],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b,
@@ -1230,6 +1280,9 @@ mod tests {
                 depends_on: vec![a],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1264,6 +1317,9 @@ mod tests {
                 allowed_tools: HashSet::new(), limits_override: None,
                 depends_on: vec![b], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b,
@@ -1273,6 +1329,9 @@ mod tests {
                 allowed_tools: HashSet::new(), limits_override: None,
                 depends_on: vec![a], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: c,
@@ -1282,6 +1341,9 @@ mod tests {
                 allowed_tools: HashSet::new(), limits_override: None,
                 depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1410,6 +1472,9 @@ mod tests {
             depends_on: vec![],
             priority: 0,
         system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
         }];
 
         let result = run_orchestrator(
@@ -1447,6 +1512,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: Uuid::new_v4(),
@@ -1459,6 +1527,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
 
@@ -1497,6 +1568,9 @@ mod tests {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: Uuid::new_v4(),
@@ -1509,6 +1583,9 @@ mod tests {
                 depends_on: vec![a_id],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
 
@@ -1545,6 +1622,9 @@ mod tests {
             depends_on: vec![],
             priority: 0,
         system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
         }];
 
         run_orchestrator(
@@ -1595,12 +1675,18 @@ mod tests {
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: Uuid::new_v4(), instruction: "Wave 2".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![a_id], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
 
@@ -1636,12 +1722,18 @@ mod tests {
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: Uuid::new_v4(), instruction: "Wave 2 task".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![a_id], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
 
@@ -1736,18 +1828,27 @@ mod tests {
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b, instruction: "B depends on A".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![a], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: c, instruction: "C depends on B".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![b], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1786,24 +1887,36 @@ mod tests {
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b, instruction: "B fails".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![a], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: c, instruction: "C succeeds".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![a], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: d, instruction: "D depends on B+C".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![b, c], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);
@@ -1841,12 +1954,18 @@ mod tests {
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
             SubAgentTask {
                 task_id: b, instruction: "B".into(), agent_type: AgentType::Chat,
                 model: None, provider: None, allowed_tools: HashSet::new(),
                 limits_override: None, depends_on: vec![], priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             },
         ];
         let waves = topological_waves(&tasks);

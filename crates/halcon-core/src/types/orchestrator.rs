@@ -6,6 +6,61 @@ use uuid::Uuid;
 use super::agent::{AgentResult, AgentType};
 use super::config::AgentLimits;
 
+// DECISION: AgentRole is a separate enum (not part of SubAgentTask permission flags)
+// because roles affect BEHAVIOR (timeout multiplier, tool access, context scope)
+// while permissions affect CAPABILITY (which tools are callable).
+// Mixing them in a single flags field would make the semantics ambiguous.
+// See US-agent-roles (PASO 4-B).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AgentRole {
+    /// Full access, can read all teammate states, can cancel teammates.
+    Lead,
+    /// Receives initial context from lead, stricter limits, timeout × 0.6.
+    Teammate,
+    /// Invoked on demand by lead, domain-scoped (e.g. "security specialist").
+    Specialist,
+    /// Audit-only: no tool execution, records all events.
+    Observer,
+}
+
+impl AgentRole {
+    /// Timeout multiplier applied to the base session timeout.
+    pub fn timeout_multiplier(&self) -> f64 {
+        match self {
+            AgentRole::Lead => 1.0,
+            AgentRole::Teammate => 0.6,
+            AgentRole::Specialist => 0.8,
+            AgentRole::Observer => 0.1, // short — just observe
+        }
+    }
+
+    /// Maximum rounds multiplier.
+    pub fn max_rounds_multiplier(&self) -> f64 {
+        match self {
+            AgentRole::Lead => 1.0,
+            AgentRole::Teammate => 0.7,
+            AgentRole::Specialist => 0.5,
+            AgentRole::Observer => 0.0, // never runs rounds
+        }
+    }
+
+    /// Whether this role may execute tools.
+    pub fn can_execute_tools(&self) -> bool {
+        !matches!(self, AgentRole::Observer)
+    }
+
+    /// Whether this role may cancel other agents in the same team.
+    pub fn can_cancel_teammates(&self) -> bool {
+        matches!(self, AgentRole::Lead)
+    }
+}
+
+impl Default for AgentRole {
+    fn default() -> Self {
+        AgentRole::Lead
+    }
+}
+
 /// A sub-agent task to be executed by the orchestrator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentTask {
@@ -37,6 +92,16 @@ pub struct SubAgentTask {
     /// Contains combined skill bodies + agent body from the .md definition file.
     #[serde(default)]
     pub system_prompt_prefix: Option<String>,
+    /// Role of this agent within its team (Lead / Teammate / Specialist / Observer).
+    /// Affects timeout multiplier, max_rounds cap, and tool execution eligibility.
+    #[serde(default)]
+    pub role: AgentRole,
+    /// Team this agent belongs to (used to scope mailbox messages and shared context).
+    #[serde(default)]
+    pub team_id: Option<Uuid>,
+    /// Mailbox instance ID for this agent's message queue.
+    #[serde(default)]
+    pub mailbox_id: Option<Uuid>,
 }
 
 /// Result of a single sub-agent execution.
@@ -222,6 +287,9 @@ mod tests {
             depends_on: vec![],
             priority: 10,
             system_prompt_prefix: None,
+            role: AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
         };
         assert_eq!(task.instruction, "List files");
         assert_eq!(task.agent_type, AgentType::Coder);
@@ -242,6 +310,9 @@ mod tests {
             depends_on: vec![Uuid::new_v4()],
             priority: 5,
             system_prompt_prefix: None,
+            role: AgentRole::Teammate,
+            team_id: Some(Uuid::new_v4()),
+            mailbox_id: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         let parsed: SubAgentTask = serde_json::from_str(&json).unwrap();
@@ -368,5 +439,64 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let parsed: OrchestratorResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.orchestrator_id, result.orchestrator_id);
+    }
+
+    // --- AgentRole tests (PASO 4-B) ---
+
+    #[test]
+    fn agent_role_default_is_lead() {
+        assert_eq!(AgentRole::default(), AgentRole::Lead);
+    }
+
+    #[test]
+    fn agent_role_timeout_multipliers() {
+        assert!((AgentRole::Lead.timeout_multiplier() - 1.0).abs() < f64::EPSILON);
+        assert!((AgentRole::Teammate.timeout_multiplier() - 0.6).abs() < f64::EPSILON);
+        assert!((AgentRole::Specialist.timeout_multiplier() - 0.8).abs() < f64::EPSILON);
+        assert!((AgentRole::Observer.timeout_multiplier() - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agent_role_max_rounds_multipliers() {
+        assert!((AgentRole::Lead.max_rounds_multiplier() - 1.0).abs() < f64::EPSILON);
+        assert!((AgentRole::Teammate.max_rounds_multiplier() - 0.7).abs() < f64::EPSILON);
+        assert!((AgentRole::Specialist.max_rounds_multiplier() - 0.5).abs() < f64::EPSILON);
+        assert!((AgentRole::Observer.max_rounds_multiplier() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agent_role_capabilities() {
+        assert!(AgentRole::Lead.can_execute_tools());
+        assert!(AgentRole::Teammate.can_execute_tools());
+        assert!(AgentRole::Specialist.can_execute_tools());
+        assert!(!AgentRole::Observer.can_execute_tools());
+
+        assert!(AgentRole::Lead.can_cancel_teammates());
+        assert!(!AgentRole::Teammate.can_cancel_teammates());
+        assert!(!AgentRole::Specialist.can_cancel_teammates());
+        assert!(!AgentRole::Observer.can_cancel_teammates());
+    }
+
+    #[test]
+    fn agent_role_serde_round_trip() {
+        for role in [AgentRole::Lead, AgentRole::Teammate, AgentRole::Specialist, AgentRole::Observer] {
+            let json = serde_json::to_string(&role).unwrap();
+            let parsed: AgentRole = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, role);
+        }
+    }
+
+    #[test]
+    fn sub_agent_task_role_defaults_to_lead() {
+        // Old JSON (before role field existed) should deserialize with role=Lead.
+        let json = r#"{
+            "task_id": "00000000-0000-0000-0000-000000000001",
+            "instruction": "do something",
+            "agent_type": "chat"
+        }"#;
+        let task: SubAgentTask = serde_json::from_str(json).unwrap();
+        assert_eq!(task.role, AgentRole::Lead);
+        assert!(task.team_id.is_none());
+        assert!(task.mailbox_id.is_none());
     }
 }

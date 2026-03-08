@@ -250,6 +250,9 @@ impl Repl {
             depends_on: vec![],
             priority: 0,
         system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
         }];
 
         let orchestrator_id = uuid::Uuid::new_v4();
@@ -754,6 +757,9 @@ impl Repl {
                 depends_on: vec![],
                 priority: step.step_index,
                 system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             })
             .collect();
 
@@ -1114,6 +1120,9 @@ impl Repl {
                 depends_on: vec![],
                 priority: 0,
             system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
             })
             .collect();
 

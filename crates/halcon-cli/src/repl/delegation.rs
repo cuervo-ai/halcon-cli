@@ -223,6 +223,9 @@ impl DelegationRouter {
                     depends_on,
                     priority: 0,
                 system_prompt_prefix: None,
+            role: halcon_core::types::AgentRole::default(),
+            team_id: None,
+            mailbox_id: None,
                 };
 
                 Some((*step_idx, task))
