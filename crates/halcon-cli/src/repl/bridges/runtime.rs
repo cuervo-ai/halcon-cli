@@ -33,8 +33,8 @@ use halcon_tools::ToolRegistry;
 
 use halcon_core::types::ContentBlock;
 
-use super::accumulator::CompletedToolUse;
-use super::executor::ToolExecResult;
+use super::super::accumulator::CompletedToolUse;
+use super::super::executor::ToolExecResult;
 
 /// A `HalconRuntime` pre-populated with `LocalToolAgent` wrappers for every tool
 /// in a `ToolRegistry`.

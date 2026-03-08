@@ -11,11 +11,11 @@ use halcon_core::types::{
     ArtifactType, RetryPolicy, StructuredTaskStatus, TaskArtifact, TaskFrameworkConfig,
 };
 
-use super::artifact_store::ArtifactStore;
-use super::execution_tracker::ExecutionTracker;
-use super::provenance_tracker::ProvenanceTracker;
-use super::task_backlog::TaskBacklog;
-use super::task_scheduler::TaskScheduler;
+use super::super::artifact_store::ArtifactStore;
+use super::super::execution_tracker::ExecutionTracker;
+use super::super::provenance_tracker::ProvenanceTracker;
+use super::super::task_backlog::TaskBacklog;
+use super::super::task_scheduler::TaskScheduler;
 
 /// Bridge between the agent loop and the structured task framework.
 pub(crate) struct TaskBridge {

@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use super::ci_result_ingestor::{CiEvent, CiRunRecord};
-use super::ide_protocol_handler::IdeProtocolHandler;
-use super::unsaved_buffer_tracker::UnsavedBufferTracker;
+use super::super::ci_result_ingestor::{CiEvent, CiRunRecord};
+use super::super::ide_protocol_handler::IdeProtocolHandler;
+use super::super::unsaved_buffer_tracker::UnsavedBufferTracker;
 
 // ── DevContext snapshot ───────────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ impl DevGateway {
     ///
     /// Call this from a background task that reads the CI broadcast channel:
     /// ```no_run
-    /// # async fn example(mut rx: tokio::sync::broadcast::Receiver<super::ci_result_ingestor::CiEvent>, gw: DevGateway) {
+    /// # async fn example(mut rx: tokio::sync::broadcast::Receiver<super::super::ci_result_ingestor::CiEvent>, gw: DevGateway) {
     /// while let Ok(event) = rx.recv().await {
     ///     gw.ingest_ci_event(event).await;
     /// }
@@ -131,13 +131,13 @@ impl DevGateway {
     /// Returns the serialized response bytes, or an empty vec for notifications.
     pub async fn handle_lsp_message(&self, raw: &[u8]) -> Vec<u8> {
         match self.handler.handle_raw(raw).await {
-            Ok(super::ide_protocol_handler::DispatchResult::Response(resp)) => {
+            Ok(super::super::ide_protocol_handler::DispatchResult::Response(resp)) => {
                 serde_json::to_vec(&resp).unwrap_or_default()
             }
-            Ok(super::ide_protocol_handler::DispatchResult::Error(err)) => {
+            Ok(super::super::ide_protocol_handler::DispatchResult::Error(err)) => {
                 serde_json::to_vec(&err).unwrap_or_default()
             }
-            Ok(super::ide_protocol_handler::DispatchResult::Notification) => vec![],
+            Ok(super::super::ide_protocol_handler::DispatchResult::Notification) => vec![],
             Err(e) => {
                 tracing::warn!(error = %e, "LSP message parse error");
                 vec![]
@@ -152,7 +152,7 @@ impl DevGateway {
     pub async fn build_context(&self) -> DevContext {
         // Git context (blocking I/O on background thread).
         let git_summary = tokio::task::spawn_blocking(|| {
-            super::git_context::collect(std::path::Path::new(".")).map(|gc| gc.summary())
+            super::super::git_context::collect(std::path::Path::new(".")).map(|gc| gc.summary())
         })
         .await
         .unwrap_or(None);
@@ -173,7 +173,7 @@ impl DevGateway {
             // Budget: 256 chars per file, max 8 files to stay token-efficient.
             for uri in uris.iter().take(8) {
                 if let Some(content) = self.buffers.content(uri).await {
-                    let index = super::ast_symbol_extractor::extract_from_buffer(uri, &content);
+                    let index = super::super::ast_symbol_extractor::extract_from_buffer(uri, &content);
                     if !index.is_empty() {
                         sym_out.push_str(&index.render(256));
                     }
