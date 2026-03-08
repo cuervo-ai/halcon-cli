@@ -468,7 +468,7 @@ impl Planner for LlmPlanner {
             p.replan_count = current_plan.replan_count + 1;
             p.parent_plan_id = Some(current_plan.plan_id);
             // Apply V3 compression to the recovery plan.
-            let (compressed, _stats) = super::plan_compressor::compress(p);
+            let (compressed, _stats) = super::compressor::compress(p);
             compressed
         });
 

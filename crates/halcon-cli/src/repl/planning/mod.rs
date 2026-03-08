@@ -15,15 +15,12 @@ pub mod router;
 pub(crate) mod sla;
 
 // Re-exports — preserve API surface for callers in repl/
-pub use decision_layer::{BoundaryDecisionEngine, BoundaryDecisionResult, DecisionLayer};
-pub use input_boundary::{InputBoundary, InputContext, InputNormalizer};
-pub use normalizer::InputNormalizer as Normalizer;
+// decision_layer: pub(crate) types — access via module path
+pub use input_boundary::{BoundaryInput, InputContext, InputNormalizer};
 pub use coherence::PlanCoherenceChecker;
 pub use llm_planner::LlmPlanner;
 pub use playbook::PlaybookPlanner;
-pub use router::ModelRouter;
 pub(crate) use sla::{SlaBudget, SlaMode};
 pub use source::PlanningSource;
 pub use metrics::PlanningMetrics;
-pub use compressor::PlanCompressor;
-pub(crate) use diagnostics::PlanStateDiagnostics;
+pub use compressor::{compress as compress_plan, CompressionStats};

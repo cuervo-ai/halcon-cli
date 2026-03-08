@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use halcon_core::traits::ExecutionPlan;
 
-use super::text_utils::extract_keywords;
+use super::super::domain::text_utils::extract_keywords;
 
 /// Threshold above which plan drift is considered critical (1.0 - jaccard > threshold).
 const DEFAULT_DRIFT_THRESHOLD: f32 = 0.70;

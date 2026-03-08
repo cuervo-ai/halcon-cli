@@ -10,7 +10,7 @@
 //! - Detail requests ("show me the parameters")
 //! - Fuzzy matching for typo tolerance
 
-use super::conversation_protocol::{BatchScope, DetailAspect, PermissionMessage};
+use super::super::conversation_protocol::{BatchScope, DetailAspect, PermissionMessage};
 
 /// Classify user's free-text input into a PermissionMessage.
 ///
