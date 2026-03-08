@@ -40,7 +40,8 @@ pub mod accumulator;
 
 /// Tool execution pipeline — file I/O, shell, risk scoring, permission gates.
 pub mod executor;
-pub(crate) mod plan_state_diagnostics;
+// plan_state_diagnostics moved to planning/diagnostics (C-3)
+pub(crate) use planning::diagnostics as plan_state_diagnostics;
 pub(crate) mod security;
 // Backward-compat: subagent_contract_validator was moved to security/subagent_contract.rs
 pub(crate) use security::subagent_contract as subagent_contract_validator;
@@ -53,11 +54,12 @@ pub(crate) mod runtime_bridge;
 pub mod orchestrator;
 pub mod orchestrator_metrics;
 pub mod model_quirks;
-pub(crate) mod decision_layer;
+// decision_layer, sla_manager moved to planning/ (C-3)
+pub(crate) use planning::decision_layer;
+pub(crate) use planning::sla as sla_manager;
 /// Boundary Decision Engine — structured multi-layer routing pipeline.
 pub(crate) mod decision_engine;
 pub(crate) mod retry_mutation;
-pub(crate) mod sla_manager;
 pub(crate) mod tool_aliases;
 // tool_policy and tool_trust moved to security/ subdir
 pub(crate) use security::tool_policy;
@@ -119,7 +121,8 @@ pub mod model_selector;
 pub mod optimizer;
 pub mod resilience;
 pub mod response_cache;
-pub mod router;
+// router moved to planning/router (C-3)
+pub use planning::router;
 
 /// HALCON.md persistent instruction system (Feature 1 — Frontier Roadmap 2026).
 /// 4-scope hierarchy, @import resolution, path-glob rules, hot-reload via notify.
@@ -143,21 +146,22 @@ pub mod vector_memory_source;
 
 // Communication and protocol.
 // rule_matcher, adaptive_prompt, validation, conversational_permission moved to security/ (C-2)
+// input_normalizer, input_boundary moved to planning/ (C-3)
 pub mod conversation_protocol;
 pub mod conversation_state;
-pub mod input_normalizer;
-pub mod input_boundary;
+pub use planning::normalizer as input_normalizer;
+pub use planning::input_boundary;
 
 // Session persistence — FASE F clean architecture extraction.
 // Contains: auto_save, save, summarize_to_memory as testable free functions.
 pub mod session_manager;
 
-// Planning infrastructure.
-pub mod planner;
-pub mod playbook_planner;
-pub mod planning_metrics;
+// Planning infrastructure — moved to planning/ (C-3)
+pub use planning::llm_planner as planner;
+pub use planning::playbook as playbook_planner;
+pub use planning::metrics as planning_metrics;
 // tool_manifest moved to plugins/tool_manifest (C-1)
-pub mod planning_source;
+pub use planning::source as planning_source;
 pub mod provenance_tracker;
 mod prompt;
 pub mod servers;
@@ -182,7 +186,8 @@ pub mod evaluator;
 pub mod application;
 // Backward-compat re-export so `super::reasoning_engine::*` paths remain valid:
 pub use application::reasoning_engine;
-pub mod plan_coherence;
+// plan_coherence moved to planning/coherence (C-3)
+pub use planning::coherence as plan_coherence;
 // capability_index/orchestrator/resolver moved to plugins/ (C-1)
 pub(crate) mod provider_normalization;
 pub mod plugins;
@@ -226,7 +231,8 @@ pub mod runtime_signal_ingestor;
 pub mod dev_ecosystem_integration_tests;
 
 // Planning V3 — Compression, Macro Feedback, Early Convergence
-pub mod plan_compressor;
+// plan_compressor moved to planning/compressor (C-3)
+pub use planning::compressor as plan_compressor;
 pub mod macro_feedback;
 pub mod early_convergence;
 
