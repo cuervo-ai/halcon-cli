@@ -68,8 +68,6 @@ pub mod decision_trace;
 /// Structured observability — per-round and session metrics (P4.3).
 pub mod system_metrics;
 
-/// Signal conflict resolution — deterministic arbitration of contradictory signals (P4.4).
-pub mod signal_arbitrator;
 
 /// Bounded adaptation guarantees — formal limits on runtime self-modification (P4.5).
 pub mod adaptation_bounds;
@@ -90,3 +88,23 @@ pub mod convergence_estimator;
 
 /// Strategic initialization engine — data-driven round-0 configuration (P5.5).
 pub mod strategic_init;
+
+// ── Phase 2: Synthesis Governance ────────────────────────────────────────────
+
+/// Synthesis governance gate — centralized classification for all synthesis paths (P2).
+pub mod synthesis_gate;
+
+// ── Phase 3: Goal Progress Control ───────────────────────────────────────────
+
+/// Goal progress measurement — structural progress detection per batch close (P3).
+pub mod goal_progress;
+
+// ── Phase 4: Adaptive Control Layer ──────────────────────────────────────────
+
+/// Progress policy — converts progress measurements into control actions (P4).
+pub mod progress_policy;
+
+// ── Phase 5: Certifiable Observability ───────────────────────────────────────
+
+/// Tool result provenance — ToolResultSource and SyntheticReason (P5A).
+pub mod tool_result;
