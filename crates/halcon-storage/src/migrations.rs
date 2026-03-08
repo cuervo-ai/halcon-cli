@@ -38,6 +38,7 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
     (34, "plugin_circuit_state", MIGRATION_034),
     (35, "execution_loop_events", MIGRATION_035),
     (36, "daily_user_metrics", MIGRATION_036),
+    (37, "mailbox_messages", MIGRATION_037),
 ];
 
 const MIGRATION_001: &str = r#"
@@ -1179,6 +1180,26 @@ CREATE INDEX IF NOT EXISTS idx_daily_user_metrics_date
     ON daily_user_metrics (date);
 CREATE INDEX IF NOT EXISTS idx_daily_user_metrics_user
     ON daily_user_metrics (user_id);
+"#;
+
+const MIGRATION_037: &str = r#"
+-- M37: mailbox_messages — agent-to-agent P2P messaging within a team.
+-- DECISION: stored in SQLite for durability across process restarts and
+-- automatic audit trail inclusion. WAL mode (set at DB open) allows
+-- multiple concurrent readers (agents) with a single writer.
+-- 'broadcast' is the reserved to_agent sentinel for team-wide messages.
+CREATE TABLE IF NOT EXISTS mailbox_messages (
+    id           TEXT PRIMARY KEY,
+    from_agent   TEXT NOT NULL,
+    to_agent     TEXT NOT NULL,   -- agent id or 'broadcast'
+    team_id      TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,            -- NULL = never expires
+    consumed     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mailbox_team_to
+    ON mailbox_messages(team_id, to_agent, consumed, expires_at);
 "#;
 
 /// Run all pending migrations.

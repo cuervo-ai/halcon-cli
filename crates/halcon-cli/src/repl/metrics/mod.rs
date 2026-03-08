@@ -14,7 +14,8 @@ pub mod signal_ingestor;
 pub mod strategy;
 
 // Re-exports
-pub use reward::RewardPipeline;
+pub use reward::{RewardBreakdown, RewardComputation, RawRewardSignals};
+// NOTE: RewardPipeline was removed from reward.rs — stale re-export deleted (BUG-mailbox-pre-existing-001)
 pub use scorer::RoundScorer;
 pub use store::MetricsStore;
 pub use orchestrator::OrchestratorMetrics;
