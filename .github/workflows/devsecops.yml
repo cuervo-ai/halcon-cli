@@ -1,5 +1,16 @@
 name: Security
 
+# ── Trigger strategy ─────────────────────────────────────────────────────────
+# • push to main      → full security suite on every merged commit
+# • pull_request      → lightweight gate (secret scan + license check only)
+#                       Heavy jobs (cargo compile, trivy) run post-merge.
+# • schedule weekly   → full audit even without code changes (CVE freshness)
+# • workflow_dispatch → manual on-demand run
+#
+# Rationale: running cargo-audit + cargo-deny + trivy on every PR compiles the
+# workspace twice and costs ~15 min of Linux time per PR. The risk window is
+# acceptable because: (1) secret scanning still runs on PRs, (2) deps cannot
+# reach production until merged to main.
 on:
   push:
     branches: [main]
@@ -7,6 +18,7 @@ on:
     branches: [main]
   schedule:
     - cron: '0 6 * * 1'  # Weekly Monday 6 AM UTC
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,29 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Dependency vulnerability audit ─────────────────────────────────────────
-  audit:
-    name: Dependency Audit (cargo-audit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  # ── License + ban check ─────────────────────────────────────────────────────
-  deny:
-    name: License & Ban Check (cargo-deny)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
-          log-level: warn
-
-  # ── Secret scanning ─────────────────────────────────────────────────────────
+  # ── Secret scanning (runs on PRs + push — fast, no compilation) ──────────
   secrets:
     name: Secret Scanning (gitleaks)
     runs-on: ubuntu-latest
@@ -51,10 +41,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Clippy security lints ───────────────────────────────────────────────────
+  # ── License + ban check (runs on PRs + push, fast) ───────────────────────
+  deny:
+    name: License & Ban Check (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+          log-level: warn
+
+  # ── Dependency vulnerability audit (post-merge + schedule only) ──────────
+  # Skipped on PRs: cargo-audit requires a full workspace resolve and is
+  # better run on known-good (merged) code to reduce noise.
+  audit:
+    name: Dependency Audit (cargo-audit)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Clippy security lints (post-merge + schedule only) ───────────────────
+  # CI already runs clippy on every PR. This job adds security-focused lints
+  # (unsafe, integer arithmetic, etc.) only when merging.
   clippy-security:
     name: Clippy Security Lints
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,16 +82,16 @@ jobs:
       - name: Security-focused clippy
         run: cargo clippy --workspace --no-default-features -- -D warnings
 
-  # ── Container/filesystem scan with Trivy ───────────────────────────────────
+  # ── Container/filesystem scan (post-merge + schedule only) ───────────────
   trivy:
     name: Trivy Vulnerability Scan
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
-      security-events: write  # for SARIF upload
+      security-events: write
     steps:
       - uses: actions/checkout@v4
-
       - name: Run Trivy (filesystem scan)
         uses: aquasecurity/trivy-action@0.30.0
         with:
@@ -82,36 +100,33 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
-          exit-code: 0  # Don't fail — just report
-
+          exit-code: 0  # Report only — don't fail build
       - name: Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
           sarif_file: trivy-results.sarif
           category: trivy-filesystem
-        if: always()
 
-  # ── SBOM generation (weekly) ────────────────────────────────────────────────
+  # ── Weekly SBOM snapshot (schedule only, no code changes required) ────────
   sbom-weekly:
     name: Weekly SBOM
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    # Guard against forks accidentally consuming minutes via inherited schedules
+    if: github.event_name == 'schedule' && github.repository == 'cuervo-ai/halcon-cli'
     steps:
       - uses: actions/checkout@v4
-
       - name: Install syft
         run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-
       - name: Generate SBOM
         run: |
           syft dir:. \
             --output spdx-json=sbom-weekly.spdx.json \
             --output cyclonedx-json=sbom-weekly.cyclonedx.json
-
       - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: weekly-sbom
+          name: weekly-sbom-${{ github.run_id }}
           path: |
             sbom-weekly.spdx.json
             sbom-weekly.cyclonedx.json

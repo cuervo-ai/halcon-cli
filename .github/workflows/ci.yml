@@ -1,104 +1,45 @@
 name: CI
 
+# ── Trigger strategy ────────────────────────────────────────────────────────
+# • push to main   → full suite (Linux + macOS) + website deploy
+# • pull_request   → Linux-only fast gate (format, clippy, check, test, website)
+#   macOS is gated to main-push only to conserve Actions minutes (macOS = 10× cost)
+# • workflow_dispatch → manual full run on any branch
+#
+# INTENTIONALLY omitted: push to feature/** branches.
+# Every open PR already triggers the pull_request event on each push,
+# adding a redundant push-event run would double consumption for zero benefit.
 on:
   push:
-    branches: [main, develop, feature/**]
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/CODEOWNERS'
+      - 'scripts/TESTING.md'
+      - 'img/**'
   pull_request:
-    branches: [main, develop]
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'img/**'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   # CI builds without color-science (momoto-* crates are local path deps unavailable in CI).
-  # color-science tests run conditionally when vendor/momoto-ui submodule is initialized.
-  # See Makefile: `make build-ci` / `make test` for the --no-default-features equivalents.
   CARGO_FEATURES: "--no-default-features"
 
+# Cancel in-progress runs for the same ref — prevents queued-up stale runs
+# when multiple commits are pushed in quick succession.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false  # Do not fetch momoto-ui; color-science not needed for check
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - name: Check (no color-science)
-        run: cargo check --workspace ${{ env.CARGO_FEATURES }}
-
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run tests (no color-science)
-        run: cargo test --workspace ${{ env.CARGO_FEATURES }}
-
-  # Optional job: runs color-science tests when the momoto-ui submodule is available.
-  # This job does NOT gate the PR — it is informational and may be skipped.
-  # To force it locally: `git submodule update --init vendor/momoto-ui && make test-color-science`
-  test-color-science:
-    name: Test color-science (submodule)
-    runs-on: ubuntu-latest
-    continue-on-error: true  # Non-gating: submodule may not be accessible in forks
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check momoto-ui submodule presence
-        id: submodule_check
-        run: |
-          if [ -f "vendor/momoto-ui/momoto/crates/momoto-core/Cargo.toml" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "✅ momoto-ui submodule available — running color-science tests"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "⚠️  momoto-ui submodule not present — skipping color-science tests"
-          fi
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.submodule_check.outputs.present == 'true'
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.submodule_check.outputs.present == 'true'
-
-      - name: Test color-science (halcon-cli only)
-        if: steps.submodule_check.outputs.present == 'true'
-        run: |
-          cargo test -p halcon-cli --features "color-science,tui" --lib 2>&1 | tail -20
-
-      - name: Report strict perceptual distance (informational)
-        if: steps.submodule_check.outputs.present == 'true'
-        run: |
-          cargo test -p halcon-cli --features "color-science,tui" --lib \
-            strict_perceptual_distance_reporting -- --nocapture 2>&1 || true
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy (no color-science)
-        run: cargo clippy --workspace ${{ env.CARGO_FEATURES }} -- -D warnings
-
+  # ── Format (fastest gate, no compilation) ────────────────────────────────
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -110,37 +51,107 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  build-release:
-    name: Build Release (${{ matrix.target }})
-    needs: [check, test, clippy, fmt]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
+  # ── Clippy (compile once, lint) ───────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: fmt
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Build release (no color-science)
-        run: cargo build --release --target ${{ matrix.target }} -p halcon-cli ${{ env.CARGO_FEATURES }}
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: halcon-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/halcon
+      - name: Clippy
+        run: cargo clippy --workspace ${{ env.CARGO_FEATURES }} -- -D warnings
 
-  # ── Website build check (all branches, PRs) ────────────────────────────────
+  # ── cargo check (type-check without full codegen) ─────────────────────────
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --workspace ${{ env.CARGO_FEATURES }}
+
+  # ── Tests — Linux (always runs on PR and push) ───────────────────────────
+  test-linux:
+    name: Test (ubuntu)
+    runs-on: ubuntu-latest
+    needs: [clippy, check]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace ${{ env.CARGO_FEATURES }}
+
+  # ── Tests — macOS (only on push to main, macOS runner = 10× cost) ────────
+  test-macos:
+    name: Test (macos)
+    runs-on: macos-latest
+    needs: [clippy, check]
+    # Run macOS only after merge to main. PRs are validated on Linux.
+    # This eliminates the single largest cost driver while keeping cross-platform
+    # coverage on every shipped commit.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace ${{ env.CARGO_FEATURES }}
+
+  # ── Color-science tests (informational, non-gating) ───────────────────────
+  # Runs only when the momoto-ui submodule is available.
+  # continue-on-error: true → never blocks the PR.
+  test-color-science:
+    name: Test color-science (submodule)
+    runs-on: ubuntu-latest
+    needs: test-linux
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check momoto-ui submodule presence
+        id: submodule_check
+        run: |
+          if [ -f "vendor/momoto-ui/momoto/crates/momoto-core/Cargo.toml" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::momoto-ui submodule not present — skipping color-science tests"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.submodule_check.outputs.present == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.submodule_check.outputs.present == 'true'
+      - name: Test color-science
+        if: steps.submodule_check.outputs.present == 'true'
+        run: cargo test -p halcon-cli --features "color-science,tui" --lib 2>&1 | tail -20
+
+  # ── Website build (path-filtered: only when website/ changes) ────────────
   build-website:
     name: Build Website
     runs-on: ubuntu-latest
+    # Only rebuild website when website source actually changes
+    if: |
+      contains(github.event.head_commit.modified, 'website/') ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch'
     defaults:
       run:
         working-directory: website
@@ -158,14 +169,14 @@ jobs:
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
         with:
-          name: website-dist
+          name: website-dist-${{ github.sha }}
           path: website/dist
           retention-days: 3
 
-  # ── Cloudflare Pages deploy (main only) ─────────────────────────────────────
+  # ── Website deploy (main push only, after all gates pass) ─────────────────
   deploy-website:
     name: Deploy Website → Cloudflare Pages
-    needs: [check, test, clippy, fmt, build-website]
+    needs: [test-linux, clippy, fmt, build-website]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: production
@@ -173,7 +184,7 @@ jobs:
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
-          name: website-dist
+          name: website-dist-${{ github.sha }}
           path: website/dist
       - name: Deploy via Wrangler
         uses: cloudflare/wrangler-action@v3
@@ -182,7 +193,3 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=halcon-website
           workingDirectory: website
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true

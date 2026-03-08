@@ -11,6 +11,11 @@ on:
     - cron: '0 8 * * 0'  # Weekly Sunday 8 AM UTC
   workflow_dispatch:
 
+# Guard: prevent fork-triggered scheduled runs from consuming org minutes
+# The schedule event fires on the default branch of the origin repo only,
+# but explicitly scoping here makes the intent clear and future-proof.
+# (jobs below also check github.repository where compile cost is non-trivial)
+
 permissions:
   contents: read
   security-events: write
@@ -19,6 +24,7 @@ jobs:
   generate-sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
+    if: github.repository == 'cuervo-ai/halcon-cli'
     steps:
       - uses: actions/checkout@v4
 
