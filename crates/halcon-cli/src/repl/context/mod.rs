@@ -22,4 +22,4 @@ pub use vector_memory::{VectorMemorySource, SharedVectorStore};
 pub use hybrid_retriever::HybridRetriever;
 pub use reflection::ReflectionSource;
 pub use repo_map::RepoMapSource;
-pub use consolidator::MemoryConsolidator;
+// consolidator: free functions (consolidate, maybe_consolidate), no MemoryConsolidator struct

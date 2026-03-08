@@ -15,8 +15,8 @@ use halcon_context::pipeline::{ContextPipeline, ContextPipelineConfig};
 use halcon_core::traits::{ContextQuery, ContextSource};
 use halcon_core::types::ChatMessage;
 
-use super::context_governance::{ContextGovernance, ContextProvenance};
-use super::context_metrics::ContextMetrics;
+use super::governance::{ContextGovernance, ContextProvenance};
+use super::metrics::ContextMetrics;
 
 /// Aggregated context assembly result.
 pub(crate) struct AssembledContext {
