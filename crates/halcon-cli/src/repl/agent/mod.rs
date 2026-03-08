@@ -1,6 +1,8 @@
 mod budget_guards;
 // Phase 1: State Externalization — serializable LoopState snapshot, fire-and-forget persist.
 mod checkpoint;
+// B1: AgentContext sub-struct definitions (AgentInfrastructure, AgentPolicyContext, AgentOptional).
+pub mod context;
 mod convergence_phase;
 pub(crate) mod loop_state;
 // Phase 4: LoopState decomposition scaffolding — additive snapshot types.
@@ -157,6 +159,70 @@ pub struct AgentContext<'a> {
     pub requested_provider: Option<String>,
     /// Centralized policy thresholds (replaces module-local const values).
     pub policy: std::sync::Arc<halcon_core::types::PolicyConfig>,
+}
+
+impl<'a> AgentContext<'a> {
+    /// Construct `AgentContext` from the three logical sub-groups defined in `context.rs`.
+    ///
+    /// Mutable fields (`session`, `permissions`, `resilience`, `task_bridge`,
+    /// `context_manager`, `ctrl_rx`) must be provided directly because Rust's
+    /// exclusivity rules prevent them from being split across sub-structs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        infra: context::AgentInfrastructure<'a>,
+        policy_ctx: context::AgentPolicyContext<'a>,
+        optional: context::AgentOptional<'a>,
+        session: &'a mut Session,
+        request: &'a ModelRequest,
+        permissions: &'a mut super::conversational_permission::ConversationalPermissionHandler,
+        resilience: &'a mut super::resilience::ResilienceManager,
+        task_bridge: Option<&'a mut super::task_bridge::TaskBridge>,
+        context_manager: Option<&'a mut super::context_manager::ContextManager>,
+        ctrl_rx: Option<super::agent_types::ControlReceiver>,
+        working_dir: &'a str,
+    ) -> Self {
+        Self {
+            provider: infra.provider,
+            tool_registry: infra.tool_registry,
+            trace_db: infra.trace_db,
+            response_cache: infra.response_cache,
+            fallback_providers: infra.fallback_providers,
+            event_tx: infra.event_tx,
+            render_sink: infra.render_sink,
+            registry: infra.registry,
+            speculator: infra.speculator,
+            limits: policy_ctx.limits,
+            routing_config: policy_ctx.routing_config,
+            planning_config: policy_ctx.planning_config,
+            orchestrator_config: policy_ctx.orchestrator_config,
+            policy: policy_ctx.policy,
+            security_config: policy_ctx.security_config,
+            phase14: policy_ctx.phase14,
+            tool_selection_enabled: policy_ctx.tool_selection_enabled,
+            is_sub_agent: policy_ctx.is_sub_agent,
+            requested_provider: policy_ctx.requested_provider,
+            episode_id: policy_ctx.episode_id,
+            compactor: optional.compactor,
+            planner: optional.planner,
+            guardrails: optional.guardrails,
+            reflector: optional.reflector,
+            replay_tool_executor: optional.replay_tool_executor,
+            model_selector: optional.model_selector,
+            critic_provider: optional.critic_provider,
+            critic_model: optional.critic_model,
+            plugin_registry: optional.plugin_registry,
+            strategy_context: optional.strategy_context,
+            session,
+            request,
+            permissions,
+            resilience,
+            task_bridge,
+            context_manager,
+            ctrl_rx,
+            working_dir,
+            context_metrics: None,
+        }
+    }
 }
 
 /// Action determined by checking the control channel.
