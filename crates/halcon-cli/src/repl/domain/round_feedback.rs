@@ -118,6 +118,88 @@ pub struct RoundFeedback {
     pub problem_class: Option<super::problem_classifier::ProblemClass>,
     /// Estimated rounds remaining to convergence (P5.4). Default: None.
     pub forecast_rounds_remaining: Option<usize>,
+
+    // ── Phase 4 fields ──────────────────────────────────────────────────
+    /// Whether the utility function recommends synthesizing this round (P3.6/P4). Default: false.
+    pub utility_should_synthesize: bool,
+    /// Number of `request_synthesis()` calls recorded this round (P4). Default: 0.
+    pub synthesis_request_count: u32,
+    /// Number of FSM transition errors this round (P4). Default: 0.
+    pub fsm_error_count: u32,
+    /// Budget manager iteration count (P4). Default: 0.
+    pub budget_iteration_count: u32,
+    /// Number of consecutive stagnation rounds detected (P4). Default: 0.
+    pub budget_stagnation_count: u32,
+    /// K5-2 token growth metric this round (P4). Default: 0.
+    pub budget_token_growth: u32,
+    /// Whether the token budget is fully exhausted (P4). Default: false.
+    pub budget_exhausted: bool,
+    /// Number of executive override signals fired this round (P4). Default: 0.
+    pub executive_signal_count: u32,
+    /// Reason for executive force, if any (P4). Default: None.
+    pub executive_force_reason: Option<String>,
+    /// Capability violation description, if any (P3.2/P4). Default: None.
+    pub capability_violation: Option<String>,
+
+    // ── Routing-adaptor fields ───────────────────────────────────────────
+    /// Security-related signals discovered in tool results this round. Default: false.
+    pub security_signals_detected: bool,
+    /// Total tool calls executed this round. Default: 0.
+    pub tool_call_count: u32,
+    /// Tool calls that returned an error this round. Default: 0.
+    pub tool_failure_count: u32,
+
+    // ── GovernanceRescue gate (ARCH-SYNC-1 fix) ──────────────────────────
+    /// `true` when SynthesisGate::GovernanceRescue would block synthesis.
+    ///
+    /// Set in `convergence_phase` BEFORE `TerminationOracle::adjudicate()`.
+    /// When `true`, the oracle MUST downgrade any `InjectSynthesis` decision to `Continue`
+    /// because synthesis quality would be below the minimum reflection threshold.
+    /// Conditions: `reflection_score < 0.15 AND rounds_executed < 3`.
+    pub governance_rescue_active: bool,
+}
+
+// ── Default ───────────────────────────────────────────────────────────────────
+
+impl Default for RoundFeedback {
+    fn default() -> Self {
+        Self {
+            round: 0,
+            combined_score: 0.5,
+            convergence_action: ConvergenceAction::Continue,
+            loop_signal: LoopSignal::Continue,
+            trajectory_trend: 0.5,
+            oscillation: 0.0,
+            replan_advised: false,
+            synthesis_advised: false,
+            tool_round: false,
+            had_errors: false,
+            mini_critic_replan: false,
+            mini_critic_synthesis: false,
+            evidence_coverage: 1.0,
+            semantic_cycle_detected: false,
+            cycle_severity: 0.0,
+            utility_score: 0.5,
+            mid_critic_action: None,
+            complexity_upgraded: false,
+            problem_class: None,
+            forecast_rounds_remaining: None,
+            utility_should_synthesize: false,
+            synthesis_request_count: 0,
+            fsm_error_count: 0,
+            budget_iteration_count: 0,
+            budget_stagnation_count: 0,
+            budget_token_growth: 0,
+            budget_exhausted: false,
+            executive_signal_count: 0,
+            executive_force_reason: None,
+            capability_violation: None,
+            security_signals_detected: false,
+            tool_call_count: 0,
+            tool_failure_count: 0,
+            governance_rescue_active: false,
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -153,6 +235,20 @@ mod tests {
             complexity_upgraded: false,
             problem_class: None,
             forecast_rounds_remaining: None,
+            utility_should_synthesize: false,
+            synthesis_request_count: 0,
+            fsm_error_count: 0,
+            budget_iteration_count: 0,
+            budget_stagnation_count: 0,
+            budget_token_growth: 0,
+            budget_exhausted: false,
+            executive_signal_count: 0,
+            executive_force_reason: None,
+            capability_violation: None,
+            security_signals_detected: false,
+            tool_call_count: 0,
+            tool_failure_count: 0,
+            governance_rescue_active: false,
         }
     }
 

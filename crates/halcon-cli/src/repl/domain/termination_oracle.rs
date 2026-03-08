@@ -91,50 +91,65 @@ impl TerminationOracle {
             return TerminationDecision::Halt;
         }
 
-        // ── Precedence 2: InjectSynthesis ─────────────────────────────────────
-        if feedback.convergence_action == ConvergenceAction::Synthesize {
-            return TerminationDecision::InjectSynthesis {
-                reason: SynthesisReason::ConvergenceControllerSynthesizeAction,
-            };
+        // ── GovernanceRescue gate (ARCH-SYNC-1 fix) ───────────────────────────
+        // When SynthesisGate::GovernanceRescue would block synthesis (reflection_score < 0.15
+        // AND rounds_executed < 3), ALL InjectSynthesis paths below are skipped.
+        // Halt (Precedence 1) is unaffected — hard stops always fire.
+        // This ensures TerminationOracle cannot bypass the quality gate.
+        if feedback.governance_rescue_active {
+            tracing::warn!(
+                round = feedback.round,
+                reflection_score = feedback.combined_score,
+                "GovernanceRescue: Synthesize blocked — reflection below threshold"
+            );
         }
-        if feedback.loop_signal == LoopSignal::InjectSynthesis {
-            return TerminationDecision::InjectSynthesis {
-                reason: SynthesisReason::LoopGuardInjectSynthesis,
-            };
-        }
-        if feedback.synthesis_advised {
-            // Phase 3.6: Utility-based synthesis delay.
-            // RoundScorer's synthesis_advised is the weakest synthesis signal. When the
-            // convergence utility score is above the synthesis threshold, delay synthesis
-            // to let the model continue productive work. Fall-through to Phase 6 legacy
-            // evidence check as a safety net.
-            const UTILITY_SYNTHESIS_THRESHOLD: f64 = 0.35;
-            const EVIDENCE_COVERAGE_THRESHOLD: f64 = 0.30;
-            const LATE_ROUND_CUTOFF: usize = 8;
 
-            // Primary gate: utility score (P3.6)
-            if feedback.utility_score > UTILITY_SYNTHESIS_THRESHOLD {
-                tracing::debug!(
-                    round = feedback.round,
-                    utility_score = %feedback.utility_score,
-                    "Oracle: delaying synthesis — utility above threshold, work still productive"
-                );
-                // Fall through to lower-precedence checks (Replan/ForceNoTools/Continue).
-            }
-            // Legacy fallback: evidence coverage (Phase 6)
-            else if feedback.evidence_coverage < EVIDENCE_COVERAGE_THRESHOLD
-                && feedback.round < LATE_ROUND_CUTOFF
-            {
-                tracing::debug!(
-                    round = feedback.round,
-                    evidence_coverage = %feedback.evidence_coverage,
-                    "Oracle: delaying synthesis — low evidence coverage, allowing more collection"
-                );
-                // Fall through to lower-precedence checks (Replan/ForceNoTools/Continue).
-            } else {
+        // ── Precedence 2: InjectSynthesis ─────────────────────────────────────
+        if !feedback.governance_rescue_active {
+            if feedback.convergence_action == ConvergenceAction::Synthesize {
                 return TerminationDecision::InjectSynthesis {
-                    reason: SynthesisReason::RoundScorerConsecutiveRegression,
+                    reason: SynthesisReason::ConvergenceControllerSynthesizeAction,
                 };
+            }
+            if feedback.loop_signal == LoopSignal::InjectSynthesis {
+                return TerminationDecision::InjectSynthesis {
+                    reason: SynthesisReason::LoopGuardInjectSynthesis,
+                };
+            }
+            if feedback.synthesis_advised {
+                // Phase 3.6: Utility-based synthesis delay.
+                // RoundScorer's synthesis_advised is the weakest synthesis signal. When the
+                // convergence utility score is above the synthesis threshold, delay synthesis
+                // to let the model continue productive work. Fall-through to Phase 6 legacy
+                // evidence check as a safety net.
+                const UTILITY_SYNTHESIS_THRESHOLD: f64 = 0.35;
+                const EVIDENCE_COVERAGE_THRESHOLD: f64 = 0.30;
+                const LATE_ROUND_CUTOFF: usize = 8;
+
+                // Primary gate: utility score (P3.6)
+                if feedback.utility_score > UTILITY_SYNTHESIS_THRESHOLD {
+                    tracing::debug!(
+                        round = feedback.round,
+                        utility_score = %feedback.utility_score,
+                        "Oracle: delaying synthesis — utility above threshold, work still productive"
+                    );
+                    // Fall through to lower-precedence checks (Replan/ForceNoTools/Continue).
+                }
+                // Legacy fallback: evidence coverage (Phase 6)
+                else if feedback.evidence_coverage < EVIDENCE_COVERAGE_THRESHOLD
+                    && feedback.round < LATE_ROUND_CUTOFF
+                {
+                    tracing::debug!(
+                        round = feedback.round,
+                        evidence_coverage = %feedback.evidence_coverage,
+                        "Oracle: delaying synthesis — low evidence coverage, allowing more collection"
+                    );
+                    // Fall through to lower-precedence checks (Replan/ForceNoTools/Continue).
+                } else {
+                    return TerminationDecision::InjectSynthesis {
+                        reason: SynthesisReason::RoundScorerConsecutiveRegression,
+                    };
+                }
             }
         }
 
@@ -160,7 +175,7 @@ impl TerminationOracle {
         // Its signals have lower precedence than all other replan/synthesis sources
         // but higher precedence than ForceNoTools/Continue.
         // Oracle Halt (precedence 1) always wins over mini-critic.
-        if feedback.mini_critic_synthesis {
+        if feedback.mini_critic_synthesis && !feedback.governance_rescue_active {
             return TerminationDecision::InjectSynthesis {
                 reason: SynthesisReason::ConvergenceControllerSynthesizeAction,
             };
@@ -210,6 +225,20 @@ mod tests {
             complexity_upgraded: false,
             problem_class: None,
             forecast_rounds_remaining: None,
+            utility_should_synthesize: false,
+            synthesis_request_count: 0,
+            fsm_error_count: 0,
+            budget_iteration_count: 0,
+            budget_stagnation_count: 0,
+            budget_token_growth: 0,
+            budget_exhausted: false,
+            executive_signal_count: 0,
+            executive_force_reason: None,
+            capability_violation: None,
+            security_signals_detected: false,
+            tool_call_count: 0,
+            tool_failure_count: 0,
+            governance_rescue_active: false,
         }
     }
 
@@ -505,6 +534,74 @@ mod tests {
             TerminationDecision::Replan {
                 reason: ReplanReason::RoundScorerLowTrajectory,
             }
+        );
+    }
+
+    // ── ARCH-SYNC-1: GovernanceRescue cannot be bypassed by oracle ───────────
+
+    #[test]
+    fn synthesis_gate_governance_rescue_blocks_convergence_synthesize() {
+        let mut fb = base_feedback();
+        // ConvergenceController says Synthesize — strongest synthesis signal
+        fb.convergence_action = ConvergenceAction::Synthesize;
+        // GovernanceRescue conditions: reflection_score < 0.15 AND rounds < 3
+        fb.governance_rescue_active = true;
+        // Oracle MUST downgrade to Continue (not InjectSynthesis)
+        assert_eq!(
+            TerminationDecision::Continue,
+            TerminationOracle::adjudicate(&fb),
+            "GovernanceRescue must block ConvergenceController::Synthesize"
+        );
+    }
+
+    #[test]
+    fn synthesis_gate_governance_rescue_blocks_loop_guard_inject_synthesis() {
+        let mut fb = base_feedback();
+        fb.loop_signal = LoopSignal::InjectSynthesis;
+        fb.governance_rescue_active = true;
+        assert_eq!(
+            TerminationDecision::Continue,
+            TerminationOracle::adjudicate(&fb),
+            "GovernanceRescue must block LoopGuard::InjectSynthesis"
+        );
+    }
+
+    #[test]
+    fn synthesis_gate_governance_rescue_blocks_mini_critic_synthesis() {
+        let mut fb = base_feedback();
+        fb.mini_critic_synthesis = true;
+        fb.governance_rescue_active = true;
+        assert_eq!(
+            TerminationDecision::Continue,
+            TerminationOracle::adjudicate(&fb),
+            "GovernanceRescue must block mini_critic_synthesis"
+        );
+    }
+
+    #[test]
+    fn synthesis_gate_governance_rescue_does_not_block_halt() {
+        let mut fb = base_feedback();
+        // Halt always fires — GovernanceRescue only blocks synthesis
+        fb.convergence_action = ConvergenceAction::Halt;
+        fb.governance_rescue_active = true;
+        assert_eq!(
+            TerminationDecision::Halt,
+            TerminationOracle::adjudicate(&fb),
+            "GovernanceRescue must NOT block Halt"
+        );
+    }
+
+    #[test]
+    fn governance_rescue_inactive_allows_synthesize() {
+        let mut fb = base_feedback();
+        fb.convergence_action = ConvergenceAction::Synthesize;
+        // governance_rescue_active = false (default) → synthesis proceeds normally
+        assert_eq!(
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::ConvergenceControllerSynthesizeAction,
+            },
+            TerminationOracle::adjudicate(&fb),
+            "With governance_rescue_active=false, Synthesize must be honored"
         );
     }
 }

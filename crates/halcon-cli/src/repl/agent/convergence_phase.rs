@@ -531,6 +531,13 @@ pub(super) async fn run(
             );
             let forecast_rounds_remaining = Some(forecast.estimated_rounds_remaining);
 
+            // ARCH-SYNC-1: Compute GovernanceRescue gate BEFORE TerminationOracle runs.
+            // Mirrors SynthesisGate::evaluate(GovernanceRescue, ctx) suppression rule:
+            // block synthesis when reflection_score < 0.15 AND rounds_executed < 3.
+            // This flag is passed through RoundFeedback so TerminationOracle can enforce it.
+            let governance_rescue_active =
+                state.convergence.last_convergence_ratio < 0.15 && state.rounds < 3;
+
             let round_feedback = RoundFeedback {
                 round,
                 combined_score: eval.combined_score,
@@ -565,6 +572,7 @@ pub(super) async fn run(
                 security_signals_detected: false,
                 tool_call_count: (tool_successes.len() + tool_failures.len()) as u32,
                 tool_failure_count: tool_failures.len() as u32,
+                governance_rescue_active,
             };
 
             // P0-2: TerminationOracle — AUTHORITATIVE (shadow mode removed).
