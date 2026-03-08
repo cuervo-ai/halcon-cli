@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use halcon_core::types::PolicyConfig;
 
-use super::text_utils::extract_keywords;
+use super::super::domain::text_utils::extract_keywords;
 
 /// Per-round evaluation snapshot produced by [`RoundScorer`].
 ///

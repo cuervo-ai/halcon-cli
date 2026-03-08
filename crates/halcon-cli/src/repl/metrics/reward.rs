@@ -8,8 +8,8 @@
 //! - Plan coherence (semantic drift from original goal)
 //! - Oscillation penalty (cross-type instability from ToolLoopGuard)
 
-use super::agent::StopCondition;
-use super::plugins::PluginCostSnapshot;
+use super::super::agent::StopCondition;
+use super::super::plugins::PluginCostSnapshot;
 
 /// All raw signals collected after a completed agent loop.
 #[derive(Debug, Clone)]

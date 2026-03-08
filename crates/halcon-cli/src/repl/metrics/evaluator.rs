@@ -5,7 +5,7 @@
 //! - Efficiency (round utilization)
 //! - Completion (did it produce output?)
 
-use super::agent_types::StopCondition;
+use super::super::agent_types::StopCondition;
 
 /// Result of agent loop execution (simplified view for evaluation).
 #[derive(Debug, Clone)]
