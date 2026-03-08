@@ -1,9 +1,8 @@
-# Cuervo CLI — Documentación de Producto
+# Halcon CLI — Índice Maestro de Documentación
 
 **Plataforma de IA Generativa para Desarrollo de Software**
-**Versión del documento:** 2.0
-**Fecha de inicio:** 6 de febrero de 2026
-**Última actualización:** 7 de febrero de 2026
+**Versión del documento:** 4.0
+**Última actualización:** 7 de marzo de 2026
 
 ---
 
@@ -13,122 +12,195 @@
 
 ---
 
-## Estructura Documental
+## Documentación de Proyecto (Raíz)
 
-### Sección 1 — Investigación del Estado del Arte
+Archivos estándar en la raíz del repositorio:
+
+| Archivo | Propósito |
+|---------|-----------|
+| [`README.md`](../README.md) | Presentación del proyecto, instalación rápida, uso |
+| [`INSTALL.md`](../INSTALL.md) | Instrucciones detalladas de instalación |
+| [`QUICKSTART.md`](../QUICKSTART.md) | Guía de inicio rápido |
+| [`CHANGELOG.md`](../CHANGELOG.md) | Historial de versiones |
+| [`RELEASE.md`](../RELEASE.md) | Proceso de release para mantenedores |
+| [`SECURITY.md`](../SECURITY.md) | Política de reporte de vulnerabilidades |
+
+---
+
+## Documentación de Contribución
+
+📁 [`docs/`](./)
+
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — Guía de contribución al proyecto
+- [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) — Código de conducta
+- [`INSTALLATION_EXAMPLES.md`](./INSTALLATION_EXAMPLES.md) — Ejemplos extendidos de instalación
+
+---
+
+## Estructura Documental — Investigación y Diseño de Producto
+
+### Sección 01 — Investigación del Estado del Arte
 📁 [`docs/01-research/`](./01-research/)
+
 - [01 - Estado del Arte 2026](./01-research/01-estado-del-arte-2026.md)
 - [02 - Landscape de Seguridad y Compliance](./01-research/02-landscape-seguridad-compliance-2026.md)
 - [03 - Comparativa de Rendimiento y Costos](./01-research/03-comparativa-rendimiento-costos.md)
 - [04 - Rust Performance Layer (napi-rs, LanceDB, Tree-sitter)](./01-research/04-rust-performance-layer.md)
+- [05 - Integración Rust con Node.js](./01-research/05-rust-nodejs-integration-report.md)
 
 **Estado:** ✅ Completado
 
-### Sección 2 — Documentación de Requerimientos
+### Sección 02 — Documentación de Requerimientos
 📁 [`docs/02-requirements/`](./02-requirements/)
+
 - [01 - Requisitos Funcionales y No Funcionales](./02-requirements/01-requisitos-funcionales-no-funcionales.md)
 - [02 - Casos de Uso](./02-requirements/02-casos-de-uso.md)
 - [03 - Arquitectura de Alto Nivel](./02-requirements/03-arquitectura-alto-nivel.md)
 
 **Estado:** ✅ Completado
 
-### Sección 3 — Arquitectura y Diseño Tecnológico
+### Sección 03 — Arquitectura y Diseño Tecnológico
 📁 [`docs/03-architecture/`](./03-architecture/)
+
 - [01 - Arquitectura Escalable (Microservicios, APIs, Almacenamiento)](./03-architecture/01-arquitectura-escalable.md)
 - [02 - Integración de Modelos Internos y Externos](./03-architecture/02-integracion-modelos.md)
+- [03 - File Intelligence (12 formatos, handlers, gap analysis)](./03-architecture/03-file-intelligence/)
+- [04 - Context Engine v2 (pipeline L0-L4, elider)](./03-architecture/04-context-engine-v2-architecture.md)
 
 **Estado:** ✅ Completado
 
-### Sección 4 — Roadmap de Desarrollo
+### Sección 04 — Roadmap de Desarrollo
 📁 [`docs/04-roadmap/`](./04-roadmap/)
+
 - [01 - Fases de Implementación, Pruebas y KPIs](./04-roadmap/01-fases-implementacion.md)
 
 **Estado:** ✅ Completado
 
-### Sección 5 — Consideraciones Legales, Éticas y de Seguridad
+### Sección 05 — Consideraciones Legales, Éticas y de Seguridad
 📁 [`docs/05-security-legal/`](./05-security-legal/)
+
 - [01 - Ética en IA y Mitigación de Sesgos](./05-security-legal/01-etica-ia-mitigacion-sesgos.md)
 - [02 - Privacidad de Datos](./05-security-legal/02-privacidad-datos.md)
 - [03 - Auditoría, Logging y Explicabilidad](./05-security-legal/03-auditoria-logging-explicabilidad.md)
 
 **Estado:** ✅ Completado
 
-### Sección 6 — Entregables Consolidados
+### Sección 06 — Entregables Consolidados
 📁 [`docs/06-deliverables/`](./06-deliverables/)
+
 - [Resumen Ejecutivo Consolidado](./06-deliverables/resumen-ejecutivo-consolidado.md)
 
 **Estado:** ✅ Completado
 
-### Sección 7 — Revisión Técnica Crítica
+### Sección 07 — Revisión Técnica Crítica
 📁 [`docs/07-review/`](./07-review/)
+
 - [01 - Revisión Técnica Crítica (5 Fases)](./07-review/01-revision-tecnica-critica.md)
 
 **Estado:** ✅ Completado
 
-### Sección 8 — Diseño Técnico Enterprise (Deep Design)
+### Sección 08 — Diseño Técnico Enterprise
 📁 [`docs/08-enterprise-design/`](./08-enterprise-design/)
+
 - [01 - Arquitectura de Contexto (Context Layer)](./08-enterprise-design/01-context-architecture.md)
 - [02 - Identidad, Login y Autorización (IAM)](./08-enterprise-design/02-iam-architecture.md)
 - [03 - Conectores e Integraciones (Integration Fabric)](./08-enterprise-design/03-integration-fabric.md)
 - [04 - Extensibilidad y Plataforma](./08-enterprise-design/04-extensibility-platform.md)
 - [05 - Seguridad, Compliance y Observabilidad](./08-enterprise-design/05-security-compliance-observability.md)
 - [06 - Entregables Consolidados](./08-enterprise-design/06-consolidated-deliverables.md)
+- [07 - Desktop Control Plane](./08-enterprise-design/07-desktop-control-plane/)
+- [08 - Engineering Utilities](./08-enterprise-design/08-engineering-utilities/)
 
 **Estado:** ✅ Completado
 
-### Sección 9 — Sistema de Conocimiento y RAG (Knowledge System)
+### Sección 09 — Sistema de Conocimiento y RAG
 📁 [`docs/09-knowledge-system/`](./09-knowledge-system/)
-- [01 - Estrategia de Vectorización (Knowledge Engineering)](./09-knowledge-system/01-vectorization-strategy.md)
+
+- [01 - Estrategia de Vectorización](./09-knowledge-system/01-vectorization-strategy.md)
 - [02 - Arquitectura del Knowledge Store](./09-knowledge-system/02-knowledge-store.md)
 - [03 - MCP Agent de Documentación](./09-knowledge-system/03-mcp-doc-agent.md)
-- [04 - Automatización DocOps (Doc ↔ Code)](./09-knowledge-system/04-docops-automation.md)
+- [04 - Automatización DocOps](./09-knowledge-system/04-docops-automation.md)
 - [05 - Mejores Prácticas y Estándares 2026](./09-knowledge-system/05-best-practices-2026.md)
-- [06 - Entregables Consolidados (Interfaces, Modelo de Datos, Roadmap, Riesgos)](./09-knowledge-system/06-consolidated-deliverables.md)
+- [06 - Entregables Consolidados](./09-knowledge-system/06-consolidated-deliverables.md)
 
 **Estado:** ✅ Completado
 
 ### Sección 10 — Estrategia DevSecOps 2026
-📁 [`docs/10-devsecops/`](./10-devsecops/)
-- [01 - Estrategia DevSecOps 2026](./10-devsecops/01-devsecops-strategy-2026.md)
-- [02 - Implementación de Seguridad Integrada](./10-devsecops/02-security-implementation.md) (Planeado)
-- [03 - Pipeline CI/CD Seguro](./10-devsecops/03-secure-cicd-pipeline.md) (Planeado)
-- [04 - Compliance Automatizado](./10-devsecops/04-automated-compliance.md) (Planeado)
-- [05 - Observabilidad y Monitoreo](./10-devsecops/05-observability-monitoring.md) (Planeado)
+📁 [`docs/10-devsecops/`](./10-devsecops/) *(en desarrollo)*
+
+- 01 - Estrategia DevSecOps 2026 *(planeado)*
+- 02 - Implementación de Seguridad Integrada *(planeado)*
+- 03 - Pipeline CI/CD Seguro *(planeado)*
+- 04 - Compliance Automatizado *(planeado)*
+- 05 - Observabilidad y Monitoreo *(planeado)*
 
 **Estado:** 🚧 En Desarrollo
 
-### Diagramas
-📁 [`docs/diagrams/`](./diagrams/)
-- Diagramas de arquitectura (ASCII + Mermaid)
-- Diagramas de flujo de datos
-- Diagramas de deployment
+### Sección 11 — Context Servers (MCP)
+📁 [`docs/11-context-servers/`](./11-context-servers/)
 
-### Documentación Técnica
-📁 [Raíz del Proyecto](./)
-- [README.md](./README.md) - Documentación principal
-- [SECURITY.md](./SECURITY.md) - Políticas y arquitectura de seguridad
-- [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md) - Guía para desarrolladores
-- [CONTRIBUTING.md](./CONTRIBUTING.md) - Guía de contribución
-- [CONFIGURATION_EXAMPLES.md](./CONFIGURATION_EXAMPLES.md) - Ejemplos de configuración
-- [CHANGELOG.md](./CHANGELOG.md) - Historial de cambios
-- [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) - Código de conducta
+- [Arquitectura](./11-context-servers/CONTEXT_SERVERS_ARCHITECTURE.md)
+- [Diagrama de Arquitectura](./11-context-servers/CONTEXT_SERVERS_ARCHITECTURE_DIAGRAM.md)
+- [Resumen Ejecutivo](./11-context-servers/CONTEXT_SERVERS_EXECUTIVE_SUMMARY.md)
+- [Guía de Integración](./11-context-servers/CONTEXT_SERVERS_INTEGRATION_GUIDE.md)
+- [Quick Start](./11-context-servers/CONTEXT_SERVERS_QUICK_START.md)
 
-### Configuraciones y Scripts
-📁 [`security/`](./security/)
-- [config.toml](./security/config.toml) - Configuración de seguridad
-- [seccomp.json](./security/seccomp.json) - Perfil seccomp para containers
-
-📁 [`scripts/security/`](./scripts/security/)
-- [pre-commit.sh](./scripts/security/pre-commit.sh) - Hooks de seguridad pre-commit
-
-📁 [`.github/workflows/`](./.github/workflows/)
-- [devsecops.yml](./.github/workflows/devsecops.yml) - Pipeline DevSecOps
+**Estado:** ✅ Completado
 
 ---
 
-## Contexto del Ecosistema Cuervo
+## Documentación Técnica para Desarrolladores
 
-Cuervo CLI se integra en un ecosistema existente de servicios:
+📁 [`docs/technical/`](./technical/)
+
+| Documento | Descripción |
+|-----------|-------------|
+| [`DEVELOPER_GUIDE.md`](./technical/DEVELOPER_GUIDE.md) | Guía completa para desarrolladores |
+| [`CONFIGURATION_EXAMPLES.md`](./technical/CONFIGURATION_EXAMPLES.md) | Ejemplos de configuración avanzada |
+| [`TOOLS_INVENTORY.md`](./technical/TOOLS_INVENTORY.md) | Inventario completo de las 23+ herramientas nativas |
+| [`ARCHITECTURE_TRACE.md`](./technical/ARCHITECTURE_TRACE.md) | Trazabilidad de decisiones arquitectónicas |
+| [`CRITICAL_GOTCHAS_PERMISSION_SYSTEM.md`](./technical/CRITICAL_GOTCHAS_PERMISSION_SYSTEM.md) | Comportamientos no obvios del sistema de permisos |
+| [`INTEGRATION_HUB_ARCHITECTURE.md`](./technical/INTEGRATION_HUB_ARCHITECTURE.md) | Arquitectura del Integration Hub |
+| [`DISTRIBUTION_SUMMARY.md`](./technical/DISTRIBUTION_SUMMARY.md) | Resumen del sistema de distribución binaria |
+| [`claude-code-vs-halcon-2026.md`](./technical/claude-code-vs-halcon-2026.md) | Comparativa Claude Code vs Halcon CLI |
+
+---
+
+## Seguridad
+
+📁 [`docs/security/`](./security/)
+
+- [`SECURITY.md`](./security/SECURITY.md) — Arquitectura de seguridad en capas (7 capas, controles, implementación)
+
+> **Nota:** El archivo [`SECURITY.md`](../SECURITY.md) en la raíz del repositorio contiene la **política de reporte de vulnerabilidades** (GitHub security policy). Este documento en `docs/security/` es la **arquitectura técnica de seguridad**.
+
+---
+
+## UX y Diseño
+
+📁 [`docs/ux/`](./ux/)
+
+- [`research/`](./ux/research/) — UX Benchmark, User Journeys, Heuristic Evaluation
+- [`design/`](./ux/design/) — System Spec
+- [`implementation/`](./ux/implementation/) — UX Specs, WCAG Compliance, Feedback Guidelines
+- [`qa/`](./ux/qa/) — QA Report
+- [`feedback/`](./ux/feedback/) — Usability Report, Metrics Report, Iteration Log
+
+---
+
+## Archivo Histórico
+
+📁 [`docs/archive/`](./archive/) — Documentos de sesiones de trabajo anteriores
+
+| Subcarpeta | Contenido |
+|-----------|-----------|
+| [`phase-completion/`](./archive/phase-completion/) | 47 informes de finalización de fases (Phase 2-I, A, B, I1-I6) |
+| [`reports/`](./archive/reports/) | 37 informes de raíz causa, estabilidad, auditoría, herramientas |
+| [`integrations/`](./archive/integrations/) | 7 informes de integración (HICON, MOMOTO) |
+
+---
+
+## Ecosistema Cuervo
 
 | Servicio | Rol | Stack |
 |----------|-----|-------|
@@ -137,100 +209,13 @@ Cuervo CLI se integra en un ecosistema existente de servicios:
 | cuervo-auth-service | Autenticación y autorización | TypeScript/Express + TypeORM |
 | cuervo-prompt-service | Gestión de templates de prompts | TypeScript/Express (DDD) |
 | cuervo-picura-ide | IDE para diseño de workflows AI | Rust/WASM + TypeScript |
-| cuervo-analysis | Motor de análisis e insights | TypeScript (espejo de main) |
+| cuervo-analysis | Motor de análisis e insights | TypeScript |
 | cuervo-iac | Infrastructure as Code | Terraform + K8s |
 | cuervo-video-intelligence | Procesamiento de video con IA | TypeScript + Go + Rust + Python |
 | cuervo-zuclubit | Hub de investigación (MeNou) | Rust/Leptos + Tauri |
 
 ---
 
-## Arquitectura DevSecOps
-
-### Principios de Diseño
-1. **Security by Design**: Seguridad integrada desde el diseño inicial
-2. **Shift-Left Security**: Detección temprana de vulnerabilidades
-3. **Compliance as Code**: Políticas de compliance definidas como código
-4. **Zero-Trust Architecture**: Verificación continua de identidad y acceso
-5. **AI Safety Framework**: Garantías de seguridad para operaciones de IA
-
-### Componentes Clave
-- **Security Core**: Detección de amenazas, motor de compliance, ejecutor de políticas
-- **Runtime Protection**: Monitoreo de comportamiento, detección de anomalías
-- **Data Protection**: Cifrado, tokenización, clasificación de datos
-- **Supply Chain Security**: SBOM, verificación de procedencia, scanning de dependencias
-- **Compliance Automation**: Frameworks GDPR, SOC2, ISO27001, NIST AI RMF
-
-### Pipeline DevSecOps
-```
-Desarrollo → CI/CD Seguro → Despliegue → Runtime Protection
-    ↓           ↓              ↓              ↓
-Pre-commit   SAST/SCA     Container    Monitoring
-Security     Secrets      Security     & Alerting
-Hooks        Detection    Scanning     Threat Detection
-```
-
----
-
-## Equipo y Responsabilidades
-
-| Rol | Responsabilidad |
-|-----|----------------|
-| Product Owner | Visión de producto, priorización |
-| Tech Lead / Architect | Decisiones arquitectónicas, diseño técnico |
-| AI/ML Engineer | Integración de modelos, fine-tuning, evaluación |
-| Backend Engineer | APIs, microservicios, infraestructura |
-| Frontend Engineer | CLI UX, IDE integration |
-| Security Engineer | Compliance, auditoría, pen testing, DevSecOps |
-| DevOps/SRE | IaC, CI/CD, monitoring, SLAs, container security |
-| Compliance Officer | Verificación normativa, auditorías, reporting |
-
----
-
-## Roadmap de Seguridad y Compliance
-
-### Fase 1: Fundación (Q1 2026)
-- ✅ Implementación básica de seguridad
-- ✅ Pipeline CI/CD con scanning básico
-- ✅ Documentación de seguridad inicial
-
-### Fase 2: Fortalecimiento (Q2 2026)
-- 🚧 Zero-Trust Architecture
-- 🚧 Automated compliance checking
-- 🚧 Advanced threat detection
-
-### Fase 3: Madurez (Q3 2026)
-- 📅 AI-native security features
-- 📅 Automated incident response
-- 📅 Continuous compliance monitoring
-
-### Fase 4: Excelencia (Q4 2026)
-- 📅 SOC 2 Type II certification
-- 📅 ISO 27001 certification
-- 📅 Enterprise security integrations
-
----
-
-## Recursos Adicionales
-
-### Repositorios Relacionados
-- **Cuervo CLI**: https://github.com/cuervo-ai/cuervo-cli
-- **Documentación**: https://docs.cuervo.ai
-- **Comunidad**: https://github.com/cuervo-ai/community
-
-### Contacto de Seguridad
-- **Reporte de Vulnerabilidades**: security@cuervo.ai
-- **Soporte de Compliance**: compliance@cuervo.ai
-- **Consultas Generales**: info@cuervo.ai
-
-### Certificaciones Objetivo
-- SOC 2 Type II
-- ISO 27001:2022
-- GDPR Compliance
-- NIST AI RMF Alignment
-- OWASP LLM Security Top 10
-
----
-
-*Última actualización: 7 de febrero de 2026*  
-*Versión del Documento: 2.0*  
-*Mantenedor: Equipo de Arquitectura Cuervo CLI*
+*Última actualización: 7 de marzo de 2026*
+*Versión del Documento: 4.0*
+*Mantenedor: Equipo de Arquitectura Halcon CLI*

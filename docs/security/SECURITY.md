@@ -1,4 +1,7 @@
-# Cuervo CLI - Security Implementation
+# Halcon CLI — Security Architecture
+
+> **Para reportar vulnerabilidades** ver [`SECURITY.md`](../../SECURITY.md) en la raíz del repositorio.
+> Este documento describe la **arquitectura técnica de seguridad**, no la política de divulgación.
 
 ## Overview
 
