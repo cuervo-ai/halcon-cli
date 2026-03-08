@@ -14,9 +14,9 @@ use halcon_core::types::{DomainEvent, EventPayload, ResilienceConfig};
 use halcon_core::EventSender;
 use halcon_storage::AsyncDatabase;
 
-use super::backpressure::{BackpressureGuard, InvokePermit};
+use super::super::backpressure::{BackpressureGuard, InvokePermit};
 use super::circuit_breaker::{BreakerState, ProviderBreaker};
-use super::health::{HealthLevel, HealthScorer};
+use super::super::health::{HealthLevel, HealthScorer};
 
 /// Result of a pre-invoke check.
 #[derive(Debug)]

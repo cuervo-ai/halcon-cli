@@ -2,7 +2,7 @@
 ///
 /// Does this project have a HALCON.md? Sync, file-existence-only, <1ms.
 
-use super::project_inspector::ProjectInspector;
+use super::super::project_inspector::ProjectInspector;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnboardingStatus {
