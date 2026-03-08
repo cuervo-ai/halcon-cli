@@ -102,7 +102,8 @@ pub use security::lifecycle as permission_lifecycle;
 pub use security::output_risk as output_risk_scorer;
 
 // Session and resilience.
-pub mod ci_detection;
+// ci_detection moved to git_tools/ (C-5)
+pub use git_tools::ci_detection;
 pub mod compaction;
 pub mod console;
 pub mod delegation;
@@ -175,7 +176,8 @@ pub use servers::test_results as test_results_server;
 pub use servers::runtime_metrics as runtime_metrics_server;
 pub use servers::security as security_server;
 pub use servers::support as support_server;
-pub mod sdlc_phase_detector;
+// sdlc_phase_detector moved to git_tools/ (C-5)
+pub use git_tools::sdlc_phase as sdlc_phase_detector;
 pub mod replay_executor;
 pub mod replay_runner;
 pub mod search_engine_global;
@@ -202,29 +204,31 @@ pub mod task_scheduler;
 // schema_validator moved to security/ (C-2)
 pub mod tool_selector;
 pub mod tool_speculation;
-pub mod traceback_parser;
-pub mod code_instrumentation;
+// git_tools/ migration (C-5): traceback, instrumentation, patch, edit, git, ci, ide
+pub use git_tools::traceback as traceback_parser;
+pub use git_tools::instrumentation as code_instrumentation;
 // risk_tier_classifier moved to security/risk_tier.rs
 pub use security::risk_tier as risk_tier_classifier;
-pub mod patch_preview_engine;
-pub mod edit_transaction;
-pub mod safe_edit_manager;
+pub use git_tools::patch as patch_preview_engine;
+pub use git_tools::edit_transaction;
+pub use git_tools::safe_edit as safe_edit_manager;
 // Phase 2 — Git Context & Branch Awareness
-pub mod git_context;
-pub mod branch_divergence;
-pub mod commit_reward_tracker;
-pub mod git_event_listener;
+pub use git_tools::context as git_context;
+pub use git_tools::branch as branch_divergence;
+pub use git_tools::commit_rewards as commit_reward_tracker;
+pub use git_tools::events as git_event_listener;
 // Phase 3 — Test Runner Bridge
-pub mod test_result_parsers;
-pub mod test_runner_bridge;
+pub use git_tools::test_results as test_result_parsers;
+pub use git_tools::test_runner as test_runner_bridge;
 // Phase 4 — CI Feedback Loop
-pub mod ci_result_ingestor;
+pub use git_tools::ci_ingestor as ci_result_ingestor;
 // Phase 5 — IDE Protocol Handler
-pub mod unsaved_buffer_tracker;
-pub mod ide_protocol_handler;
+pub use git_tools::unsaved_buffer as unsaved_buffer_tracker;
+pub use git_tools::ide_protocol as ide_protocol_handler;
 pub mod dev_gateway;
 // Phase 6 — AST Symbol Extractor (feature-gated ast-symbols; regex backend compiles always)
-pub mod ast_symbol_extractor;
+// ast_symbol_extractor moved to git_tools/ (C-5)
+pub use git_tools::ast_symbols as ast_symbol_extractor;
 // Phase 7 — Runtime Signal Ingestor (OTEL-compatible, feature-gated otel)
 pub mod runtime_signal_ingestor;
 // Phase 8 — Dev Ecosystem Integration Tests (cross-module invariant validation)
@@ -238,7 +242,8 @@ pub mod macro_feedback;
 pub mod early_convergence;
 
 // Phase 94 — Project Onboarding System
-pub mod project_inspector;
+// project_inspector moved to git_tools/ (C-5)
+pub use git_tools::project_inspector;
 pub mod onboarding;
 
 // Phase 95 — Plugin Auto-Implantation & Suggestion (now in plugins/ subdir)
