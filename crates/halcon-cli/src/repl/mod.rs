@@ -71,8 +71,8 @@ pub(crate) use security::tool_trust;
 // Anomaly detection and loop integrity. Moved to metrics/ (C-6)
 pub(crate) use metrics::anomaly as anomaly_detector;
 pub(crate) use metrics::arima as arima_predictor;
-pub mod metacognitive_loop;
-pub mod loop_guard;
+pub use domain::metacognitive_loop;
+pub(crate) use domain::loop_guard;
 
 // Context assembly and management — moved to context/ (C-4)
 pub mod artifact_store;
@@ -84,7 +84,7 @@ pub use context::hybrid_retriever;
 pub use context::consolidator as memory_consolidator;
 pub use context::memory as memory_source;
 pub use context::reflection as reflection_source;
-pub mod reflexion;
+pub use domain::reflexion;
 pub use context::repo_map as repo_map_source;
 
 // Commands and authorization and security.
@@ -112,8 +112,8 @@ pub mod console;
 pub mod delegation;
 /// Evidence Boundary System — Zero Evidence → Zero Output policy.
 /// Tracks textual evidence from file-reading tools; blocks synthesis on binary/empty files.
-pub mod evidence_pipeline;
-pub(crate) mod evidence_graph;
+pub use domain::evidence_pipeline;
+pub(crate) use domain::evidence_graph;
 pub mod execution_tracker;
 pub mod failure_tracker;
 // health, metrics_store moved to metrics/ (C-6)
@@ -187,7 +187,7 @@ pub mod replay_executor;
 pub mod replay_runner;
 // search_engine_global moved to bridges/ (C-7)
 pub use bridges::search as search_engine_global;
-pub mod self_corrector;
+pub use domain::self_corrector;
 pub mod speculative;
 // evaluator moved to metrics/ (C-6)
 pub use metrics::evaluator;
@@ -251,7 +251,7 @@ pub mod dev_ecosystem_integration_tests;
 pub use planning::compressor as plan_compressor;
 // macro_feedback moved to metrics/ (C-6)
 pub use metrics::macro_feedback;
-pub mod early_convergence;
+pub use domain::early_convergence;
 
 // Phase 94 — Project Onboarding System
 // project_inspector moved to git_tools/ (C-5)

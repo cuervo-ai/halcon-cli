@@ -108,3 +108,26 @@ pub mod progress_policy;
 
 /// Tool result provenance — ToolResultSource and SyntheticReason (P5A).
 pub mod tool_result;
+
+// ── MIGRATION-2026: files moved from repl/ root ───────────────────────────────
+
+/// Early convergence detection — triggers synthesis before token budget exhaustion.
+pub mod early_convergence;
+
+/// Evidence graph — structured evidence tracking with provenance.
+pub(crate) mod evidence_graph;
+
+/// Evidence pipeline — zero-evidence boundary enforcement.
+pub mod evidence_pipeline;
+
+/// Loop guard — oscillation detection and round type classification.
+pub(crate) mod loop_guard;
+
+/// Metacognitive loop — Φ coherence and self-awareness.
+pub mod metacognitive_loop;
+
+/// Reflexion self-improvement loop (NeurIPS 2023 pattern).
+pub mod reflexion;
+
+/// Agent self-correction strategies — adaptive correction on anomalies.
+pub mod self_corrector;
