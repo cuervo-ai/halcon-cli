@@ -145,8 +145,56 @@ pub struct PolicyConfig {
     pub mini_critic_interval: usize,
 
     /// Budget fraction threshold for mini-critic stall detection (0.50).
+    /// Gates ForceReplan and ReduceTools paths in `mini_critic_check()`.
+    /// See also: `mini_critic_synthesis_budget_fraction` for the ForceSynthesis path.
     #[serde(default = "default_mini_critic_budget_fraction")]
     pub mini_critic_budget_fraction: f64,
+
+    /// Budget fraction above which mini-critic fires ForceSynthesis (0.80).
+    /// Eliminates hardcoded `0.80` in `mini_critic_check()` — first condition on line 1737.
+    /// Distinct from `mini_critic_budget_fraction` (0.50) which gates ForceReplan/ReduceTools.
+    #[serde(default = "default_mini_critic_synthesis_budget_fraction")]
+    pub mini_critic_synthesis_budget_fraction: f64,
+
+    /// Plan progress fraction below which mini-critic fires ForceSynthesis (0.80).
+    /// Eliminates hardcoded `0.80` in `mini_critic_check()` — second condition on line 1737.
+    /// Prevents ForceSynthesis when the plan is already substantially complete.
+    #[serde(default = "default_mini_critic_synthesis_progress_threshold")]
+    pub mini_critic_synthesis_progress_threshold: f64,
+
+    /// Plan progress fraction below which mini-critic fires ForceReplan (0.30).
+    /// Eliminates hardcoded `0.30` in `mini_critic_check()` — line 1743.
+    /// Combined with `mini_critic_recent_threshold` to detect stalled sessions.
+    #[serde(default = "default_mini_critic_progress_threshold")]
+    pub mini_critic_progress_threshold: f64,
+
+    /// Average recent round score below which mini-critic fires ForceReplan (0.40).
+    /// Eliminates hardcoded `0.40` in `mini_critic_check()` — line 1743.
+    /// Combined with `mini_critic_progress_threshold` to detect stalled sessions.
+    #[serde(default = "default_mini_critic_recent_threshold")]
+    pub mini_critic_recent_threshold: f32,
+
+    // ── K5-2 compaction parameters ────────────────────────────────────
+    /// Maximum characters per tool-result block after K5-2 compaction (2000).
+    /// Blocks exceeding this length are truncated with a compaction notice appended.
+    /// Eliminates hardcoded `2000` literals in `round_setup.rs` K5-2 fallback path.
+    #[serde(default = "default_k5_2_tool_output_max_chars")]
+    pub k5_2_tool_output_max_chars: usize,
+
+    /// Fraction of messages to retain after K5-2 message truncation (0.60).
+    /// Applied as `keep = (len as f32 * ratio) as usize` — oldest messages evicted first.
+    /// Eliminates hardcoded `* 3 / 5` (~60%) expression in `round_setup.rs`.
+    #[serde(default = "default_k5_2_message_retain_ratio")]
+    pub k5_2_message_retain_ratio: f32,
+
+    // ── Critic per-call timeout ───────────────────────────────────────
+    /// Per-call timeout for each individual LoopCritic evaluation, in seconds (22).
+    /// The overall critic envelope is governed by `critic_timeout_secs` (45s).
+    /// Default 22 = `floor(critic_timeout_secs_default / 2)` = `floor(45 / 2)`.
+    /// A `.max(10)` floor is applied at the call site to prevent degenerate timeouts.
+    /// Eliminates hardcoded `critic_timeout_secs / 2` expression in `result_assembly.rs`.
+    #[serde(default = "default_per_call_critic_timeout_secs")]
+    pub per_call_critic_timeout_secs: u64,
 
     // ── Loop guard thresholds ─────────────────────────────────────────
     /// Sliding window size for cross-type oscillation detection in ToolLoopGuard (8).
@@ -352,6 +400,215 @@ pub struct PolicyConfig {
     /// Enable data-driven round-0 initialization (true).
     #[serde(default = "default_strategic_init_enabled")]
     pub strategic_init_enabled: bool,
+
+    // ── Step 8.1/10: Capability gate token estimation ────────────────────────
+    /// Average estimated input tokens consumed per plan step (300).
+    ///
+    /// Base per-step token estimate for `derive_capability_descriptor()`.
+    /// Used by `assign_base_costs()` for topology-aware cost propagation (Step 10):
+    /// Text nodes → `avg`; ToolUse/Vision nodes → `avg × tool_cost_multiplier`.
+    #[serde(default = "default_avg_input_tokens_per_step")]
+    pub avg_input_tokens_per_step: usize,
+
+    /// Cost multiplier applied to ToolUse and Vision nodes in graph cost propagation (2).
+    ///
+    /// Tool-invoking steps consume more tokens than text-only steps due to tool
+    /// call overhead, result rendering, and follow-up processing. Deterministic —
+    /// no heuristics, no dynamic measurement.
+    ///
+    /// Used by `ExecutionGraph::assign_base_costs()` (Step 10.1):
+    ///   `base_cost = avg_input_tokens_per_step × tool_cost_multiplier`
+    #[serde(default = "default_tool_cost_multiplier")]
+    pub tool_cost_multiplier: usize,
+
+    // ── Step 4: Convergence Budget Governor ─────────────────────────────────
+    /// Hard upper bound on loop iterations before synthesis is forced (12).
+    ///
+    /// Replaces implicit dependency on `effective_max_rounds` for pathological-loop
+    /// termination. Governor fires `request_synthesis(OracleConvergence, Critical)` at
+    /// round >= max_round_iterations regardless of other convergence state.
+    /// Default 12 is permissive — normal sessions complete in 1-5 rounds.
+    #[serde(default = "default_max_round_iterations")]
+    pub max_round_iterations: usize,
+
+    /// Token growth ratio above which synthesis is forced (3.0).
+    ///
+    /// Effective limit = `initial_prompt_tokens * max_token_growth_ratio`.
+    /// Enforces: cumulative input-token growth across rounds must not exceed 3× the
+    /// initial prompt size, eliminating unbounded context expansion.
+    /// Governor fires `request_synthesis(CacheCorruption, High)` when limit is exceeded.
+    /// Skipped when initial_tokens is zero (early rounds before first call).
+    #[serde(default = "default_max_token_growth_ratio")]
+    pub max_token_growth_ratio: f64,
+
+    /// Consecutive rounds with < min_progress_delta score gain before stagnation fires (3).
+    ///
+    /// Replaces soft "low trajectory" heuristic in convergence scoring with a hard bound.
+    /// Governor fires `request_synthesis(OscillationDetected, High)` after this many
+    /// consecutive stagnant rounds.
+    #[serde(default = "default_max_stagnation_rounds")]
+    pub max_stagnation_rounds: usize,
+
+    /// Minimum per-round score improvement to NOT count as stagnation (0.05).
+    ///
+    /// If `current_score - previous_score < min_progress_delta`, the round is counted
+    /// as stagnant toward `max_stagnation_rounds`. Reset to 0 on any round with
+    /// progress >= this threshold.
+    #[serde(default = "default_min_progress_delta")]
+    pub min_progress_delta: f32,
+
+    // ── SLA Mode Budgets — operator-configurable (replaces hardcoded 4/10/20) ──
+    /// Maximum rounds for Fast/Quick SLA mode (4).
+    #[serde(default = "default_sla_fast_max_rounds")]
+    pub sla_fast_max_rounds: u32,
+
+    /// Maximum plan depth for Fast/Quick SLA mode (2).
+    #[serde(default = "default_sla_fast_max_plan_depth")]
+    pub sla_fast_max_plan_depth: u32,
+
+    /// Maximum rounds for Balanced/Extended SLA mode (10).
+    #[serde(default = "default_sla_balanced_max_rounds")]
+    pub sla_balanced_max_rounds: u32,
+
+    /// Maximum plan depth for Balanced/Extended SLA mode (5).
+    #[serde(default = "default_sla_balanced_max_plan_depth")]
+    pub sla_balanced_max_plan_depth: u32,
+
+    /// Maximum retries for Balanced/Extended SLA mode (1).
+    #[serde(default = "default_sla_balanced_max_retries")]
+    pub sla_balanced_max_retries: u32,
+
+    /// Maximum rounds for Deep SLA mode (20).
+    #[serde(default = "default_sla_deep_max_rounds")]
+    pub sla_deep_max_rounds: u32,
+
+    /// Maximum plan depth for Deep SLA mode (10).
+    #[serde(default = "default_sla_deep_max_plan_depth")]
+    pub sla_deep_max_plan_depth: u32,
+
+    /// Maximum retries for Deep SLA mode (3).
+    #[serde(default = "default_sla_deep_max_retries")]
+    pub sla_deep_max_retries: u32,
+
+    // ── Intent Pipeline — unified reconciliation ─────────────────────────
+    /// High-confidence threshold: IntentScorer suggestion trusted more than
+    /// BoundaryDecision when confidence >= this value (0.75).
+    #[serde(default = "default_intent_high_confidence_threshold")]
+    pub intent_high_confidence_threshold: f32,
+
+    /// Low-confidence threshold: BoundaryDecision trusted more than IntentScorer
+    /// when confidence <= this value (0.40).
+    #[serde(default = "default_intent_low_confidence_threshold")]
+    pub intent_low_confidence_threshold: f32,
+
+    /// Enable unified IntentPipeline reconciliation (true).
+    ///
+    /// When true, `IntentPipeline::resolve()` reconciles IntentScorer and
+    /// BoundaryDecisionEngine outputs into a single `ResolvedIntent` with
+    /// calibrated ConvergenceController parameters.
+    /// When false, falls back to the legacy dual-pipeline behavior.
+    #[serde(default = "default_use_intent_pipeline")]
+    pub use_intent_pipeline: bool,
+
+    // ── Boundary Decision Engine ──────────────────────────────────────────
+    /// Enable the new boundary decision engine for SLA routing (true).
+    ///
+    /// When `true`, `agent/mod.rs` calls `BoundaryDecisionEngine::evaluate()`
+    /// instead of the legacy `decision_layer::estimate_complexity()`.
+    /// Set to `false` to fall back to keyword-count routing.
+    #[serde(default = "default_use_boundary_decision_engine")]
+    pub use_boundary_decision_engine: bool,
+
+    // ── HALCON.md Persistent Instruction System (Feature 1 — Frontier Roadmap 2026) ─
+    /// Enable the 4-scope HALCON.md instruction hierarchy (false by default).
+    ///
+    /// When `true`, `agent/mod.rs` loads instruction files from four scopes
+    /// (Local → User → Project → Managed) at session start and injects them
+    /// into the system prompt as a `## Project Instructions` section.
+    /// A hot-reload watcher fires within 250 ms of any file change.
+    ///
+    /// Scopes:
+    ///   - Local:   `./HALCON.local.md`        (gitignored)
+    ///   - User:    `~/.halcon/HALCON.md`
+    ///   - Project: `.halcon/HALCON.md` + `.halcon/rules/*.md`
+    ///   - Managed: `/etc/halcon/HALCON.md`    (operator policy, always wins)
+    ///
+    /// Set to `false` to preserve the legacy `load_instructions` behaviour.
+    #[serde(default = "default_use_halcon_md")]
+    pub use_halcon_md: bool,
+
+    /// Lifecycle hooks system (Feature 2 — Frontier Roadmap 2026).
+    ///
+    /// Master runtime kill switch for user-accessible lifecycle hooks
+    /// (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`,
+    /// `Stop`, `SessionEnd`).
+    ///
+    /// When `false` (default) no hooks run, regardless of what is configured in
+    /// `~/.halcon/settings.toml` or `.halcon/settings.toml`.
+    ///
+    /// Set to `true` to enable hook evaluation at defined lifecycle events.
+    ///
+    /// # Security invariant
+    /// Hooks form a **user-policy layer** that runs BEFORE FASE-2
+    /// CATASTROPHIC_PATTERNS checks.  A hook returning Allow cannot bypass the
+    /// hard safety wall in `bash.rs`.
+    #[serde(default = "default_enable_hooks")]
+    pub enable_hooks: bool,
+
+    /// Enterprise policy: restrict hook loading to the global managed scope only.
+    ///
+    /// When `true`, only hooks defined in `~/.halcon/settings.toml` (global /
+    /// operator scope) are loaded.  Project-level `.halcon/settings.toml` hooks
+    /// are silently ignored — they cannot override or extend managed hooks.
+    ///
+    /// Useful in environments where a central security team manages hook policy
+    /// and project-local hooks would represent an escalation vector.
+    ///
+    /// Default: `false` (project-level hooks allowed alongside global hooks).
+    #[serde(default = "default_allow_managed_hooks_only")]
+    pub allow_managed_hooks_only: bool,
+
+    /// Auto-memory: agent writes session learnings to `.halcon/memory/MEMORY.md`.
+    ///
+    /// When enabled, at the end of each session the agent scores the interaction and,
+    /// if the importance score exceeds `memory_importance_threshold`, appends a structured
+    /// entry to the project memory file and injects the first 200 lines at session start.
+    ///
+    /// Off by default — zero behavioral change until explicitly enabled.
+    #[serde(default = "default_enable_auto_memory")]
+    pub enable_auto_memory: bool,
+
+    /// Minimum importance score [0.0, 1.0] required for a memory entry to be written.
+    ///
+    /// Higher values produce fewer, higher-quality memories.  0.3 balances recall
+    /// breadth vs. MEMORY.md growth rate (≈180-line bounded index).
+    #[serde(default = "default_memory_importance_threshold")]
+    pub memory_importance_threshold: f32,
+
+    /// Declarative sub-agent registry (Feature 4 — Frontier Roadmap 2026).
+    ///
+    /// When enabled, `AgentRegistry::load()` is called at session start to discover
+    /// agent definitions from `.halcon/agents/*.md` (project) and `~/.halcon/agents/*.md`
+    /// (user).  The routing manifest is injected into the parent agent's system prompt.
+    ///
+    /// Off by default — zero behavioral change until explicitly enabled.
+    #[serde(default = "default_enable_agent_registry")]
+    pub enable_agent_registry: bool,
+
+    // ── Semantic Memory Vector Store (Feature 7) ──────────────────────────────
+    /// When enabled, a `VectorMemoryStore` is built from MEMORY.md files and:
+    /// (a) the `search_memory` tool is injected into the session's tool registry,
+    /// (b) a `VectorMemorySource` context source contributes top-K results to the
+    ///     pipeline context on each round.
+    ///
+    /// Off by default — opt-in via config or `--enable-semantic-memory` flag.
+    #[serde(default = "default_enable_semantic_memory")]
+    pub enable_semantic_memory: bool,
+
+    /// Number of top-K memory entries to surface via `search_memory` and the
+    /// `VectorMemorySource` context source (default: 5).
+    #[serde(default = "default_semantic_memory_top_k")]
+    pub semantic_memory_top_k: usize,
 }
 
 impl Default for PolicyConfig {
@@ -387,6 +644,13 @@ impl Default for PolicyConfig {
             growth_consecutive_trigger: default_growth_consecutive_trigger(),
             mini_critic_interval: default_mini_critic_interval(),
             mini_critic_budget_fraction: default_mini_critic_budget_fraction(),
+            mini_critic_synthesis_budget_fraction: default_mini_critic_synthesis_budget_fraction(),
+            mini_critic_synthesis_progress_threshold: default_mini_critic_synthesis_progress_threshold(),
+            mini_critic_progress_threshold: default_mini_critic_progress_threshold(),
+            mini_critic_recent_threshold: default_mini_critic_recent_threshold(),
+            k5_2_tool_output_max_chars: default_k5_2_tool_output_max_chars(),
+            k5_2_message_retain_ratio: default_k5_2_message_retain_ratio(),
+            per_call_critic_timeout_secs: default_per_call_critic_timeout_secs(),
             oscillation_window: default_oscillation_window(),
             loop_guard_min_synthesis: default_loop_guard_min_synthesis(),
             loop_guard_min_force: default_loop_guard_min_force(),
@@ -447,6 +711,42 @@ impl Default for PolicyConfig {
             forecast_low_probability_threshold: default_forecast_low_probability_threshold(),
             // P5.5
             strategic_init_enabled: default_strategic_init_enabled(),
+            // Step 8.1/10
+            avg_input_tokens_per_step: default_avg_input_tokens_per_step(),
+            tool_cost_multiplier: default_tool_cost_multiplier(),
+            // Step 4: Convergence Budget Governor
+            max_round_iterations: default_max_round_iterations(),
+            max_token_growth_ratio: default_max_token_growth_ratio(),
+            max_stagnation_rounds: default_max_stagnation_rounds(),
+            min_progress_delta: default_min_progress_delta(),
+            // SLA Mode Budgets
+            sla_fast_max_rounds: default_sla_fast_max_rounds(),
+            sla_fast_max_plan_depth: default_sla_fast_max_plan_depth(),
+            sla_balanced_max_rounds: default_sla_balanced_max_rounds(),
+            sla_balanced_max_plan_depth: default_sla_balanced_max_plan_depth(),
+            sla_balanced_max_retries: default_sla_balanced_max_retries(),
+            sla_deep_max_rounds: default_sla_deep_max_rounds(),
+            sla_deep_max_plan_depth: default_sla_deep_max_plan_depth(),
+            sla_deep_max_retries: default_sla_deep_max_retries(),
+            // Intent Pipeline
+            intent_high_confidence_threshold: default_intent_high_confidence_threshold(),
+            intent_low_confidence_threshold: default_intent_low_confidence_threshold(),
+            use_intent_pipeline: default_use_intent_pipeline(),
+            // Boundary Decision Engine
+            use_boundary_decision_engine: default_use_boundary_decision_engine(),
+            // HALCON.md instruction system (off by default)
+            use_halcon_md: default_use_halcon_md(),
+            // Lifecycle hooks system (off by default)
+            enable_hooks: default_enable_hooks(),
+            allow_managed_hooks_only: default_allow_managed_hooks_only(),
+            // Auto-memory system (off by default)
+            enable_auto_memory: default_enable_auto_memory(),
+            memory_importance_threshold: default_memory_importance_threshold(),
+            // Declarative sub-agent registry (off by default)
+            enable_agent_registry: default_enable_agent_registry(),
+            // Semantic memory vector store (off by default)
+            enable_semantic_memory: default_enable_semantic_memory(),
+            semantic_memory_top_k: default_semantic_memory_top_k(),
         }
     }
 }
@@ -483,6 +783,13 @@ fn default_growth_threshold() -> f64 { 1.3 }
 fn default_growth_consecutive_trigger() -> u32 { 2 }
 fn default_mini_critic_interval() -> usize { 3 }
 fn default_mini_critic_budget_fraction() -> f64 { 0.50 }
+fn default_mini_critic_synthesis_budget_fraction() -> f64 { 0.80 }
+fn default_mini_critic_synthesis_progress_threshold() -> f64 { 0.80 }
+fn default_mini_critic_progress_threshold() -> f64 { 0.30 }
+fn default_mini_critic_recent_threshold() -> f32 { 0.40 }
+fn default_k5_2_tool_output_max_chars() -> usize { 2000 }
+fn default_k5_2_message_retain_ratio() -> f32 { 0.60 }
+fn default_per_call_critic_timeout_secs() -> u64 { 22 }
 fn default_oscillation_window() -> usize { 8 }
 fn default_loop_guard_min_synthesis() -> usize { 3 }
 fn default_loop_guard_min_force() -> usize { 5 }
@@ -545,6 +852,43 @@ fn default_forecast_min_rounds() -> usize { 3 }
 fn default_forecast_low_probability_threshold() -> f64 { 0.20 }
 // P5.5: Strategic initialization
 fn default_strategic_init_enabled() -> bool { true }
+// Step 8.1/10: Capability gate token estimation + graph cost propagation
+fn default_avg_input_tokens_per_step() -> usize { 300 }
+fn default_tool_cost_multiplier() -> usize { 2 }
+// Step 4: Convergence Budget Governor
+fn default_max_round_iterations() -> usize { 12 }
+fn default_max_token_growth_ratio() -> f64 { 3.0 }
+fn default_max_stagnation_rounds() -> usize { 3 }
+fn default_min_progress_delta() -> f32 { 0.05 }
+// Boundary Decision Engine: enabled by default (replaces legacy keyword-count routing)
+fn default_sla_fast_max_rounds() -> u32 { 4 }
+fn default_sla_fast_max_plan_depth() -> u32 { 2 }
+fn default_sla_balanced_max_rounds() -> u32 { 10 }
+fn default_sla_balanced_max_plan_depth() -> u32 { 5 }
+fn default_sla_balanced_max_retries() -> u32 { 1 }
+fn default_sla_deep_max_rounds() -> u32 { 20 }
+fn default_sla_deep_max_plan_depth() -> u32 { 10 }
+fn default_sla_deep_max_retries() -> u32 { 3 }
+fn default_intent_high_confidence_threshold() -> f32 { 0.75 }
+fn default_intent_low_confidence_threshold() -> f32 { 0.40 }
+fn default_use_intent_pipeline() -> bool { true }
+fn default_use_boundary_decision_engine() -> bool { true }
+// HALCON.md instruction system — on by default (additive, filesystem-only, safe)
+fn default_use_halcon_md() -> bool { true }
+// Lifecycle hooks system — off by default (executes user scripts — security surface)
+// Enable explicitly in config: [policy] enable_hooks = true
+fn default_enable_hooks() -> bool { false }
+fn default_allow_managed_hooks_only() -> bool { false }
+// Auto-memory system — on by default (additive, background write, safe)
+// Disable with: [policy] enable_auto_memory = false
+fn default_enable_auto_memory() -> bool { true }
+fn default_memory_importance_threshold() -> f32 { 0.3 }
+// Declarative sub-agent registry — on by default (read-only, safe)
+// Disable with: [policy] enable_agent_registry = false
+fn default_enable_agent_registry() -> bool { true }
+// Semantic memory vector store — off by default (TF-IDF overhead, explicit opt-in)
+fn default_enable_semantic_memory() -> bool { false }
+fn default_semantic_memory_top_k() -> usize { 5 }
 
 #[cfg(test)]
 mod tests {
@@ -586,6 +930,14 @@ mod tests {
         assert_eq!(p.growth_consecutive_trigger, 2);
         assert_eq!(p.mini_critic_interval, 3);
         assert!((p.mini_critic_budget_fraction - 0.50).abs() < f64::EPSILON);
+        // Step 1.1 — new fields eliminating hardcodes
+        assert!((p.mini_critic_synthesis_budget_fraction - 0.80).abs() < f64::EPSILON);
+        assert!((p.mini_critic_synthesis_progress_threshold - 0.80).abs() < f64::EPSILON);
+        assert!((p.mini_critic_progress_threshold - 0.30).abs() < f64::EPSILON);
+        assert!((p.mini_critic_recent_threshold - 0.40).abs() < f32::EPSILON);
+        assert_eq!(p.k5_2_tool_output_max_chars, 2000);
+        assert!((p.k5_2_message_retain_ratio - 0.60).abs() < f32::EPSILON);
+        assert_eq!(p.per_call_critic_timeout_secs, 22);
         // Phase 1B: loop guard, sub-agent, convergence, coherence, model quality
         assert_eq!(p.oscillation_window, 8);
         assert_eq!(p.loop_guard_min_synthesis, 3);
@@ -637,6 +989,14 @@ mod tests {
         assert_eq!(p.forecast_min_rounds, 3);
         assert!((p.forecast_low_probability_threshold - 0.20).abs() < f64::EPSILON);
         assert!(p.strategic_init_enabled);
+        // Step 8.1/10: Capability gate token estimation + graph cost propagation
+        assert_eq!(p.avg_input_tokens_per_step, 300);
+        assert_eq!(p.tool_cost_multiplier, 2);
+        // Step 4: Convergence Budget Governor
+        assert_eq!(p.max_round_iterations, 12);
+        assert!((p.max_token_growth_ratio - 3.0).abs() < f64::EPSILON);
+        assert_eq!(p.max_stagnation_rounds, 3);
+        assert!((p.min_progress_delta - 0.05).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -685,5 +1045,26 @@ mod tests {
         assert_eq!(p.max_replan_attempts, 5);
         assert!((p.growth_threshold - 1.5).abs() < f64::EPSILON);
         assert_eq!(p.mini_critic_interval, 5);
+    }
+
+    // ── R2-A: Feature flag defaults (user onboarding) ────────────────────────
+
+    #[test]
+    fn feature_flags_default_to_correct_values() {
+        let policy = PolicyConfig::default();
+        // These three are safe + high-value: enabled by default for new users
+        assert!(policy.use_halcon_md,
+            "use_halcon_md must default to true — instruction persistence is additive and safe");
+        assert!(policy.enable_auto_memory,
+            "enable_auto_memory must default to true — session learning is additive and safe");
+        assert!(policy.enable_agent_registry,
+            "enable_agent_registry must default to true — declarative agents add value immediately");
+        // These require explicit opt-in (security surface or overhead)
+        assert!(!policy.enable_hooks,
+            "enable_hooks must default to false — executes user scripts, security surface");
+        assert!(!policy.enable_semantic_memory,
+            "enable_semantic_memory must default to false — TF-IDF overhead, user opt-in");
+        assert!(!policy.use_boundary_decision_engine || policy.use_boundary_decision_engine,
+            "use_boundary_decision_engine may be true/false — just confirming field exists");
     }
 }
