@@ -208,6 +208,47 @@ pub fn is_deterministic_error(error: &str) -> bool {
         || lower.contains("process failed")
 }
 
+/// IMP-1 Adaptive Retry — mutate tool arguments for the second retry attempt.
+///
+/// Applies conservative, reversible modifications that make transient failures
+/// more likely to succeed:
+/// - `lint_check` / `bash` running clippy: append `--no-deps` to args to avoid
+///   fetching network deps, which can time out or trigger lock contention.
+/// - All other tools: return `None` (no mutation — same args as attempt 0).
+///
+/// Returns `Some(new_input)` when a mutation is applicable, `None` otherwise.
+fn mutate_args_for_retry(tool_name: &str, input: &serde_json::Value) -> Option<serde_json::Value> {
+    match tool_name {
+        "lint_check" => {
+            // lint_check(args: [..]) — append "--no-deps" if not already present.
+            let mut mutated = input.clone();
+            if let Some(args) = mutated.get_mut("args").and_then(|a| a.as_array_mut()) {
+                if !args.iter().any(|v| v.as_str() == Some("--no-deps")) {
+                    args.push(serde_json::Value::String("--no-deps".to_string()));
+                    tracing::debug!(tool = "lint_check", "IMP-1: adaptive retry — injected --no-deps");
+                    return Some(mutated);
+                }
+            }
+            None
+        }
+        "bash" => {
+            // bash(command: "cargo clippy ..") — append --no-deps to cargo clippy invocations.
+            let mut mutated = input.clone();
+            if let Some(cmd) = mutated.get_mut("command").and_then(|c| c.as_str()) {
+                let cmd_str = cmd.to_string();
+                if cmd_str.contains("cargo clippy") && !cmd_str.contains("--no-deps") {
+                    let new_cmd = cmd_str.replace("cargo clippy", "cargo clippy --no-deps");
+                    mutated["command"] = serde_json::Value::String(new_cmd);
+                    tracing::debug!(tool = "bash", "IMP-1: adaptive retry — added --no-deps to cargo clippy");
+                    return Some(mutated);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Generate diff preview for file_edit operations.
 ///
 /// Returns (path, added_lines, deleted_lines) if successful, None otherwise.
@@ -552,9 +593,17 @@ async fn run_with_retry(
     let max_attempts = retry_config.max_retries + 1;
 
     for attempt in 0..max_attempts {
+        // IMP-1 Adaptive Retry: on attempt 2+ apply conservative arg mutations
+        // (e.g., --no-deps for clippy) to reduce the surface of transient failures.
+        let effective_args = if attempt >= 2 {
+            mutate_args_for_retry(&tool_call.name, &tool_call.input)
+                .unwrap_or_else(|| tool_call.input.clone())
+        } else {
+            tool_call.input.clone()
+        };
         let tool_input = ToolInput {
             tool_use_id: tool_call.id.clone(),
-            arguments: tool_call.input.clone(),
+            arguments: effective_args,
             working_directory: working_dir.to_string(),
         };
 
