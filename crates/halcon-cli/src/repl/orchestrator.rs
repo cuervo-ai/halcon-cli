@@ -1111,6 +1111,22 @@ mod tests {
     use super::*;
     use halcon_core::types::AgentLimits;
 
+    /// Test-isolated policy: filesystem-touching features disabled so tests are hermetic.
+    /// `use_halcon_md`, `enable_auto_memory`, `enable_agent_registry` default true in
+    /// production (commit 71aa8dd) but MUST be false in tests to prevent:
+    ///   - system prompt injection from HALCON.md in /tmp changing cache keys
+    ///   - background auto-memory writes touching the real filesystem
+    ///   - agent registry loading from ~/.halcon/agents/ contaminating parallel test state
+    fn test_policy() -> std::sync::Arc<halcon_core::types::PolicyConfig> {
+        std::sync::Arc::new(halcon_core::types::PolicyConfig {
+            use_halcon_md: false,
+            enable_auto_memory: false,
+            enable_agent_registry: false,
+            enable_semantic_memory: false,
+            ..halcon_core::types::PolicyConfig::default()
+        })
+    }
+
     // --- topological_waves tests ---
 
     #[test]
@@ -1529,7 +1545,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            test_policy(),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 1);
@@ -1585,7 +1601,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            test_policy(),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1641,7 +1657,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            test_policy(),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1679,7 +1695,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            test_policy(),
         ).await.unwrap();
 
         // Collect all events.
@@ -1742,7 +1758,7 @@ mod tests {
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            test_policy(),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1789,7 +1805,7 @@ mod tests {
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            test_policy(),
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);

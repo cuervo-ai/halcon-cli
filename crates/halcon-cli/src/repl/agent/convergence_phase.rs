@@ -1429,9 +1429,36 @@ pub(super) async fn run(
                         )
                     };
 
+                    // PHASE-3 FIX: Include tool_failures from the current round in the
+                    // replan prompt so the planner understands WHY the previous strategy
+                    // failed and can generate a meaningfully different plan.
+                    // Previously only blocked_tools (security-denied tools) were injected;
+                    // transient runtime failures were invisible to the planner.
+                    let tool_failures_note = if tool_failures.is_empty() {
+                        String::new()
+                    } else {
+                        let failures_list = tool_failures
+                            .iter()
+                            .map(|(name, err)| {
+                                // Truncate long errors to avoid bloating the replan prompt.
+                                let short_err = if err.len() > 200 {
+                                    format!("{}…", &err[..200])
+                                } else {
+                                    err.clone()
+                                };
+                                format!("  - `{name}`: {short_err}")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "\n\nTOOL FAILURES this round (do NOT retry these approaches):\n{failures_list}\n\
+                             Adapt the new plan to avoid these specific failure modes.",
+                        )
+                    };
+
                     let replan_prompt = format!(
                         "The current approach has stalled (read-only tools used repeatedly with no progress). \
-                         Based on the information gathered so far:\n\n{context_summary}{blocked_tools_note}\n\n\
+                         Based on the information gathered so far:\n\n{context_summary}{tool_failures_note}{blocked_tools_note}\n\n\
                          Generate a NEW plan with a DIFFERENT strategy to achieve the original goal: {}\n\n\
                          Focus on actionable steps that make progress toward the goal.",
                         state.user_msg

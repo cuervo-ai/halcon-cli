@@ -999,37 +999,103 @@ pub(super) async fn run(
             }
         }
 
-        // RC-2 fix: Record tool failures in the tracker and detect repeated patterns.
+        // RC-2 / PHASE-5: Graduated retry/mutation directives.
+        //
+        // failure_count=1: first failure — silent (let the model retry on its own)
+        // failure_count=2: second failure — inject alt-params hint (try different arguments)
+        // failure_count=3+ (>= threshold): circuit tripped — inject alt-tool directive
+        //
+        // This prevents the "same tool, same args, same failure" infinite loop without
+        // immediately blocking the tool (which causes GovernanceRescue earlier than needed).
         for (failed_tool_name, error_msg) in &tool_failures {
-            let tripped = state.guards.failure_tracker.record(failed_tool_name, error_msg);
+            let (count, tripped) = state.guards.failure_tracker.record_with_count(failed_tool_name, error_msg);
+            let canonical = super::super::tool_aliases::canonicalize(failed_tool_name);
+
             if tripped {
                 tracing::warn!(
                     tool = %failed_tool_name,
                     error_pattern = %ToolFailureTracker::error_pattern(error_msg),
+                    count,
                     "Tool failure circuit breaker tripped — repeated identical failures"
                 );
                 if !state.silent {
                     render_sink.loop_guard_action("circuit_breaker", &format!("{failed_tool_name}: repeated failures"));
                 }
-                // When a read tool trips the circuit breaker, inject a directive suggesting
-                // file_inspect (which uses a token_budget to avoid context bloat and handles
-                // large files that file_read / read_multiple_files choke on).
-                let canonical = super::super::tool_aliases::canonicalize(failed_tool_name);
-                // read_multiple_files merges into file_read canonical — one check covers both
-                if canonical == "file_read" {
-                    let directive = format!(
+
+                // Circuit tripped: inject a strong alternative-tool directive.
+                // read_multiple_files merges into file_read canonical — one check covers both.
+                let directive = if canonical == "file_read" {
+                    Some(format!(
                         "[circuit-breaker] '{}' has failed repeatedly. \
                          REQUIRED ACTION: First use 'directory_tree' or 'glob' to find the actual file paths, \
                          then switch to 'file_inspect' with args {{\"path\": \"<actual_path>\", \"token_budget\": 2000}}. \
                          Do NOT retry '{}' or guess paths again — verify paths exist first.",
                         failed_tool_name, failed_tool_name
-                    );
+                    ))
+                } else if canonical == "bash" {
+                    // Phase-5: suggest alternative tools for bash commands.
+                    let bash_cmd = error_msg.lines().next().unwrap_or("");
+                    if let Some(alt) = ToolFailureTracker::suggest_bash_alternative(bash_cmd) {
+                        Some(format!(
+                            "[circuit-breaker] bash command has failed repeatedly ({} times). \
+                             REQUIRED ACTION: Switch to an alternative approach: {alt}. \
+                             Do NOT repeat the same bash command.",
+                            count
+                        ))
+                    } else {
+                        Some(format!(
+                            "[circuit-breaker] '{}' has failed {} times with the same error. \
+                             REQUIRED ACTION: Try a fundamentally different approach — \
+                             different arguments, different tool, or decompose into smaller steps.",
+                            failed_tool_name, count
+                        ))
+                    }
+                } else {
+                    Some(format!(
+                        "[circuit-breaker] '{}' has failed {} times. \
+                         REQUIRED ACTION: Stop retrying '{}'. \
+                         Use a different tool or strategy to achieve the same result.",
+                        failed_tool_name, count, failed_tool_name
+                    ))
+                };
+
+                if let Some(d) = directive {
                     state.messages.push(halcon_core::types::ChatMessage {
                         role: halcon_core::types::Role::User,
-                        content: halcon_core::types::MessageContent::Text(directive),
+                        content: halcon_core::types::MessageContent::Text(d),
                     });
-                    tracing::info!(tool = %failed_tool_name, "circuit-breaker: injected file_inspect fallback directive");
+                    tracing::info!(tool = %failed_tool_name, count, "circuit-breaker: injected alt-tool directive");
                 }
+            } else if count == 2 {
+                // Second failure: inject an alt-params hint without blocking the tool.
+                tracing::debug!(tool = %failed_tool_name, count, "Phase-5: second failure — injecting alt-params hint");
+                let hint = if canonical == "bash" {
+                    format!(
+                        "[retry-hint] '{}' failed a second time. \
+                         Try adjusting the command arguments — for example, use relative paths \
+                         instead of absolute, add --no-color flags, or reduce the scope. \
+                         One more failure will trigger an automatic tool switch.",
+                        failed_tool_name
+                    )
+                } else if canonical == "file_read" {
+                    format!(
+                        "[retry-hint] '{}' failed a second time. \
+                         Verify the path exists with 'directory_tree' or 'glob' before retrying. \
+                         One more failure will switch to 'file_inspect'.",
+                        failed_tool_name
+                    )
+                } else {
+                    format!(
+                        "[retry-hint] '{}' failed a second time. \
+                         Consider adjusting parameters or decomposing the task. \
+                         One more identical failure will trigger an automatic tool switch.",
+                        failed_tool_name
+                    )
+                };
+                state.messages.push(halcon_core::types::ChatMessage {
+                    role: halcon_core::types::Role::User,
+                    content: halcon_core::types::MessageContent::Text(hint),
+                });
             }
         }
 

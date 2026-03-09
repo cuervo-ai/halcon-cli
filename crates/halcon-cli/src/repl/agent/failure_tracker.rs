@@ -82,13 +82,52 @@ impl ToolFailureTracker {
     }
 
     /// Get the failure count for a specific (tool, error_pattern) key.
-    /// Used for testing to inspect internal state.
-    #[cfg(test)]
     pub(crate) fn failure_count(&self, tool_name: &str, error: &str) -> u32 {
         let canonical = super::super::tool_aliases::canonicalize(tool_name).to_string();
         let pattern = Self::error_pattern(error);
         let key = (canonical, pattern);
         self.failures.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Record a failure and return the updated count (in addition to the tripped flag).
+    ///
+    /// This lets callers inject graduated directives at count=2 (try alt params),
+    /// count=3 (try alt tool), and count>=threshold (circuit tripped, mark unavailable).
+    ///
+    /// Returns `(count, tripped)`.
+    pub(crate) fn record_with_count(&mut self, tool_name: &str, error: &str) -> (u32, bool) {
+        let canonical = super::super::tool_aliases::canonicalize(tool_name).to_string();
+        let pattern = Self::error_pattern(error);
+        let key = (canonical, pattern);
+        let count = self.failures.entry(key).or_insert(0);
+        *count += 1;
+        let c = *count;
+        (c, c >= self.threshold)
+    }
+
+    /// Suggest an alternative tool for a failed bash command.
+    ///
+    /// Used by Phase-5 graduated retry directives to point the model toward
+    /// semantically equivalent but more reliable alternatives.
+    pub(crate) fn suggest_bash_alternative(command: &str) -> Option<&'static str> {
+        let cmd = command.trim_start();
+        if cmd.starts_with("grep ") || cmd.starts_with("grep -") {
+            Some("rg (ripgrep) — use `bash` with `rg --type rust <pattern> <path>` \
+                  or the native `search_in_file` tool if available")
+        } else if cmd.starts_with("find ") {
+            Some("glob / directory_tree — use the `glob` tool with pattern '**/<name>' \
+                  or `directory_tree` to list files without bash find")
+        } else if cmd.starts_with("cat ") || cmd.starts_with("head ") || cmd.starts_with("tail ") {
+            Some("file_read tool — use `file_read` with path parameter instead of bash cat/head/tail")
+        } else if cmd.starts_with("npm audit") || cmd.starts_with("yarn audit") {
+            Some("Try `npm audit --json` for machine-readable output, \
+                  or `npm ls --depth=0` to inspect top-level dependencies")
+        } else if cmd.starts_with("cargo audit") {
+            Some("Try `cargo audit --json` for machine-readable output, \
+                  or `cargo tree` to inspect the dependency graph")
+        } else {
+            None
+        }
     }
 
     /// Reset the circuit breaker for a specific tool (all error patterns).

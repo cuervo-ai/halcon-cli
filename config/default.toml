@@ -37,10 +37,53 @@ blocked_patterns = [
     "**/*.key",
 ]
 
+[reasoning]
+# Adversarial LoopCritic: a second LLM call after the agent loop evaluates whether
+# the original goal was truly achieved. Catches hallucinated/fabricated synthesis.
+# Adds ~1–3s latency. Off by default; set true to enable.
+enable_loop_critic = true
+# Max seconds for the LoopCritic evaluation. Critic is skipped if it times out.
+critic_timeout_secs = 30
+
 [security]
 pii_detection = true
 pii_action = "warn"
 audit_enabled = true
+
+[security.analysis_mode]
+# When true, bash commands matching analysis_tool_whitelist patterns auto-approve
+# without interactive user confirmation. This prevents stall loops in analysis tasks.
+# IMPORTANT: Only safe read-only commands should be whitelisted.
+enabled = false
+# Bash command prefixes auto-approved for analysis tasks (regex, matched against start of command).
+# These are read-only analysis tools that have no destructive side effects.
+allow_grep_recursive = true
+allow_find_project_files = true
+# Full whitelist of allowed bash command prefixes in analysis_mode.
+# Commands starting with any of these are auto-approved when enabled=true.
+analysis_tool_whitelist = [
+    "grep ",
+    "grep -",
+    "rg ",
+    "find . ",
+    "find src",
+    "find crates",
+    "cat ",
+    "head ",
+    "tail ",
+    "wc ",
+    "ls ",
+    "cargo audit",
+    "cargo check",
+    "cargo test --",
+    "npm audit",
+    "npm ls",
+    "yarn audit",
+    "git log ",
+    "git diff ",
+    "git status",
+    "git show ",
+]
 
 [storage]
 max_sessions = 1000

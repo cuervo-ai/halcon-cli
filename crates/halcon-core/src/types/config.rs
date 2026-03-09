@@ -960,6 +960,70 @@ pub struct SecurityConfig {
     /// Does NOT block execution — only observability.
     #[serde(default)]
     pub scan_system_prompts: bool,
+    /// Analysis mode: auto-approve whitelisted read-only bash commands.
+    /// See `[security.analysis_mode]` in config.toml.
+    #[serde(default)]
+    pub analysis_mode: AnalysisModeConfig,
+}
+
+/// Analysis mode configuration.
+///
+/// When `enabled = true`, bash commands whose text starts with any prefix in
+/// `analysis_tool_whitelist` are auto-approved (bypassing the interactive
+/// confirmation prompt) during agent loops.  Only safe, read-only commands
+/// (grep, find, cat, cargo audit…) should be included in the whitelist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisModeConfig {
+    /// Master switch: when false the whitelist is never consulted.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Auto-approve `grep -r` style recursive searches.
+    #[serde(default = "analysis_mode_default_allow")]
+    pub allow_grep_recursive: bool,
+    /// Auto-approve `find . …` project-scoped file searches.
+    #[serde(default = "analysis_mode_default_allow")]
+    pub allow_find_project_files: bool,
+    /// Explicit bash command prefixes (matched case-sensitively against the
+    /// start of the command string) that are auto-approved when `enabled`.
+    #[serde(default = "default_analysis_tool_whitelist")]
+    pub analysis_tool_whitelist: Vec<String>,
+}
+
+fn analysis_mode_default_allow() -> bool { true }
+
+fn default_analysis_tool_whitelist() -> Vec<String> {
+    vec![
+        "grep ".into(), "grep -".into(), "rg ".into(),
+        "find . ".into(), "find src".into(), "find crates".into(),
+        "cat ".into(), "head ".into(), "tail ".into(), "wc ".into(), "ls ".into(),
+        "cargo audit".into(), "cargo check".into(), "cargo test --".into(),
+        "npm audit".into(), "npm ls".into(), "yarn audit".into(),
+        "git log ".into(), "git diff ".into(), "git status".into(), "git show ".into(),
+    ]
+}
+
+impl Default for AnalysisModeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_grep_recursive: true,
+            allow_find_project_files: true,
+            analysis_tool_whitelist: default_analysis_tool_whitelist(),
+        }
+    }
+}
+
+/// Check if a bash command matches the analysis-mode auto-approve whitelist.
+///
+/// Returns `true` when `config.enabled` is true AND the command starts with one
+/// of the whitelisted prefixes.  Callers should skip the interactive confirmation
+/// prompt when this returns true.
+pub fn is_analysis_whitelisted(config: &AnalysisModeConfig, command: &str) -> bool {
+    if !config.enabled {
+        return false;
+    }
+    let cmd = command.trim_start();
+    config.analysis_tool_whitelist.iter().any(|prefix| cmd.starts_with(prefix.as_str()))
 }
 
 /// Guardrails configuration (delegated from halcon-security for serde compat).
@@ -1007,6 +1071,7 @@ impl Default for SecurityConfig {
             pre_execution_critique: false,
             session_grant_ttl_secs: 300,
             scan_system_prompts: false, // opt-in: system prompts are internal
+            analysis_mode: AnalysisModeConfig::default(),
         }
     }
 }
