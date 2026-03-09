@@ -78,4 +78,37 @@
 
 ---
 
-_Last updated: 2026-03-08 (Sprint 4 completion)_
+## Post-Sprint Architecture Improvements (2026-03-08)
+
+Identified by principal audit and applied as follow-up hardening commits.
+
+| # | Improvement | Status | Commit | Benefit |
+|---|-------------|--------|--------|---------|
+| 1 | Unify synthesis logic into `SynthesisController` struct | 🔲 TODO | — | Eliminates 3 scattered synthesis guard sites |
+| 2 | Whitelist-based synthesis summary detection | ✅ DONE | `a01fab5` | SC-2 robustness: 6 keywords instead of 1 |
+| 3 | `summary_preview` in zero-tool-drift warn log | ✅ DONE | `a01fab5` | Operator observability without extra overhead |
+| 4 | Extract `run_agent_loop` into sub-functions | 🔲 TODO | — | Reduces cyclomatic complexity from ~80 to <20 |
+| 5 | Provider-specific tool fallback registry | ✅ AUDITED | — | All providers already use correct format; `normalize_schema_for_openai()` handles bare-object schemas |
+
+### Improvement #2 Details — Synthesis Summary Whitelist
+
+**File**: `crates/halcon-cli/src/repl/orchestrator.rs`
+
+Before: `!summary.to_lowercase().contains("synthesis")`
+
+After:
+```rust
+const SYNTHESIS_SUMMARY_KEYWORDS: &[&str] = &[
+    "synthesis", "summariz", "conclus", "final", "review", "analysis complete"
+];
+fn is_synthesis_summary(summary: &str) -> bool {
+    let lower = summary.to_lowercase();
+    SYNTHESIS_SUMMARY_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+```
+
+**New tests** (`synthesis_whitelist_covers_all_variants`): 8 cases — 5 positive matches, 3 negative.
+
+---
+
+_Last updated: 2026-03-08 (post-sprint hardening)_
