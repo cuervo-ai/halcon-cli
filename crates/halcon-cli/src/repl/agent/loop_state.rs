@@ -227,6 +227,9 @@ pub(super) fn transition(current: AgentPhase, event: AgentEvent) -> AgentPhase {
         (Executing, ToolBatchComplete) => Executing, // stays executing across rounds
         (Executing, ReflectionComplete) => Reflecting,
         (Executing, SynthesisStarted) => Synthesizing,
+        // BUG-FSM-001 fix: single-round synthesis-only sessions (no tool use) fire
+        // SynthesisComplete directly from Executing without entering Synthesizing first.
+        (Executing, SynthesisComplete) => Evaluating,
         (Executing, ErrorOccurred) | (Executing, Cancelled) => Halted,
 
         // From ToolWait
