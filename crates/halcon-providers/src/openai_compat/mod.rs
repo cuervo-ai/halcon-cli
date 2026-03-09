@@ -33,15 +33,96 @@ use types::{
 /// includes a `"properties"` key (even if empty). MCP servers and other sources
 /// sometimes emit bare `{"type": "object"}` without `properties`, which causes
 /// OpenAI to return HTTP 400 `invalid_function_parameters`.
-fn normalize_schema_for_openai(mut schema: serde_json::Value) -> serde_json::Value {
-    if let Some(obj) = schema.as_object_mut() {
-        if obj.get("type").and_then(|t| t.as_str()) == Some("object")
-            && !obj.contains_key("properties")
-        {
-            obj.insert("properties".to_string(), serde_json::json!({}));
+/// Recursively normalize a JSON Schema to comply with OpenAI's API requirements.
+///
+/// OpenAI (gpt-4o, o1, o3) and DeepSeek enforce stricter JSON Schema rules than
+/// Anthropic:
+///
+/// 1. **Union type arrays rejected**: `"type": ["string","array"]` is not valid.
+///    Convert to `anyOf: [{type:string},{type:array,items:{}}]`.
+/// 2. **Array without items**: `"type":"array"` must have an `"items"` sibling.
+///    Inject `"items": {}` (permissive — accepts any element type).
+/// 3. **Object without properties**: `"type":"object"` should declare `"properties"`.
+///    Inject `"properties": {}` (passthrough — existing behaviour).
+///
+/// The function is applied recursively to `properties`, `items`, `anyOf`, `oneOf`,
+/// `allOf`, and `not` so that nested schemas are also fixed.
+fn normalize_schema_for_openai(schema: serde_json::Value) -> serde_json::Value {
+    normalize_schema_node(schema)
+}
+
+fn normalize_schema_node(schema: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut obj) = schema else {
+        return schema; // null / bool / number / string / array-literal — pass through
+    };
+
+    // ── 1. Union "type" array → anyOf ─────────────────────────────────────────
+    // e.g. "type": ["object","array","string"]  becomes
+    //   "anyOf": [{"type":"object","properties":{}},{"type":"array","items":{}},{"type":"string"}]
+    if let Some(type_val) = obj.get("type").cloned() {
+        if let serde_json::Value::Array(type_arr) = type_val {
+            let any_of: Vec<serde_json::Value> = type_arr
+                .iter()
+                .filter_map(|t| t.as_str())
+                .map(|t| match t {
+                    "array" => serde_json::json!({"type": "array", "items": {}}),
+                    "object" => serde_json::json!({"type": "object", "properties": {}}),
+                    other => serde_json::json!({"type": other}),
+                })
+                .collect();
+            obj.remove("type");
+            // Preserve any sibling keys (description, default, …) alongside anyOf.
+            obj.insert("anyOf".to_string(), serde_json::Value::Array(any_of));
         }
     }
-    schema
+
+    // ── 2. Bare "type":"array" without "items" ─────────────────────────────────
+    if obj.get("type").and_then(|t| t.as_str()) == Some("array")
+        && !obj.contains_key("items")
+    {
+        obj.insert("items".to_string(), serde_json::json!({}));
+    }
+
+    // ── 3. "type":"object" without "properties" ────────────────────────────────
+    if obj.get("type").and_then(|t| t.as_str()) == Some("object")
+        && !obj.contains_key("properties")
+    {
+        obj.insert("properties".to_string(), serde_json::json!({}));
+    }
+
+    // ── 4. Recurse into nested schema nodes ────────────────────────────────────
+    // properties: { field_name: schema, … }
+    if let Some(serde_json::Value::Object(mut props)) = obj.remove("properties") {
+        for v in props.values_mut() {
+            *v = normalize_schema_node(v.clone());
+        }
+        obj.insert("properties".to_string(), serde_json::Value::Object(props));
+    }
+
+    // items: schema  (array element schema)
+    if let Some(items) = obj.remove("items") {
+        obj.insert("items".to_string(), normalize_schema_node(items));
+    }
+
+    // anyOf / oneOf / allOf: [schema, …]
+    for kw in ["anyOf", "oneOf", "allOf"] {
+        if let Some(serde_json::Value::Array(arr)) = obj.remove(kw) {
+            let normalized: Vec<serde_json::Value> =
+                arr.into_iter().map(normalize_schema_node).collect();
+            obj.insert(kw.to_string(), serde_json::Value::Array(normalized));
+        }
+    }
+
+    // not: schema
+    if let Some(not_schema) = obj.remove("not") {
+        if not_schema.is_object() {
+            obj.insert("not".to_string(), normalize_schema_node(not_schema));
+        } else {
+            obj.insert("not".to_string(), not_schema);
+        }
+    }
+
+    serde_json::Value::Object(obj)
 }
 
 /// A provider that speaks the OpenAI Chat Completions protocol.

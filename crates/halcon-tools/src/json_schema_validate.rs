@@ -261,16 +261,26 @@ impl Tool for JsonSchemaValidateTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
+        // Note: union "type" arrays (e.g. ["object","array","string"]) are rejected by
+        // OpenAI o1/o3 with "array schema missing items". Use anyOf instead — this is
+        // universally supported by Anthropic, OpenAI, DeepSeek, and Gemini.
         json!({
             "type": "object",
             "properties": {
                 "data": {
-                    "type": ["object", "array", "string"],
-                    "description": "The JSON data to validate. Can be a JSON string or an object/array."
+                    "description": "The JSON data to validate. Can be a JSON object, array, or a JSON-encoded string.",
+                    "anyOf": [
+                        { "type": "object" },
+                        { "type": "array", "items": {} },
+                        { "type": "string" }
+                    ]
                 },
                 "schema": {
-                    "type": ["object", "string"],
-                    "description": "The JSON Schema to validate against. Can be a JSON string or an object."
+                    "description": "The JSON Schema to validate against. Can be a JSON object or a JSON-encoded string.",
+                    "anyOf": [
+                        { "type": "object" },
+                        { "type": "string" }
+                    ]
                 }
             },
             "required": ["data", "schema"]
