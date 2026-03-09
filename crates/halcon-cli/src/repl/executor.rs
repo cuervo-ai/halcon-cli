@@ -161,6 +161,15 @@ fn is_transient_error(error: &str) -> bool {
         || lower.contains("failed to call")
         || lower.contains("transport error")
         || lower.contains("channel closed")
+        // Cargo build lock contention — transient when another build process
+        // holds the lock; removable via env_repair before next retry attempt.
+        || lower.contains(".cargo-lock")
+        || lower.contains("cargo-lock")
+        || lower.contains("could not acquire package cache lock")
+        || (lower.contains("file lock") && (lower.contains("build") || lower.contains("cargo")))
+        // Generic filesystem lock contention (EAGAIN, EWOULDBLOCK)
+        || lower.contains("resource temporarily unavailable")
+        || lower.contains("eagain")
 }
 
 /// Check if an error is deterministic (will never succeed on retry/replan).
@@ -566,6 +575,19 @@ async fn run_with_retry(
             Ok(Err(e)) => {
                 let err_str = format!("{e}");
                 if attempt + 1 < max_attempts && is_transient_error(&err_str) {
+                    // IMP-3: attempt environment self-repair before sleeping.
+                    if let Some(repairs) = super::env_repair::run_repairs(&err_str, &tool_call.name, working_dir) {
+                        for repair in &repairs {
+                            tracing::info!(
+                                tool = %tool_call.name,
+                                attempt = attempt + 1,
+                                env_repair.action = %repair.action,
+                                env_repair.repaired = repair.repaired,
+                                "env-repair: {}",
+                                repair.description
+                            );
+                        }
+                    }
                     let delay = jittered_delay(std::cmp::min(
                         retry_config.base_delay_ms * 2u64.pow(std::cmp::min(attempt, 5)),
                         retry_config.max_delay_ms,
@@ -2094,6 +2116,20 @@ mod tests {
         assert!(is_transient_error("Connection reset by peer"));
         assert!(!is_transient_error("file not found: /tmp/missing.rs"));
         assert!(!is_transient_error("permission denied"));
+    }
+
+    #[test]
+    fn transient_error_cargo_lock_patterns() {
+        // IMP-3: cargo lock contention is transient and env-repairable
+        assert!(is_transient_error("error: failed to open: /project/target/debug/.cargo-lock"));
+        assert!(is_transient_error("could not acquire package cache lock"));
+        assert!(is_transient_error("waiting for file lock on build directory"));
+        // EAGAIN / resource temporarily unavailable
+        assert!(is_transient_error("Resource temporarily unavailable (EAGAIN)"));
+        assert!(is_transient_error("resource temporarily unavailable"));
+        // Non-transient errors must not be misclassified
+        assert!(!is_transient_error("permission denied: /project/target/debug/halcon"));
+        assert!(!is_transient_error("unknown tool: cargo_lock_remover"));
     }
 
     #[test]

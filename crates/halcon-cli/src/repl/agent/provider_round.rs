@@ -1189,7 +1189,7 @@ pub(super) async fn run(
         }
     }
     if stop_reason != StopReason::ToolUse && !fsm_in_synthesizing {
-        if let Some(recovered) = super::super::model_quirks::try_recover_tool_calls_from_text(&round_text) {
+        if let Some(recovered) = super::super::model_quirks::try_recover_any_tool_call(&round_text) {
             tracing::info!(
                 round,
                 recovered_count = recovered.len(),

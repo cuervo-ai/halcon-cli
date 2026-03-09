@@ -229,6 +229,153 @@ pub struct RecoveredToolCall {
     pub input: serde_json::Value,
 }
 
+/// Attempt to extract a tool call from a JSON text artifact emitted by
+/// reasoning models (OpenAI o1, o3, DeepSeek-R1) when they cannot emit
+/// structured `tool_use` chunks.
+///
+/// These models sometimes produce output like:
+/// ```json
+/// {"name":"lint_check","arguments":{"linter":"clippy","args":["--no-deps"]}}
+/// ```
+/// or:
+/// ```json
+/// {"tool":"lint_check","parameters":{"linter":"clippy"}}
+/// ```
+///
+/// The function accepts several key-name variants used by different providers:
+/// - `name` / `tool` / `function` — tool name
+/// - `arguments` / `parameters` / `args` / `input` — tool arguments
+///
+/// Returns `None` when no recognisable JSON tool-call pattern is found,
+/// so the caller can fall through to other recovery paths without allocating.
+///
+/// **Provider coverage**: OpenAI o1/o3, DeepSeek-R1, Mistral reasoning models.
+pub fn try_recover_json_text_tool_call(text: &str) -> Option<RecoveredToolCall> {
+    // Fast path: must contain a `{` and at least one name-like key.
+    if !text.contains('{') {
+        return None;
+    }
+    if !text.contains("\"name\"")
+        && !text.contains("\"tool\"")
+        && !text.contains("\"function\"")
+    {
+        return None;
+    }
+
+    // Scan for a JSON object boundary that looks like a tool call.
+    // We search for the *first* `{` and try to parse a valid JSON object from it.
+    let start = text.find('{')?;
+    let candidate = text[start..].trim();
+
+    // Find a balanced closing `}`.
+    let json_str = find_balanced_json_object(candidate)?;
+
+    // Parse the candidate JSON.
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let obj = v.as_object()?;
+
+    // Extract tool name — try multiple key variants.
+    let tool_name = ["name", "tool", "function"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+        .map(str::to_string)?;
+
+    // Reject empty or obviously non-tool-call names.
+    if tool_name.is_empty() || tool_name.contains(' ') || tool_name.len() > 128 {
+        return None;
+    }
+
+    // Extract arguments — try multiple key variants.
+    let input = ["arguments", "parameters", "args", "input", "kwargs"]
+        .iter()
+        .find_map(|k| obj.get(*k).cloned())
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+    // `input` must be an object (not a string/number/array) to be a valid tool call.
+    if !input.is_object() && !input.is_null() {
+        return None;
+    }
+
+    let input = if input.is_null() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        input
+    };
+
+    tracing::info!(
+        tool_name = %tool_name,
+        recovery_format = "json_text",
+        "IMP-2: JSON text tool-call artifact recovered from reasoning model output"
+    );
+
+    Some(RecoveredToolCall { name: tool_name, input })
+}
+
+/// Find the first balanced JSON object starting at `text[0]`.
+///
+/// Returns a `&str` slice of the complete object, or `None` if the object
+/// is unterminated or not a valid starting `{`.
+fn find_balanced_json_object(text: &str) -> Option<&str> {
+    if !text.starts_with('{') {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, ch) in text.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Unified alternative-format recovery entry point.
+///
+/// Tries, in order:
+/// 1. DSML format (`<｜DSML｜function_calls>...`)
+/// 2. JSON text artifact (`{"name":"...","arguments":{...}}`)
+///
+/// Returns the first successful recovery, or `None` if neither applies.
+pub fn try_recover_any_tool_call(text: &str) -> Option<Vec<RecoveredToolCall>> {
+    // 1. DSML (multi-call capable)
+    if let Some(calls) = try_recover_tool_calls_from_text(text) {
+        return Some(calls);
+    }
+    // 2. JSON text artifact (single call — reasoning models)
+    if let Some(call) = try_recover_json_text_tool_call(text) {
+        tracing::info!(
+            tool_name = %call.name,
+            "IMP-2: JSON text artifact recovery — redirecting to tool-use path"
+        );
+        return Some(vec![call]);
+    }
+    None
+}
+
 /// Marker for the format that was detected in text.
 const DSML_MARKER: &str = "\u{ff5c}DSML\u{ff5c}";
 

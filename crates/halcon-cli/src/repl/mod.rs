@@ -138,6 +138,11 @@ pub mod instruction_store;
 /// Shell command and Rhai script hooks for PreToolUse, PostToolUse, UserPromptSubmit, Stop, etc.
 pub mod hooks;
 
+/// Environment self-repair (IMP-3 — Principal Architect audit).
+/// Detects tool failures caused by recoverable environment state (cargo locks, missing dirs,
+/// file locks) and applies targeted repair actions between retry attempts.
+pub mod env_repair;
+
 /// Auto-memory system (Feature 3 — Frontier Roadmap 2026).
 /// Heuristic scoring, bounded Markdown writes, session-start injection.
 pub mod auto_memory;
