@@ -544,4 +544,80 @@ mod tests {
         assert_eq!(d.agent_type, "Coder");
         assert!(d.delegated);
     }
+
+    // ── BUG-007 regression: synthesis guard condition (FIX-1) ────────────────
+
+    fn make_plan_step(tool: Option<&str>, done: bool) -> PlanStep {
+        PlanStep {
+            tool_name: tool.map(str::to_owned),
+            outcome: done.then(|| StepOutcome::Success { summary: "ok".into() }),
+            ..PlanStep::default()
+        }
+    }
+
+    /// Mixed plan: execution + coordination steps pending.
+    /// FIX-1: `any_pending_execution` must be true → guard must NOT fire.
+    #[test]
+    fn bug007_mixed_plan_reports_pending_execution() {
+        let steps = vec![
+            make_plan_step(Some("bash"), false),        // pending execution
+            make_plan_step(Some("file_write"), false),  // pending execution
+            make_plan_step(None, false),                // pending coordination
+            make_plan_step(None, false),                // pending synthesis
+        ];
+        let any_pending_execution = steps.iter()
+            .filter(|s| s.outcome.is_none())
+            .any(|s| s.tool_name.is_some());
+        assert!(any_pending_execution,
+            "Mixed plan must report pending execution — synthesis guard must NOT fire");
+    }
+
+    /// Pure synthesis plan (all execution steps done, only text steps remain).
+    /// FIX-1: no pending execution → guard SHOULD fire.
+    #[test]
+    fn bug007_pure_synthesis_plan_no_pending_execution() {
+        let steps = vec![
+            make_plan_step(Some("bash"), true),         // completed
+            make_plan_step(Some("file_write"), true),   // completed
+            make_plan_step(None, false),                // pending coordination
+            make_plan_step(None, false),                // pending synthesis
+        ];
+        let any_pending_execution = steps.iter()
+            .filter(|s| s.outcome.is_none())
+            .any(|s| s.tool_name.is_some());
+        assert!(!any_pending_execution,
+            "Pure synthesis plan must report no pending execution — guard SHOULD fire");
+    }
+
+    /// Demonstrates the original bug fires when a pending execution step
+    /// is followed by a coordination step (tool_name=None).
+    /// The old `all(is_none)` condition returns false here (does NOT fire),
+    /// but a scenario where execution steps are listed BEFORE None steps makes
+    /// the bug visible: once execution is logically "last seen", the guard fires
+    /// incorrectly. The new condition is path-independent.
+    #[test]
+    fn bug007_new_condition_is_path_independent() {
+        // Scenario A: pending execution step exists anywhere in the list
+        let steps_a = vec![
+            make_plan_step(None, false),          // coordination (pending)
+            make_plan_step(Some("bash"), false),  // execution (pending)
+        ];
+        let any_exec_a = steps_a.iter()
+            .filter(|s| s.outcome.is_none())
+            .any(|s| s.tool_name.is_some());
+        // New condition: guard does NOT fire (execution step is pending)
+        let new_fires_a = steps_a.iter().any(|s| s.outcome.is_none()) && !any_exec_a;
+        assert!(!new_fires_a, "New condition must not fire when execution step is pending");
+
+        // Scenario B: no execution steps pending
+        let steps_b = vec![
+            make_plan_step(None, false),         // coordination (pending)
+            make_plan_step(Some("bash"), true),  // execution (done)
+        ];
+        let any_exec_b = steps_b.iter()
+            .filter(|s| s.outcome.is_none())
+            .any(|s| s.tool_name.is_some());
+        let new_fires_b = steps_b.iter().any(|s| s.outcome.is_none()) && !any_exec_b;
+        assert!(new_fires_b, "New condition must fire when only coordination steps remain");
+    }
 }

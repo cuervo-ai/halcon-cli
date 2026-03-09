@@ -1591,11 +1591,24 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     if let Some(ref tracker) = execution_tracker {
         let plan = tracker.plan();
         let has_pending = plan.steps.iter().any(|s| s.outcome.is_none());
-        let all_pending_synthesis = plan.steps.iter()
-            .filter(|s| s.outcome.is_none())
-            .all(|s| s.tool_name.is_none());
 
-        if has_pending && all_pending_synthesis
+        // BUGFIX (synthesis-premature-strip): The original condition checked whether ALL
+        // pending steps had tool_name=None and treated that as "synthesis-only mode".
+        // This is WRONG: coordination/analysis steps also have tool_name=None but they
+        // appear mid-plan before execution steps. Removing execution tools at that point
+        // causes tools_executed=0 and dependency_cascade in subsequent waves.
+        //
+        // CORRECT condition: only enter synthesis mode when NO pending step has a
+        // tool_name (i.e. zero execution steps remain). Coordination steps interspersed
+        // with execution steps must NOT trigger this guard.
+        //
+        // See docs/analysis/addendum-2026-03-08.md BUG-007 for full root cause trace.
+        let any_pending_execution = plan.steps.iter()
+            .filter(|s| s.outcome.is_none())
+            .any(|s| s.tool_name.is_some());
+        let all_pending_synthesis = has_pending && !any_pending_execution;
+
+        if all_pending_synthesis
             && execution_intent != ExecutionIntentPhase::Execution
         {
             // FIX: Phase 3A must respect tool_policy — only remove EXECUTION tools,

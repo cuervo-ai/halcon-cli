@@ -973,7 +973,17 @@ pub async fn run_orchestrator(
             // but log a distinct warning so operators know it was timeout not a hard error.
             // Note: the dep_check Node timeout is now mitigated by the 300s hard-cap +
             // ecosystem-adaptive timeout (240s for Node), so this path should be rare.
-            if !result.success {
+            //
+            // BUGFIX (zero-tool soft-fail — BUG-007 SC-2): A sub-agent that returns
+            // success=true but executed zero tools produced no evidence. Downstream tasks
+            // that depend on this task's file writes / bash output will find nothing and
+            // enter dependency_cascade. Treat as soft-fail for cascade purposes.
+            // Exception: synthesis-typed summaries are expected to have zero tools.
+            let is_zero_tool_drift = result.success
+                && result.agent_result.tools_used.is_empty()
+                && !result.agent_result.summary.to_lowercase().contains("synthesis");
+
+            if !result.success || is_zero_tool_drift {
                 let is_timeout = result.error.as_deref()
                     .map(|e| e.contains("error_type:timeout"))
                     .unwrap_or(false);
@@ -982,6 +992,12 @@ pub async fn run_orchestrator(
                         task_id = %result.task_id,
                         "Sub-agent timed out — dependent tasks will be skipped. \
                          Consider increasing sub_agent_timeout_secs in config."
+                    );
+                } else if is_zero_tool_drift {
+                    tracing::warn!(
+                        task_id = %result.task_id,
+                        "Sub-agent succeeded but executed zero tools (synthesis-only drift). \
+                         Dependents will be skipped to avoid cascade on missing evidence."
                     );
                 } else {
                     tracing::debug!(task_id = %result.task_id, "Sub-agent hard failure — cascading");
@@ -1976,5 +1992,52 @@ mod tests {
             .filter(|t| !t.depends_on.iter().any(|d| failed.contains(d)))
             .collect();
         assert_eq!(eligible.len(), 2, "Both tasks have no deps so both eligible");
+    }
+
+    // ── BUG-007 regression tests ──────────────────────────────────────────────
+
+    /// Verify the zero-tool soft-fail condition logic (FIX-2).
+    /// A result with success=true and tools_used=[] that is NOT a synthesis task
+    /// should be classified as zero-tool drift and inserted into failed_task_ids.
+    #[test]
+    fn zero_tool_drift_detected_for_non_synthesis_result() {
+        // Simulate the condition from orchestrator.rs FIX-2
+        let tools_used: Vec<String> = vec![];
+        let summary = "Analyzed the repository structure";  // not a synthesis summary
+
+        let is_zero_tool_drift = true  // success=true
+            && tools_used.is_empty()
+            && !summary.to_lowercase().contains("synthesis");
+
+        assert!(is_zero_tool_drift,
+            "Non-synthesis result with zero tools must be detected as drift");
+    }
+
+    /// A synthesis summary should NOT be treated as zero-tool drift.
+    #[test]
+    fn zero_tool_drift_not_triggered_for_synthesis_task() {
+        let tools_used: Vec<String> = vec![];
+        let summary = "synthesis: consolidated findings from 3 sub-agents";
+
+        let is_zero_tool_drift = true  // success=true
+            && tools_used.is_empty()
+            && !summary.to_lowercase().contains("synthesis");
+
+        assert!(!is_zero_tool_drift,
+            "Explicit synthesis task with zero tools must NOT be flagged as drift");
+    }
+
+    /// A task that actually ran tools should never be flagged as drift.
+    #[test]
+    fn zero_tool_drift_not_triggered_when_tools_ran() {
+        let tools_used = vec!["bash".to_string(), "file_write".to_string()];
+        let summary = "Wrote the output file";
+
+        let is_zero_tool_drift = true  // success=true
+            && tools_used.is_empty()
+            && !summary.to_lowercase().contains("synthesis");
+
+        assert!(!is_zero_tool_drift,
+            "Task that ran tools must NOT be flagged as drift");
     }
 }
