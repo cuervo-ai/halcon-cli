@@ -229,6 +229,15 @@ impl ResilienceManager {
     }
 
     /// Persist a breaker state transition to the database.
+    ///
+    /// P1-B: Populates `score` and `details` so resilience_events rows contain
+    /// actionable diagnostic data (previously always NULL, making the table useless
+    /// for post-incident analysis).
+    ///
+    /// Score semantics:
+    ///   Closed (healthy)  = 1.0
+    ///   HalfOpen (probing) = 0.5
+    ///   Open (tripped)    = 0.0
     async fn persist_breaker_event(
         &self,
         provider: &str,
@@ -236,13 +245,25 @@ impl ResilienceManager {
         to: &BreakerState,
     ) {
         if let Some(db) = &self.db {
+            // Derive health score from the destination state (u32, 0–100 scale).
+            let score = match to {
+                BreakerState::Closed => Some(100_u32),
+                BreakerState::HalfOpen => Some(50_u32),
+                BreakerState::Open => Some(0_u32),
+            };
+
+            // Human-readable transition description for post-incident analysis.
+            let details = Some(format!(
+                "circuit_breaker transition {from}→{to} for provider '{provider}'"
+            ));
+
             let event = halcon_storage::ResilienceEvent {
                 provider: provider.to_string(),
                 event_type: "breaker_transition".to_string(),
                 from_state: Some(from.to_string()),
                 to_state: Some(to.to_string()),
-                score: None,
-                details: None,
+                score,
+                details,
                 created_at: chrono::Utc::now(),
             };
             if let Err(e) = db.insert_resilience_event(&event).await {

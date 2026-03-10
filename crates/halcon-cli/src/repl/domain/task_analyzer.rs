@@ -250,6 +250,9 @@ impl TaskAnalyzer {
         }
 
         // Research keywords (English + Spanish analysis/investigation verbs)
+        // P1-C: Added audit/compliance/security-assessment keywords so these tasks
+        // are correctly classified as Research instead of falling to General (which
+        // contaminates UCB1 learning data with wrong task-type reward signals).
         if Self::contains_any(
             &query_lower,
             &[
@@ -261,6 +264,34 @@ impl TaskAnalyzer {
                 "analyze",
                 "compare",
                 "review",
+                // Audit & compliance domain (P1-C)
+                "audit",
+                "auditar",
+                "auditoria",
+                "compliance",
+                "cumplimiento",
+                "vulnerability",
+                "vulnerabilidad",
+                "sonar",
+                "sonarqube",
+                "sast",
+                "dast",
+                "pentest",
+                "penetration",
+                "assessment",
+                "soc2",
+                "sox",
+                "gdpr",
+                "hipaa",
+                "iso27001",
+                "cve",
+                "scan",
+                "escanea",
+                "escanear",
+                "verificar",
+                "verify",
+                "validate",
+                "validar",
                 // Spanish equivalents
                 "analiza",
                 "analizar",
@@ -661,5 +692,64 @@ mod tests {
         // Verify the override doesn't affect non-analysis short queries.
         let analysis = TaskAnalyzer::analyze("list files");
         assert_eq!(analysis.complexity, TaskComplexity::Simple);
+    }
+
+    // --- P1-C: Audit/compliance keyword tests ---
+    // These ensure audit tasks are NOT classified as General (UCB1 contamination fix).
+
+    #[test]
+    fn p1c_audit_keyword_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("audit the database access logs");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'audit' must classify as Research, not General");
+    }
+
+    #[test]
+    fn p1c_auditar_spanish_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("auditar los permisos del sistema");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'auditar' must classify as Research");
+    }
+
+    #[test]
+    fn p1c_compliance_keyword_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("check SOC2 compliance for the API");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'compliance' must classify as Research, not General");
+    }
+
+    #[test]
+    fn p1c_vulnerability_keyword_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("scan for vulnerability in dependencies");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'vulnerability' must classify as Research");
+    }
+
+    #[test]
+    fn p1c_pentest_keyword_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("pentest the authentication endpoint");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'pentest' must classify as Research");
+    }
+
+    #[test]
+    fn p1c_assessment_keyword_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("security assessment of the codebase");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'assessment' must classify as Research");
+    }
+
+    #[test]
+    fn p1c_soc2_keyword_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("verify SOC2 controls are passing");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'soc2' must classify as Research");
+    }
+
+    #[test]
+    fn p1c_auditoria_spanish_classified_as_research() {
+        let analysis = TaskAnalyzer::analyze("realiza una auditoria de seguridad");
+        assert_eq!(analysis.task_type, TaskType::Research,
+            "P1-C: 'auditoria' must classify as Research");
     }
 }

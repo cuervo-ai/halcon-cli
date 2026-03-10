@@ -3064,7 +3064,16 @@ impl Repl {
                         ));
 
                         // P3 FIX: Persist reasoning experience to SQLite for cross-session UCB1 learning.
-                        if let Some(ref adb) = self.async_db {
+                        // P1-D: Skip when critic_unavailable=true — the reward signal is unreliable
+                        // (computed without an adversarial evaluation) and would contaminate UCB1
+                        // learning data with noise, degrading future strategy selection.
+                        if result.critic_unavailable {
+                            tracing::debug!(
+                                task_type = %format!("{:?}", evaluation.task_type),
+                                strategy = %format!("{:?}", evaluation.strategy),
+                                "P1-D: Skipping UCB1 record — critic_unavailable=true, reward signal unreliable"
+                            );
+                        } else if let Some(ref adb) = self.async_db {
                             match adb.save_reasoning_experience(
                                 &format!("{:?}", evaluation.task_type),
                                 &format!("{:?}", evaluation.strategy),
