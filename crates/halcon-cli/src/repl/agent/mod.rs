@@ -2510,7 +2510,17 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
             };
             match retro_exec_ctx {
                 Some(ctx) => EXECUTION_CTX.scope(ctx, do_write).await,
-                None => do_write.await,
+                None => {
+                    // R-04: EXECUTION_CTX unavailable at spawn time — session_id will be None
+                    // in any DomainEvent emitted by this task. This should not happen in
+                    // normal operation (the main loop runs inside EXECUTION_CTX.scope).
+                    tracing::warn!(
+                        target: "halcon::agent",
+                        task = "retrospective_write",
+                        "EXECUTION_CTX not available — retrospective events will have no session_id"
+                    );
+                    do_write.await;
+                }
             }
         });
     }
@@ -2564,7 +2574,14 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 };
                 match mem_exec_ctx {
                     Some(ctx) => EXECUTION_CTX.scope(ctx, do_record).await,
-                    None => do_record.await,
+                    None => {
+                        tracing::warn!(
+                            target: "halcon::agent",
+                            task = "auto_memory_write",
+                            "EXECUTION_CTX not available — auto-memory events will have no session_id"
+                        );
+                        do_record.await;
+                    }
                 }
             });
         }
@@ -2591,7 +2608,14 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 };
                 match hook_exec_ctx {
                     Some(ctx) => EXECUTION_CTX.scope(ctx, do_hook).await,
-                    None => do_hook.await,
+                    None => {
+                        tracing::warn!(
+                            target: "halcon::agent",
+                            task = "stop_hook",
+                            "EXECUTION_CTX not available — Stop hook events will have no session_id"
+                        );
+                        do_hook.await;
+                    }
                 }
             });
         }

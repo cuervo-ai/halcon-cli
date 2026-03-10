@@ -670,12 +670,22 @@ impl TaskAnalyzer {
 
 // ─── P4-2: Classifier trait interface ─────────────────────────────────────────
 //
-// Stable interface allowing the classifier backend to be swapped in future
-// (e.g., LLM-based one-shot classification) without changing call sites.
-// The current SMRC `KeywordClassifier` implements this trait.
+// Stable abstraction for the intent classification backend.
+// Current production path uses `IntentScorer` (multi-dimensional, wired in reasoning_engine.rs).
+// This trait + `KeywordClassifier` exist to:
+//   1. Expose `TaskAnalyzer::analyze()` via a standard interface for tooling/tests.
+//   2. Provide a clean migration point when an LLM-based backend is added.
+//
+// NOTE: `KeywordClassifier::classify()` is NOT currently called in the production
+// agent loop — `IntentScorer::score()` is the live path.  These types will become
+// the main path once the scorer and analyzer are unified (tracked separately).
 
 /// Result of classifying a natural-language query.
+///
+/// Used by `IntentClassifier` implementations as a stable return type.
+/// In production, the equivalent data comes from `IntentProfile` (via `IntentScorer`).
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Used by KeywordClassifier and future LLM backends
 pub struct ClassificationResult {
     pub task_type: TaskType,
     pub confidence: f32,
@@ -687,27 +697,33 @@ pub struct ClassificationResult {
 
 /// Which backend produced the classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Variants used by KeywordClassifier and reserved for future LLM backends
 pub enum ClassificationMethod {
-    /// SOTA 2026 Scored Multi-Rule Classifier (current implementation).
+    /// SOTA 2026 Scored Multi-Rule Classifier — current SMRC keyword implementation.
     KeywordSMRC,
-    /// Reserved for future LLM-based one-shot classification.
-    #[allow(dead_code)]
+    /// Reserved — future LLM-based one-shot classification.
     LlmOneShot,
-    /// Reserved for LLM with keyword fallback when confidence < threshold.
-    #[allow(dead_code)]
+    /// Reserved — LLM with SMRC keyword fallback when confidence < `CONFIDENCE_FLOOR`.
     LlmWithKeywordFallback { llm_confidence: u8 },
 }
 
-/// Classify a query into a `TaskType` with confidence and complexity.
+/// Stable call surface for intent classification backends.
 ///
-/// This trait is the stable call surface — backends (keyword, LLM) implement it.
-/// Call sites depend on this trait, not on concrete classifier types, enabling
-/// zero-callsite migration to LLM-based classification when ready.
+/// Callers depend on this trait, not on concrete types, enabling zero-callsite
+/// migration between backends (keyword → LLM → hybrid).
+#[allow(dead_code)] // Implemented by KeywordClassifier; will be consumed by orchestrator
 pub trait IntentClassifier {
     fn classify(&self, query: &str) -> ClassificationResult;
 }
 
-/// Current production backend: keyword-based SMRC classifier.
+/// Keyword-based SMRC classifier — wraps `TaskAnalyzer::analyze()`.
+///
+/// This is NOT the production agent path (which uses `IntentScorer`).
+/// Use this for:
+/// - CLI tooling: `halcon classify "my query"`
+/// - Integration tests that need SMRC-specific signals
+/// - Benchmarking SMRC vs IntentScorer agreement rates
+#[allow(dead_code)] // Will be wired when scorer/analyzer unification is complete
 pub struct KeywordClassifier;
 
 impl IntentClassifier for KeywordClassifier {

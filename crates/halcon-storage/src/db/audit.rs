@@ -31,6 +31,9 @@ impl Database {
         let payload_json = serde_json::to_string(&event.payload)
             .map_err(|e| HalconError::DatabaseError(format!("serialize event: {e}")))?;
 
+        // CircuitBreakerTripped is deprecated for new code but must remain here to map
+        // historical rows that were written before the variant was split into specific types.
+        #[allow(deprecated)]
         let event_type = match &event.payload {
             EventPayload::ModelInvoked { .. } => "model_invoked",
             EventPayload::ToolExecuted { .. } => "tool_executed",

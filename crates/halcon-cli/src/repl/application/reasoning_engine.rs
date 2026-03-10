@@ -104,12 +104,19 @@ impl ReasoningEngine {
         let profile = IntentScorer::score(user_query);
 
         // Map IntentProfile → TaskAnalysis for backward-compat with UCB1 experience tables.
+        // R-02: propagate the real multi-signal confidence from IntentScorer instead of
+        // hardcoding 1.0.  Callers (UCB1 guard, strategy selector) can now gate on
+        // CONFIDENCE_FLOOR to reject uncertain classifications.
         let analysis = TaskAnalysis {
             task_type: profile.task_type,
             complexity: profile.complexity,
             task_hash: profile.task_hash.clone(),
             word_count: profile.word_count,
-            confidence: 1.0,
+            // IntentProfile.confidence is f64 [0,1]; TaskAnalysis.confidence is f32.
+            confidence: profile.confidence as f32,
+            // IntentScorer does not produce keyword-level signals; leave empty.
+            // When TaskAnalyzer::analyze() is used directly (tests, CLI tooling),
+            // signals are populated by the SMRC keyword scan.
             signals: vec![],
         };
 
@@ -248,6 +255,13 @@ impl ReasoningEngine {
     }
 
     /// POST-LOOP: Evaluate agent execution and update experience.
+    ///
+    /// # Production vs tests
+    /// Production code uses `post_loop_with_reward()` which receives a pre-computed
+    /// multi-signal reward from `reward_pipeline::compute_reward()`.  This method is
+    /// only kept for test scenarios that need to drive the engine with a synthetic
+    /// `AgentLoopResult` without a full reward pipeline.
+    #[cfg(test)]
     pub fn post_loop(
         &mut self,
         pre_analysis: &PreLoopAnalysis,

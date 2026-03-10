@@ -98,7 +98,20 @@ pub enum EventPayload {
         tool: String,
         level: PermissionLevel,
     },
-    /// Generic circuit breaker transition (kept for backwards compat — prefer specific variants).
+    /// Generic circuit breaker transition — **deprecated**.
+    ///
+    /// Kept for deserialization of historical audit_log rows only.
+    /// All new code must emit one of:
+    /// - `CircuitBreakerOpened`   (Closed → Open)
+    /// - `CircuitBreakerRecovered` (HalfOpen → Closed)
+    /// - `CircuitBreakerHalfOpen`  (Open → HalfOpen)
+    ///
+    /// Using this variant in new code produces incorrect alerting because
+    /// monitoring systems cannot distinguish a trip from a recovery.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use CircuitBreakerOpened / CircuitBreakerRecovered / CircuitBreakerHalfOpen"
+    )]
     CircuitBreakerTripped {
         provider: String,
         from_state: String,

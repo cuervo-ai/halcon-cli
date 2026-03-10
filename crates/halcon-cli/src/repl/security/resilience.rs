@@ -190,20 +190,27 @@ impl ResilienceManager {
                     to = %transition.to,
                     "Circuit breaker state changed"
                 );
-                // Emit domain event for state recovery (P1-1: specific variant, not generic Triped).
+                // Emit domain event for state recovery (P1-1: specific variant, not generic).
                 if let Some(tx) = &self.event_tx {
-                    let payload = match (&transition.from, &transition.to) {
+                    let payload_opt = match (&transition.from, &transition.to) {
                         (BreakerState::HalfOpen, BreakerState::Closed) =>
-                            EventPayload::CircuitBreakerRecovered { provider: provider.to_string() },
+                            Some(EventPayload::CircuitBreakerRecovered { provider: provider.to_string() }),
                         (BreakerState::Open, BreakerState::HalfOpen) =>
-                            EventPayload::CircuitBreakerHalfOpen { provider: provider.to_string() },
-                        _ => EventPayload::CircuitBreakerTripped {
-                            provider: provider.to_string(),
-                            from_state: transition.from.to_string(),
-                            to_state: transition.to.to_string(),
-                        },
+                            Some(EventPayload::CircuitBreakerHalfOpen { provider: provider.to_string() }),
+                        (from, to) => {
+                            // Unexpected transition — all valid success paths should be covered above.
+                            tracing::error!(
+                                target: "halcon::resilience",
+                                provider,
+                                from = %from, to = %to,
+                                "circuit_breaker_unexpected_success_transition: no event emitted"
+                            );
+                            None
+                        }
                     };
-                    let _ = tx.send(DomainEvent::new(payload));
+                    if let Some(payload) = payload_opt {
+                        let _ = tx.send(DomainEvent::new(payload));
+                    }
                 }
                 self.persist_breaker_event(provider, &transition.from, &transition.to)
                     .await;
@@ -224,19 +231,27 @@ impl ResilienceManager {
                 // Emit domain event for breaker trip (P1-1: specific variant).
                 if let Some(tx) = &self.event_tx {
                     let failure_count = breaker.failure_count();
-                    let payload = match (&transition.from, &transition.to) {
+                    let payload_opt = match (&transition.from, &transition.to) {
                         (BreakerState::Closed, BreakerState::Open) =>
-                            EventPayload::CircuitBreakerOpened {
+                            Some(EventPayload::CircuitBreakerOpened {
                                 provider: provider.to_string(),
                                 failure_count: failure_count as u32,
-                            },
-                        _ => EventPayload::CircuitBreakerTripped {
-                            provider: provider.to_string(),
-                            from_state: transition.from.to_string(),
-                            to_state: transition.to.to_string(),
-                        },
+                            }),
+                        (from, to) => {
+                            // Unexpected failure transition — all valid paths should be covered above.
+                            tracing::error!(
+                                target: "halcon::resilience",
+                                provider,
+                                from = %from, to = %to,
+                                failure_count,
+                                "circuit_breaker_unexpected_failure_transition: no event emitted"
+                            );
+                            None
+                        }
                     };
-                    let _ = tx.send(DomainEvent::new(payload));
+                    if let Some(payload) = payload_opt {
+                        let _ = tx.send(DomainEvent::new(payload));
+                    }
                 }
                 self.persist_breaker_event(provider, &transition.from, &transition.to)
                     .await;

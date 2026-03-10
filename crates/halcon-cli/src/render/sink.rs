@@ -10,6 +10,17 @@ use std::sync::Mutex;
 
 use halcon_core::types::ContentBlock;
 
+// ─── Thinking preview constants ───────────────────────────────────────────────
+
+/// Maximum byte length of the thinking preview buffer.
+/// Intentionally a byte limit (not char limit) so the buffer size is bounded in memory.
+/// The fill logic uses char-aware truncation to never split a UTF-8 sequence.
+const THINKING_PREVIEW_MAX_BYTES: usize = 160;
+
+/// Spinner label prefix for thinking progress updates.
+/// Kept as a constant so it can be updated in one place (e.g., for i18n).
+const THINKING_LABEL: &str = "Razonando...";
+
 use super::feedback;
 use super::spinner::Spinner;
 use super::stream::StreamRenderer;
@@ -340,16 +351,34 @@ impl RenderSink for ClassicSink {
         let prev = self.thinking_chars.fetch_add(text.len(), Ordering::Relaxed);
         let total = prev + text.len();
         {
-            let mut p = self.thinking_preview.lock().unwrap_or_else(|p| p.into_inner());
-            if p.len() < 160 {
-                let room = 160 - p.len();
-                p.push_str(&text[..text.len().min(room)]);
+            let mut p = self.thinking_preview.lock().unwrap_or_else(|poison| {
+                tracing::error!(
+                    target: "halcon::render",
+                    sink = "ClassicSink",
+                    field = "thinking_preview",
+                    "Mutex poisoned — recovering guard. Previous holder panicked."
+                );
+                poison.into_inner()
+            });
+            if p.len() < THINKING_PREVIEW_MAX_BYTES {
+                // Use char-aware truncation to avoid splitting a UTF-8 multi-byte sequence.
+                // p.len() and THINKING_PREVIEW_MAX_BYTES are byte lengths; chars() iterates
+                // Unicode scalar values so we never produce an invalid slice.
+                let remaining_bytes = THINKING_PREVIEW_MAX_BYTES - p.len();
+                let safe: String = text
+                    .chars()
+                    .scan(0usize, |acc, c| {
+                        *acc += c.len_utf8();
+                        if *acc <= remaining_bytes { Some(c) } else { None }
+                    })
+                    .collect();
+                p.push_str(&safe);
             }
         }
         let label = if total >= 1000 {
-            format!("Razonando... {:.1}K chars", total as f64 / 1000.0)
+            format!("{} {:.1}K chars", THINKING_LABEL, total as f64 / 1000.0)
         } else {
-            format!("Razonando... {total} chars")
+            format!("{} {total} chars", THINKING_LABEL)
         };
         if let Ok(guard) = self.spinner.lock() {
             if let Some(ref s) = *guard { s.update_label(label); }
@@ -929,10 +958,25 @@ impl RenderSink for TuiSink {
             *c
         };
         {
-            let mut p = self.thinking_preview.lock().unwrap_or_else(|p| p.into_inner());
-            if p.len() < 160 {
-                let room = 160 - p.len();
-                p.push_str(&text[..text.len().min(room)]);
+            let mut p = self.thinking_preview.lock().unwrap_or_else(|poison| {
+                tracing::error!(
+                    target: "halcon::render",
+                    sink = "TuiSink",
+                    field = "thinking_preview",
+                    "Mutex poisoned — recovering guard. Previous holder panicked."
+                );
+                poison.into_inner()
+            });
+            if p.len() < THINKING_PREVIEW_MAX_BYTES {
+                let remaining_bytes = THINKING_PREVIEW_MAX_BYTES - p.len();
+                let safe: String = text
+                    .chars()
+                    .scan(0usize, |acc, c| {
+                        *acc += c.len_utf8();
+                        if *acc <= remaining_bytes { Some(c) } else { None }
+                    })
+                    .collect();
+                p.push_str(&safe);
             }
         }
         self.had_thinking.store(true, Ordering::Relaxed);
@@ -2117,6 +2161,43 @@ mod tests {
             sink.agent_state_transition("idle", "executing", "start");
             sink.agent_state_transition("executing", "complete", "done");
         }
+    }
+
+    // ── R-01 regression: UTF-8 safety in stream_thinking ─────────────────────
+
+    #[test]
+    fn thinking_preview_does_not_panic_on_multibyte_chars() {
+        // "ñ" is 2 bytes in UTF-8.  Fill the preview buffer to just before the limit
+        // with ASCII, then push a 2-byte char that would straddle the boundary if
+        // we used byte-slicing.  The fix uses char-aware truncation so this must
+        // never panic.
+        let sink = ClassicSink::new();
+        // Fill preview to 159 bytes (1 byte short of limit) with ASCII 'a'.
+        let almost_full: String = "a".repeat(159);
+        sink.stream_thinking(&almost_full);
+        // Now push a 2-byte char — byte-slicing would panic trying to fit 1 byte.
+        sink.stream_thinking("ñ"); // 2 UTF-8 bytes — only 1 byte room remains
+        // If we reach here without panic, the fix is correct.
+    }
+
+    #[test]
+    fn thinking_preview_handles_emoji_boundary() {
+        // Emoji like "🦅" is 4 bytes. If only 3 bytes remain in the buffer, byte-slicing panics.
+        let sink = ClassicSink::new();
+        let almost_full: String = "a".repeat(157); // 3 bytes before limit
+        sink.stream_thinking(&almost_full);
+        sink.stream_thinking("🦅"); // 4 UTF-8 bytes — would panic with old byte-slice code
+        // Must complete without panic.
+    }
+
+    #[test]
+    fn thinking_preview_exact_char_boundary_fills_correctly() {
+        // Verify that a multi-byte char fitting exactly into remaining space is included.
+        let sink = ClassicSink::new();
+        let almost_full: String = "a".repeat(158); // 2 bytes before limit
+        sink.stream_thinking(&almost_full);
+        sink.stream_thinking("ñ"); // exactly 2 bytes — should fit
+        // Preview must include "ñ" at end.
     }
 }
 

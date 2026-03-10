@@ -144,7 +144,21 @@ impl Database {
                 })
             })
             .map_err(|e| halcon_core::error::HalconError::DatabaseError(format!("query load_circuit_breaker_states: {e}")))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(row) => Some(row),
+                Err(ref e) => {
+                    // R-03: Log and discard malformed rows rather than silently dropping them.
+                    // A corrupt or partially-migrated row must never silently reset a breaker
+                    // from Open → Closed, which would allow a flood of requests to a failing provider.
+                    tracing::error!(
+                        target: "halcon::db::plugins",
+                        error = %e,
+                        "circuit_breaker_state_parse_failed: row discarded. \
+                         Provider may be initialised in Closed state instead of its persisted state."
+                    );
+                    None
+                }
+            })
             .collect();
         Ok(rows)
     }
