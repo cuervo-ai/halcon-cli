@@ -12,15 +12,15 @@
 //! Existing configs with no SLA fields will use these defaults unchanged.
 //!
 //! # Usage
-//! ```no_run
+//! ```text
 //! let store = PolicyStore::from_config(&policy_config);
 //! let params = store.sla_params(RoutingMode::DeepAnalysis);
 //! assert_eq!(params.max_rounds, 20); // default
 //! ```
 
-use std::sync::Arc;
-use halcon_core::types::PolicyConfig;
 use super::sla_router::RoutingMode;
+use halcon_core::types::PolicyConfig;
+use std::sync::Arc;
 
 // ── SlaParams ─────────────────────────────────────────────────────────────────
 
@@ -144,12 +144,16 @@ pub struct PolicyStore {
 impl PolicyStore {
     /// Build from a `PolicyConfig` reference.
     pub fn from_config(config: &PolicyConfig) -> Self {
-        Self { policy: DecisionPolicy::from_config(config) }
+        Self {
+            policy: DecisionPolicy::from_config(config),
+        }
     }
 
     /// Build with all-default values (matches current hardcoded behavior exactly).
     pub fn default_store() -> Self {
-        Self { policy: DecisionPolicy::default() }
+        Self {
+            policy: DecisionPolicy::default(),
+        }
     }
 
     /// SLA parameters for the given routing mode.
@@ -193,12 +197,18 @@ mod tests {
 
         let fast = store.sla_params(RoutingMode::Quick);
         assert_eq!(fast.max_rounds, 4, "Fast/Quick max_rounds must be 4");
-        assert_eq!(fast.max_plan_depth, 2, "Fast/Quick max_plan_depth must be 2");
+        assert_eq!(
+            fast.max_plan_depth, 2,
+            "Fast/Quick max_plan_depth must be 2"
+        );
         assert_eq!(fast.max_retries, 0);
         assert!(!fast.use_orchestration);
 
         let balanced = store.sla_params(RoutingMode::Extended);
-        assert_eq!(balanced.max_rounds, 10, "Balanced/Extended max_rounds must be 10");
+        assert_eq!(
+            balanced.max_rounds, 10,
+            "Balanced/Extended max_rounds must be 10"
+        );
         assert_eq!(balanced.max_plan_depth, 5);
         assert_eq!(balanced.max_retries, 1);
         assert!(!balanced.use_orchestration);

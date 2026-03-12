@@ -21,20 +21,26 @@ fn client_config_new() {
 fn client_config_ws_url() {
     let config = ClientConfig::new("http://127.0.0.1:9849", "abc123");
     let ws_url = config.ws_url();
-    assert_eq!(ws_url, "ws://127.0.0.1:9849/ws/events?token=abc123");
+    // Token is NOT embedded in the URL — passed via Authorization header to
+    // prevent token leakage in server logs. See config.rs ws_url() comment.
+    assert_eq!(ws_url, "ws://127.0.0.1:9849/ws/events");
 }
 
 #[test]
 fn client_config_ws_url_https() {
     let config = ClientConfig::new("https://remote.host:443", "token");
     let ws_url = config.ws_url();
-    assert_eq!(ws_url, "wss://remote.host:443/ws/events?token=token");
+    // Token is NOT embedded in the URL — passed via Authorization header.
+    assert_eq!(ws_url, "wss://remote.host:443/ws/events");
 }
 
 #[test]
 fn client_config_api_url() {
     let config = ClientConfig::new("http://127.0.0.1:9849", "tok");
-    assert_eq!(config.api_url("agents"), "http://127.0.0.1:9849/api/v1/agents");
+    assert_eq!(
+        config.api_url("agents"),
+        "http://127.0.0.1:9849/api/v1/agents"
+    );
     assert_eq!(
         config.api_url("/agents/123"),
         "http://127.0.0.1:9849/api/v1/agents/123"

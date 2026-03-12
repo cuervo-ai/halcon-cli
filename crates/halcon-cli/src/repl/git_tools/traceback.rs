@@ -89,11 +89,7 @@ impl ParsedFailure {
 
         // Location
         if let (Some(file), Some(line)) = (&self.file, self.line) {
-            parts.push(format!(
-                "{}:{}",
-                file.display(),
-                line
-            ));
+            parts.push(format!("{}:{}", file.display(), line));
         }
 
         // Test name
@@ -125,7 +121,7 @@ impl ParsedFailure {
 /// Parse pytest output into structured failures.
 ///
 /// Recognizes patterns like:
-/// ```
+/// ```text
 /// tests/test_foo.py:42: AssertionError
 /// assert x == 5
 ///     where x = 3
@@ -179,7 +175,7 @@ pub fn parse_pytest(output: &str) -> Vec<ParsedFailure> {
 /// Parse cargo test output into structured failures.
 ///
 /// Recognizes patterns like:
-/// ```
+/// ```text
 /// thread 'test_foo' panicked at src/lib.rs:42:5:
 /// assertion `left == right` failed
 ///   left: 3
@@ -260,8 +256,8 @@ pub fn parse_jest(output: &str) -> Vec<ParsedFailure> {
             failure.failure_type = FailureType::Assertion;
 
             // Look for file location in next lines
-            for j in (i + 1)..lines.len().min(i + 10) {
-                if let Some((file, line_num)) = extract_jest_location(lines[j]) {
+            for loc_line in &lines[(i + 1)..lines.len().min(i + 10)] {
+                if let Some((file, line_num)) = extract_jest_location(loc_line) {
                     failure.file = Some(PathBuf::from(file));
                     failure.line = Some(line_num);
                     break;
@@ -399,7 +395,10 @@ assert result == 5
         assert_eq!(failures.len(), 1);
         let f = &failures[0];
         assert_eq!(f.failure_type, FailureType::Assertion);
-        assert_eq!(f.file.as_ref().unwrap().to_str().unwrap(), "tests/test_math.py");
+        assert_eq!(
+            f.file.as_ref().unwrap().to_str().unwrap(),
+            "tests/test_math.py"
+        );
         assert_eq!(f.line, Some(42));
         assert!(f.actual.is_some());
     }

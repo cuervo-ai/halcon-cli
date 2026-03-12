@@ -12,7 +12,6 @@
 //! 3. Expose a `DevContext` snapshot for the reward pipeline and mod.rs.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::Mutex;
 
@@ -45,10 +44,7 @@ pub struct DevContext {
 impl DevContext {
     /// Render as a Markdown block for system-prompt injection.
     pub fn as_markdown(&self) -> String {
-        if self.git_summary.is_none()
-            && self.open_buffers == 0
-            && self.latest_ci.is_none()
-        {
+        if self.git_summary.is_none() && self.open_buffers == 0 && self.latest_ci.is_none() {
             return String::new();
         }
 
@@ -113,12 +109,10 @@ impl DevGateway {
     /// Feed CI events into the gateway so `build_context()` can include them.
     ///
     /// Call this from a background task that reads the CI broadcast channel:
-    /// ```no_run
-    /// # async fn example(mut rx: tokio::sync::broadcast::Receiver<super::super::ci_result_ingestor::CiEvent>, gw: DevGateway) {
+    /// ```text
     /// while let Ok(event) = rx.recv().await {
     ///     gw.ingest_ci_event(event).await;
     /// }
-    /// # }
     /// ```
     pub async fn ingest_ci_event(&self, event: CiEvent) {
         if let CiEvent::RunCompleted(record) = event {
@@ -173,7 +167,8 @@ impl DevGateway {
             // Budget: 256 chars per file, max 8 files to stay token-efficient.
             for uri in uris.iter().take(8) {
                 if let Some(content) = self.buffers.content(uri).await {
-                    let index = super::super::ast_symbol_extractor::extract_from_buffer(uri, &content);
+                    let index =
+                        super::super::ast_symbol_extractor::extract_from_buffer(uri, &content);
                     if !index.is_empty() {
                         sym_out.push_str(&index.render(256));
                     }
@@ -186,10 +181,7 @@ impl DevGateway {
 
         // CI context.
         let latest_ci = self.latest_ci.lock().await.clone();
-        let env_reward = latest_ci
-            .as_ref()
-            .map(|r| r.reward)
-            .unwrap_or(0.5); // neutral when no CI data
+        let env_reward = latest_ci.as_ref().map(|r| r.reward).unwrap_or(0.5); // neutral when no CI data
 
         DevContext {
             git_summary,
@@ -404,7 +396,8 @@ mod tests {
                 }
             }
         });
-        gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap()).await;
+        gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap())
+            .await;
 
         let ctx_req = serde_json::json!({
             "jsonrpc": "2.0",
@@ -412,7 +405,9 @@ mod tests {
             "method": "$/halcon/context",
             "params": {}
         });
-        let resp_bytes = gw.handle_lsp_message(&serde_json::to_vec(&ctx_req).unwrap()).await;
+        let resp_bytes = gw
+            .handle_lsp_message(&serde_json::to_vec(&ctx_req).unwrap())
+            .await;
         assert!(!resp_bytes.is_empty());
 
         let resp: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
@@ -471,7 +466,8 @@ mod tests {
                 }
             }
         });
-        gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap()).await;
+        gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap())
+            .await;
         // Clone sees the same buffers.
         assert!(clone.buffers.content("file:///shared.rs").await.is_some());
     }

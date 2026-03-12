@@ -232,7 +232,7 @@ impl ThemeColor {
     /// - `h`: Hue (0.0 to 360.0 degrees)
     pub fn oklch(l: f64, c: f64, h: f64) -> Self {
         // Map OKLCH chroma to HSL saturation (0..1). Max chroma ~0.4 → S=1.0.
-        let s = (c / 0.4).min(1.0).max(0.0);
+        let s = (c / 0.4).clamp(0.0, 1.0);
         let (r, g, b) = hsl_to_rgb(h, s, l);
         Self { rgb: [r, g, b] }
     }
@@ -367,7 +367,7 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 /// - **Level 4** (emphasized): L=0.20 — User messages (highest prominence)
 ///
 /// ## Usage
-/// ```rust
+/// ```text
 /// let elevation = ElevationSystem::new(210.0); // Blue base hue
 /// let bg_panel = elevation.base();      // Darkest level
 /// let bg_card = elevation.card();       // Default card
@@ -554,9 +554,9 @@ impl Palette {
     /// Get primary color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn primary_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.primary.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.primary)
-        })
+        *RATATUI_CACHE
+            .primary
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.primary))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -570,9 +570,9 @@ impl Palette {
     /// Get accent color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn accent_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.accent.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.accent)
-        })
+        *RATATUI_CACHE
+            .accent
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.accent))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -586,9 +586,9 @@ impl Palette {
     /// Get warning color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn warning_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.warning.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.warning)
-        })
+        *RATATUI_CACHE
+            .warning
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.warning))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -602,9 +602,9 @@ impl Palette {
     /// Get error color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn error_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.error.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.error)
-        })
+        *RATATUI_CACHE
+            .error
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.error))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -618,9 +618,9 @@ impl Palette {
     /// Get success color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn success_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.success.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.success)
-        })
+        *RATATUI_CACHE
+            .success
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.success))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -634,9 +634,9 @@ impl Palette {
     /// Get muted color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn muted_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.muted.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.muted)
-        })
+        *RATATUI_CACHE
+            .muted
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.muted))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -650,9 +650,9 @@ impl Palette {
     /// Get text color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn text_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.text.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.text)
-        })
+        *RATATUI_CACHE
+            .text
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.text))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -666,9 +666,9 @@ impl Palette {
     /// Get text_dim color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn text_dim_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.text_dim.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.text_dim)
-        })
+        *RATATUI_CACHE
+            .text_dim
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.text_dim))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -682,9 +682,9 @@ impl Palette {
     /// Get running color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn running_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.running.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.running)
-        })
+        *RATATUI_CACHE
+            .running
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.running))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -698,9 +698,9 @@ impl Palette {
     /// Get planning color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn planning_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.planning.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.planning)
-        })
+        *RATATUI_CACHE
+            .planning
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.planning))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -714,9 +714,9 @@ impl Palette {
     /// Get reasoning color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn reasoning_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.reasoning.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.reasoning)
-        })
+        *RATATUI_CACHE
+            .reasoning
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.reasoning))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -730,9 +730,9 @@ impl Palette {
     /// Get delegated color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn delegated_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.delegated.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.delegated)
-        })
+        *RATATUI_CACHE
+            .delegated
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.delegated))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -746,9 +746,9 @@ impl Palette {
     /// Get destructive color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn destructive_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.destructive.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.destructive)
-        })
+        *RATATUI_CACHE
+            .destructive
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.destructive))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -762,9 +762,9 @@ impl Palette {
     /// Get cached color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn cached_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.cached.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.cached)
-        })
+        *RATATUI_CACHE
+            .cached
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.cached))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -778,9 +778,9 @@ impl Palette {
     /// Get retrying color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn retrying_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.retrying.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.retrying)
-        })
+        *RATATUI_CACHE
+            .retrying
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.retrying))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -794,9 +794,9 @@ impl Palette {
     /// Get compacting color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn compacting_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.compacting.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.compacting)
-        })
+        *RATATUI_CACHE
+            .compacting
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.compacting))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -810,9 +810,9 @@ impl Palette {
     /// Get border color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn border_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.border.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.border)
-        })
+        *RATATUI_CACHE
+            .border
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.border))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -826,9 +826,9 @@ impl Palette {
     /// Get bg_panel color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn bg_panel_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.bg_panel.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.bg_panel)
-        })
+        *RATATUI_CACHE
+            .bg_panel
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.bg_panel))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -842,9 +842,9 @@ impl Palette {
     /// Get bg_highlight color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn bg_highlight_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.bg_highlight.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.bg_highlight)
-        })
+        *RATATUI_CACHE
+            .bg_highlight
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.bg_highlight))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -858,9 +858,9 @@ impl Palette {
     /// Get text_label color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn text_label_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.text_label.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.text_label)
-        })
+        *RATATUI_CACHE
+            .text_label
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.text_label))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -874,9 +874,9 @@ impl Palette {
     /// Get spinner_color as ratatui Color (cached).
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn spinner_color_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.spinner_color.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.spinner_color)
-        })
+        *RATATUI_CACHE
+            .spinner_color
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.spinner_color))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -890,9 +890,9 @@ impl Palette {
     // M1: Card background ratatui accessors (cached)
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn bg_user_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.bg_user.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.bg_user)
-        })
+        *RATATUI_CACHE
+            .bg_user
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.bg_user))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -905,9 +905,9 @@ impl Palette {
 
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn bg_assistant_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.bg_assistant.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.bg_assistant)
-        })
+        *RATATUI_CACHE
+            .bg_assistant
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.bg_assistant))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -920,9 +920,9 @@ impl Palette {
 
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn bg_tool_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.bg_tool.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.bg_tool)
-        })
+        *RATATUI_CACHE
+            .bg_tool
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.bg_tool))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -935,9 +935,9 @@ impl Palette {
 
     #[cfg(all(feature = "tui", feature = "color-science"))]
     pub fn bg_code_ratatui(&self) -> ratatui::style::Color {
-        *RATATUI_CACHE.bg_code.get_or_init(|| {
-            super::terminal_caps::caps().downgrade_color(&self.bg_code)
-        })
+        *RATATUI_CACHE
+            .bg_code
+            .get_or_init(|| super::terminal_caps::caps().downgrade_color(&self.bg_code))
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -1195,51 +1195,51 @@ fn neon_palette() -> Palette {
     // Core identity anchors — HALCÓN design tokens
     // Falcon Blue: the blade, sharp execution, primary action
     let falcon_blue = ThemeColor::oklch(0.80, 0.18, 207.0); // Primary — bright blade (L=0.80 for panel separation)
-    // Bright Blade: electric highlight, accent on interaction
-    let blade_light  = ThemeColor::oklch(0.88, 0.14, 194.0); // Accent — electric, distinct from running
-    // Amber Eye: warm decisive secondary, the falcon's gaze
-    let amber_eye    = ThemeColor::oklch(0.76, 0.17, 62.0);  // Delegated — warm, golden
-    let frost        = ThemeColor::oklch(0.93, 0.006, 220.0); // Text — cool white clarity
-    let carbon       = ThemeColor::oklch(0.48, 0.022, 232.0); // Muted — subdued steel
+                                                            // Bright Blade: electric highlight, accent on interaction
+    let blade_light = ThemeColor::oklch(0.88, 0.14, 194.0); // Accent — electric, distinct from running
+                                                            // Amber Eye: warm decisive secondary, the falcon's gaze
+    let amber_eye = ThemeColor::oklch(0.76, 0.17, 62.0); // Delegated — warm, golden
+    let frost = ThemeColor::oklch(0.93, 0.006, 220.0); // Text — cool white clarity
+    let carbon = ThemeColor::oklch(0.48, 0.022, 232.0); // Muted — subdued steel
 
     Palette {
         // Legacy field names preserved for compatibility
-        neon_blue:  falcon_blue,
-        cyan:       blade_light,
-        violet:     ThemeColor::oklch(0.58, 0.22, 285.0),  // Deep violet — planning
-        deep_blue:  ThemeColor::oklch(0.07, 0.013, 240.0), // Void Black — deepest space
+        neon_blue: falcon_blue,
+        cyan: blade_light,
+        violet: ThemeColor::oklch(0.58, 0.22, 285.0), // Deep violet — planning
+        deep_blue: ThemeColor::oklch(0.07, 0.013, 240.0), // Void Black — deepest space
 
         // Semantic tokens
-        primary:    falcon_blue,
-        accent:     blade_light,
-        warning:    ThemeColor::oklch(0.85, 0.16, 82.0),   // Gold — caution, bright (H=82 far from blade)
-        error:      ThemeColor::oklch(0.58, 0.26, 27.0),   // Blood — decisive, no ambiguity
-        success:    ThemeColor::oklch(0.58, 0.22, 142.0),  // Emerald — confident, alive (H=142)
-        muted:      carbon,
-        text:       frost,
-        text_dim:   ThemeColor::oklch(0.62, 0.012, 225.0), // Dimmed frost — structural
+        primary: falcon_blue,
+        accent: blade_light,
+        warning: ThemeColor::oklch(0.85, 0.16, 82.0), // Gold — caution, bright (H=82 far from blade)
+        error: ThemeColor::oklch(0.58, 0.26, 27.0),   // Blood — decisive, no ambiguity
+        success: ThemeColor::oklch(0.58, 0.22, 142.0), // Emerald — confident, alive (H=142)
+        muted: carbon,
+        text: frost,
+        text_dim: ThemeColor::oklch(0.62, 0.012, 225.0), // Dimmed frost — structural
 
         // Cockpit semantic tokens — HALCÓN operational states
         // Wide hue coverage (207°/285°/155°/62°) + large ΔL for perceptual separation ≥ 0.3
-        running:     falcon_blue,                            // L=0.80, H=207 — blade active
-        planning:    ThemeColor::oklch(0.58, 0.22, 285.0),  // L=0.58, H=285 — deep violet, strategy
-        reasoning:   ThemeColor::oklch(0.52, 0.20, 155.0),  // L=0.52, H=155 — dark teal, intelligence
-        delegated:   amber_eye,                              // L=0.76, H=62  — amber warm, handoff
-        destructive: ThemeColor::oklch(0.58, 0.26, 27.0),   // Blood — danger acknowledged
-        cached:      ThemeColor::oklch(0.60, 0.06, 222.0),  // Steel blue — settled, stored
-        retrying:    ThemeColor::oklch(0.82, 0.16, 62.0),   // Warm amber retrying — persistence
-        compacting:  ThemeColor::oklch(0.50, 0.04, 235.0),  // Blue-grey — background work
-        border:      ThemeColor::oklch(0.28, 0.022, 237.0), // Carbon border — structural
-        bg_panel:    ThemeColor::oklch(0.12, 0.016, 240.0), // Carbon panel — elevated surface
-        bg_highlight: ThemeColor::oklch(0.18, 0.040, 210.0),// Blue micro-highlight
-        text_label:  ThemeColor::oklch(0.62, 0.022, 232.0), // Carbon label — ≥4.5:1 on bg_panel
-        spinner_color: falcon_blue,                          // Blade color — active motion
+        running: falcon_blue, // L=0.80, H=207 — blade active
+        planning: ThemeColor::oklch(0.58, 0.22, 285.0), // L=0.58, H=285 — deep violet, strategy
+        reasoning: ThemeColor::oklch(0.52, 0.20, 155.0), // L=0.52, H=155 — dark teal, intelligence
+        delegated: amber_eye, // L=0.76, H=62  — amber warm, handoff
+        destructive: ThemeColor::oklch(0.58, 0.26, 27.0), // Blood — danger acknowledged
+        cached: ThemeColor::oklch(0.60, 0.06, 222.0), // Steel blue — settled, stored
+        retrying: ThemeColor::oklch(0.82, 0.16, 62.0), // Warm amber retrying — persistence
+        compacting: ThemeColor::oklch(0.50, 0.04, 235.0), // Blue-grey — background work
+        border: ThemeColor::oklch(0.28, 0.022, 237.0), // Carbon border — structural
+        bg_panel: ThemeColor::oklch(0.12, 0.016, 240.0), // Carbon panel — elevated surface
+        bg_highlight: ThemeColor::oklch(0.18, 0.040, 210.0), // Blue micro-highlight
+        text_label: ThemeColor::oklch(0.62, 0.022, 232.0), // Carbon label — ≥4.5:1 on bg_panel
+        spinner_color: falcon_blue, // Blade color — active motion
 
         // Card backgrounds — void hierarchy (darker = deeper)
-        bg_user:      ThemeColor::oklch(0.11, 0.020, 240.0), // Elevated void — user space
+        bg_user: ThemeColor::oklch(0.11, 0.020, 240.0), // Elevated void — user space
         bg_assistant: ThemeColor::oklch(0.09, 0.015, 240.0), // Deep void — falcon origin
-        bg_tool:      ThemeColor::oklch(0.13, 0.030, 210.0), // Blue-carbon — tool surface
-        bg_code:      ThemeColor::oklch(0.08, 0.012, 240.0), // Deepest void — code sanctum
+        bg_tool: ThemeColor::oklch(0.13, 0.030, 210.0), // Blue-carbon — tool surface
+        bg_code: ThemeColor::oklch(0.08, 0.012, 240.0), // Deepest void — code sanctum
     }
 }
 
@@ -1374,19 +1374,23 @@ mod tests {
     #[cfg(all(feature = "tui", feature = "color-science"))]
     #[test]
     fn progressive_enhancement_downgrades_for_limited_terminals() {
-        // Force 256-color mode
-        super::super::terminal_caps::init_with_level(
-            super::super::terminal_caps::ColorLevel::Color256
+        // Use TerminalCapabilities::with_color_level directly to avoid the
+        // OnceLock singleton, which may already be initialized with a different
+        // color level when other tests run first (test-order dependency fixed).
+        let caps_256 = super::super::terminal_caps::TerminalCapabilities::with_color_level(
+            super::super::terminal_caps::ColorLevel::Color256,
         );
 
-        init("neon", None);
         let neon_blue = ThemeColor::oklch(0.80, 0.15, 210.0);
 
         // Downgrade a color and verify it's Indexed, not RGB
-        let downgraded = super::super::terminal_caps::caps()
-            .downgrade_color(&neon_blue);
+        let downgraded = caps_256.downgrade_color(&neon_blue);
 
-        assert!(matches!(downgraded, ratatui::style::Color::Indexed(_)));
+        assert!(
+            matches!(downgraded, ratatui::style::Color::Indexed(_)),
+            "Color256 terminal should downgrade OkLCh to Indexed, got: {:?}",
+            downgraded
+        );
     }
 
     #[cfg(all(feature = "tui", feature = "color-science"))]
@@ -1395,7 +1399,7 @@ mod tests {
         // Test that ColorLevel::None downgrades to Reset
         // Note: Cannot force terminal caps due to OnceLock, so test the logic directly
         let caps_none = super::super::terminal_caps::TerminalCapabilities::with_color_level(
-            super::super::terminal_caps::ColorLevel::None
+            super::super::terminal_caps::ColorLevel::None,
         );
 
         let red = ThemeColor::rgb(255, 0, 0);
@@ -1586,7 +1590,10 @@ mod tests {
         assert!(p.is_some(), "valid hex should produce a palette");
         let p = p.unwrap();
         let hue = p.primary.to_oklch().h;
-        assert!(hue > 200.0 && hue < 280.0, "brand hue should be blue-ish, got {hue}");
+        assert!(
+            hue > 200.0 && hue < 280.0,
+            "brand hue should be blue-ish, got {hue}"
+        );
     }
 
     #[test]
@@ -1675,10 +1682,7 @@ mod tests {
     fn cockpit_palette_wcag_aa_compliance() {
         let p = neon_palette();
         let failures = crate::render::color_science::validate_cockpit_palette(&p);
-        assert!(
-            failures.is_empty(),
-            "WCAG failures: {failures:?}"
-        );
+        assert!(failures.is_empty(), "WCAG failures: {failures:?}");
     }
 
     #[cfg(feature = "color-science")]
@@ -1710,7 +1714,10 @@ mod tests {
         let p = neon_palette();
         let cached = p.primary_ratatui();
         let direct = crate::render::terminal_caps::caps().downgrade_color(&p.primary);
-        assert_eq!(cached, direct, "cached color should match downgraded conversion");
+        assert_eq!(
+            cached, direct,
+            "cached color should match downgraded conversion"
+        );
     }
 
     #[cfg(all(feature = "tui", not(feature = "color-science")))]
@@ -1721,7 +1728,10 @@ mod tests {
         let cached = p.primary_ratatui();
         let [r, g, b] = p.primary.srgb8();
         let direct = crate::render::terminal_caps::caps().downgrade_rgb(r, g, b);
-        assert_eq!(cached, direct, "cached color should match downgraded conversion");
+        assert_eq!(
+            cached, direct,
+            "cached color should match downgraded conversion"
+        );
     }
 
     #[cfg(feature = "tui")]
@@ -1796,7 +1806,8 @@ mod tests {
         crate::render::terminal_caps::init();
         let theme = active();
         let cached_primary = theme.palette.primary_ratatui();
-        let direct_primary = crate::render::terminal_caps::caps().downgrade_color(&theme.palette.primary);
+        let direct_primary =
+            crate::render::terminal_caps::caps().downgrade_color(&theme.palette.primary);
 
         assert_eq!(
             cached_primary, direct_primary,
@@ -1851,7 +1862,9 @@ mod tests {
     fn ratatui_cache_tui_widget_colors() {
         // Phase 45A: Validate cockpit colors are cached for TUI widgets
         // Initialize with Truecolor to ensure RGB output
-        crate::render::terminal_caps::init_with_level(crate::render::terminal_caps::ColorLevel::Truecolor);
+        crate::render::terminal_caps::init_with_level(
+            crate::render::terminal_caps::ColorLevel::Truecolor,
+        );
         let p = neon_palette();
 
         // Activity widget uses these
@@ -1908,7 +1921,10 @@ mod tests {
         let degraded_h = degraded.running.to_oklch().h;
 
         assert_ne!(base.running.srgb8(), degraded.running.srgb8());
-        assert!((degraded_h - base_h).abs() > 5.0, "Hue should shift in degraded state");
+        assert!(
+            (degraded_h - base_h).abs() > 5.0,
+            "Hue should shift in degraded state"
+        );
     }
 
     #[cfg(feature = "color-science")]

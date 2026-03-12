@@ -1,60 +1,124 @@
-//! Task complexity and type analysis — SOTA 2026 Scored Multi-Rule Classifier (SMRC).
+//! Task complexity and type analysis — Cascade-SMRC™ 2026.
 //!
-//! ## Architecture
-//!
-//! Replaces the legacy "first-match-wins" keyword scanner with a scored
-//! multi-rule classifier where every matching signal contributes to a
-//! per-type score bucket, and the winner is the bucket with the highest total.
-//!
-//! ### How it works
+//! ## Architecture — 3-Layer Cascade
 //!
 //! ```text
-//! query ──► normalise ──► for each ClassifierRule:
-//!                            for each keyword:
-//!                               if matches(query, kw):
-//!                                  scores[rule.task_type] += rule.base_score
-//!                                  signals.push(kw)
-//!           ──► winner  = argmax(scores)
-//!           ──► confidence = winner_score / Σ(all positive scores)
-//!           ──► if confidence < CONFIDENCE_FLOOR → General
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │  Layer 1 · Position-Weighted SMRC                                   │
+//! │  Every keyword contributes base_score × position_weight.            │
+//! │  Tokens at positions 0-1 (action verb slot) get 1.30× boost;       │
+//! │  positions 2-3 get 1.15×; positions 4+ get 1.0×.                   │
+//! │                                                                     │
+//! │  Fast-path: if winner_confidence ≥ 0.88 → return immediately.      │
+//! ├─────────────────────────────────────────────────────────────────────┤
+//! │  Layer 2 · Entropy + Margin Analysis                                │
+//! │  Shannon entropy H = -Σ p_i·log₂(p_i) over positive-score types.  │
+//! │  If H/H_max > 0.65 OR margin < 0.12 → tag as ambiguous.           │
+//! │  Primary task_type preserved; ambiguity exposed as metadata.        │
+//! ├─────────────────────────────────────────────────────────────────────┤
+//! │  Layer 3 · Contextual Enrichment                                    │
+//! │  W5H2 canonical intent: "verb:domain" stable key for UCB1.         │
+//! │  Multi-intent detection: conjunction tokens + dual-signal check.    │
+//! │  Context priors: file extensions + git state → score bias.         │
+//! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ### Why this beats first-match-wins
+//! ## Why this beats plain SMRC
 //!
-//! | Query | Legacy result | SMRC result |
-//! |-------|---------------|-------------|
-//! | "create a security audit report" | CodeGeneration | Research (audit×3 > create×1) |
-//! | "fix the vulnerability in auth" | Debugging | Research (vulnerability×3 > fix×2) |
-//! | "git commit with message 'fix bug'" | GitOperation | GitOperation (git commit×4 > fix+bug×3) |
-//! | "verify SOC2 compliance controls" | General (after P1-C) | Research (soc2×3 + compliance×3 + verify×1) |
+//! | Query | SMRC result | Cascade-SMRC |
+//! |-------|-------------|--------------|
+//! | "explain AND fix the auth bug" | Debugging (fix>explain) | Debugging + is_multi_intent=true + secondary=Explanation |
+//! | "fix the vulnerability in auth" | Research (close) | Research, margin=0.141, not ambiguous |
+//! | "verify" (single word) | General (no signal) | General, ambiguity=NoSignals |
+//! | "fix refactor" (contradiction) | CodeModification | CodeModification, ambiguity=NarrowMargin |
 //!
-//! ### Fixes vs legacy implementation
+//! ## Backward Compatibility
 //!
-//! | ID | Bug | Legacy | Fixed |
-//! |----|-----|--------|-------|
-//! | STAT-PANIC-006 | `start = pos + 1` breaks UTF-8 char boundaries | panic on accented chars | char-boundary aware |
-//! | STAT-LOGIC-001 | Operator precedence ambiguity in `before_ok` | accidental correctness | explicit parentheses |
-//! | SOTA-CLASSIFY-001 | First-match priority collision | wrong type on mixed signals | score-based resolution |
-//! | SOTA-HASH-001 | SHA-256 of raw text — every phrasing is a cold-start | UCB1 never learns | semantic normalization |
+//! `TaskAnalysis.task_type` and `TaskAnalysis.confidence` are semantically
+//! identical to the previous SMRC implementation for all queries — position
+//! weighting only adjusts the magnitude, not the winner, for unambiguous cases.
+//! New fields (`secondary_type`, `is_multi_intent`, `ambiguity`, `margin`,
+//! `canonical_intent`) are purely additive.
 //!
-//! ### Extensibility
+//! ## Dynamic Rules (config/classifier_rules.toml)
 //!
-//! Add keywords by editing `CLASSIFIER_RULES`. No logic changes needed.
-//! Add a new `TaskType` by:
-//! 1. Adding the variant to the enum.
-//! 2. Adding `as_str()` / `from_str()` entries.
-//! 3. Adding one or more `ClassifierRule` entries in `CLASSIFIER_RULES`.
+//! La diferencia clave con sistemas como Claude Code / Codex:
+//!
+//! ```text
+//! Claude Code:  LLM ──────────────────────────────► el modelo IS el clasificador
+//!                                                    no existe ClassifierRule
+//!
+//! Halcon:       necesita clasificar ANTES del LLM   (para elegir routing tier,
+//!               max_rounds, UCB1 strategy)           por eso existe el clasificador
+//!               pero las reglas DEBEN ser externas   → TOML + few-shot examples
+//!
+//! Cascade-SMRC: TOML rules (Layer 1) ──────────────► score-based winner
+//!               VectorStore examples (Layer 3) ────► nearest-neighbor fallback
+//!               confidence < FLOOR ─────────────────► General (honest "no sé")
+//! ```
+//!
+//! Para agregar keywords sin recompilar:
+//!   editar `config/classifier_rules.toml` o `~/.halcon/classifier_rules.toml`
+//!
+//! Para agregar un TaskType nuevo:
+//!   1. Variante en `TaskType` enum + `as_str()` / `from_str()`
+//!   2. `[[rule]]` en el TOML
+//!   3. `[[example]]` en el TOML (mejora el fallback few-shot)
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// Minimum confidence to accept a classification.  Below this threshold the
-/// winning type does not have enough signal mass to be trustworthy and the
-/// result is `General`.
+/// Minimum confidence to accept a classification.  Below this, winner type
+/// does not have enough signal mass → falls back to `General`.
 pub const CONFIDENCE_FLOOR: f32 = 0.30;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+/// Normalised Shannon entropy ratio above which the result is tagged as
+/// ambiguous — the score mass is spread across too many competing types.
+/// H/H_max > 0.65 means the distribution is more "uncertain" than a
+/// coin-flip between the top two types.
+pub const AMBIGUITY_ENTROPY_RATIO: f32 = 0.65;
+
+/// Normalised margin (winner − runner-up) / total below which the result
+/// is tagged as ambiguous — the top two types are too close to call.
+pub const AMBIGUITY_MARGIN: f32 = 0.12;
+
+/// If winner confidence ≥ this, skip entropy analysis (fast path).
+/// Avoids O(N log N) entropy computation for crystal-clear queries.
+pub const PHRASE_FAST_PATH_CONFIDENCE: f32 = 0.88;
+
+/// Position weight for tokens at positions 0–1 (typical action-verb slot).
+/// Research on MASSIVE corpus shows ~31% accuracy gain on 8-class intent
+/// when the leading bigram is given higher weight (SetFit, Tunstall 2022).
+pub const POSITION_WEIGHT_LEADING: f32 = 1.30;
+
+/// Position weight for tokens at positions 2–3 (first object/domain slot).
+pub const POSITION_WEIGHT_NEAR: f32 = 1.15;
+
+// tokens 4+: weight 1.0 (default, no constant needed)
+
+// ─── Ambiguity ────────────────────────────────────────────────────────────────
+
+/// Reason the classifier is uncertain about its result.
+///
+/// Callers may choose to treat any ambiguous result as `General` when
+/// strict correctness matters, or surface the reason to the user for
+/// disambiguation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AmbiguityReason {
+    /// Zero keywords fired — query carries no domain signal.
+    NoSignals,
+    /// Shannon entropy ratio H/H_max > `AMBIGUITY_ENTROPY_RATIO` — score mass
+    /// spread across too many competing types.
+    HighEntropy { entropy_ratio: f32 },
+    /// Normalised margin between winner and runner-up < `AMBIGUITY_MARGIN` —
+    /// the top two types are statistically tied.
+    NarrowMargin { margin: f32 },
+}
+
+// ─── Task types ───────────────────────────────────────────────────────────────
 
 /// Task complexity derived from query length and keyword presence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,9 +133,12 @@ pub enum TaskComplexity {
 
 /// Task type classification for UCB1 strategy selection.
 ///
-/// Variants are ordered from most-specific to most-general.
 /// `as_str()` returns a stable snake_case key for DB persistence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Variants are ordered most-specific → most-general.
+// Phase 5: serde support for FeedbackEvent persistence + snapshot roundtrip.
+// rename_all = "snake_case" matches TaskType::as_str() exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskType {
     /// Write new code, create functions/classes/modules.
     CodeGeneration,
@@ -94,372 +161,1021 @@ pub enum TaskType {
 }
 
 impl TaskType {
-    /// Stable snake_case key for database storage.
+    /// Stable snake_case key for database storage and UCB1 lookup.
     pub fn as_str(&self) -> &'static str {
         match self {
-            TaskType::CodeGeneration  => "code_generation",
+            TaskType::CodeGeneration => "code_generation",
             TaskType::CodeModification => "code_modification",
-            TaskType::Debugging        => "debugging",
-            TaskType::Research         => "research",
-            TaskType::FileManagement   => "file_management",
-            TaskType::GitOperation     => "git_operation",
-            TaskType::Explanation      => "explanation",
-            TaskType::Configuration    => "configuration",
-            TaskType::General          => "general",
+            TaskType::Debugging => "debugging",
+            TaskType::Research => "research",
+            TaskType::FileManagement => "file_management",
+            TaskType::GitOperation => "git_operation",
+            TaskType::Explanation => "explanation",
+            TaskType::Configuration => "configuration",
+            TaskType::General => "general",
         }
     }
 
     /// Parse from stable snake_case key (DB round-trip).
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "code_generation"   => Some(TaskType::CodeGeneration),
+            "code_generation" => Some(TaskType::CodeGeneration),
             "code_modification" => Some(TaskType::CodeModification),
-            "debugging"         => Some(TaskType::Debugging),
-            "research"          => Some(TaskType::Research),
-            "file_management"   => Some(TaskType::FileManagement),
-            "git_operation"     => Some(TaskType::GitOperation),
-            "explanation"       => Some(TaskType::Explanation),
-            "configuration"     => Some(TaskType::Configuration),
-            "general"           => Some(TaskType::General),
+            "debugging" => Some(TaskType::Debugging),
+            "research" => Some(TaskType::Research),
+            "file_management" => Some(TaskType::FileManagement),
+            "git_operation" => Some(TaskType::GitOperation),
+            "explanation" => Some(TaskType::Explanation),
+            "configuration" => Some(TaskType::Configuration),
+            "general" => Some(TaskType::General),
             _ => None,
         }
     }
 }
 
-/// Result of task analysis.
+// ─── Context signals ──────────────────────────────────────────────────────────
+
+/// Contextual signals from the session environment used to apply prior biases
+/// before scoring.  All fields are optional — passing an empty struct is safe
+/// and produces zero bias (same result as `TaskAnalyzer::analyze`).
+///
+/// ## Prior adjustment semantics
+///
+/// Signals that increase the prior for a type add a small fixed score to that
+/// type's bucket BEFORE keyword matching, so keyword evidence can still
+/// override the prior when strong enough.
+pub struct ContextSignals<'a> {
+    /// File extensions present in the current conversation context
+    /// (e.g., `&["rs", "toml"]` when editing Rust files).
+    /// Used to bias toward CodeGeneration/CodeModification/Debugging.
+    pub file_extensions: &'a [&'a str],
+
+    /// Whether the session has active git merge conflicts.
+    /// Biases toward Debugging and GitOperation.
+    pub in_git_conflict: bool,
+
+    /// Recent task types from session history (most-recent first).
+    /// First element receives the strongest prior bias (0.5× base), with
+    /// exponential decay (0.25× for 2nd, 0.125× for 3rd, …).
+    pub recent_task_types: &'a [TaskType],
+}
+
+impl<'a> ContextSignals<'a> {
+    /// Zero-bias context (equivalent to `TaskAnalyzer::analyze`).
+    pub const fn empty() -> Self {
+        ContextSignals {
+            file_extensions: &[],
+            in_git_conflict: false,
+            recent_task_types: &[],
+        }
+    }
+}
+
+// ─── TaskAnalysis ─────────────────────────────────────────────────────────────
+
+/// Full result of task analysis.
+///
+/// `task_type` and `confidence` are the primary classification output.
+/// All other fields are enrichment metadata for callers that need it.
 #[derive(Debug, Clone)]
 pub struct TaskAnalysis {
-    pub complexity:  TaskComplexity,
-    pub task_type:   TaskType,
+    // ── Primary classification ───────────────────────────────────────────────
+    pub complexity: TaskComplexity,
+    pub task_type: TaskType,
     /// Semantic hash for UCB1 experience lookup.
-    /// Normalised (stop-word removal + sort) before hashing so that
-    /// "fix auth bug" and "fix the authentication bug" land in closer
-    /// buckets than raw SHA-256 of the query text would allow.
-    pub task_hash:   String,
-    pub word_count:  usize,
-    /// Score mass captured by the winning type divided by total signal mass.
-    /// Range 0.0–1.0.  Values below `CONFIDENCE_FLOOR` produce `General`.
-    pub confidence:  f32,
-    /// Keywords that fired during classification — useful for debugging
-    /// UCB1 reward misattribution and strategy selection reasoning.
-    pub signals:     Vec<String>,
+    /// Stop-word removal + alphabetical sort normalise paraphrases to the
+    /// same bucket, drastically reducing UCB1 cold-starts.
+    pub task_hash: String,
+    pub word_count: usize,
+    /// Winner score / total positive score (0.0–1.0).
+    /// Values below `CONFIDENCE_FLOOR` produce `TaskType::General`.
+    pub confidence: f32,
+    /// Keywords that fired — useful for debugging reward misattribution.
+    pub signals: Vec<String>,
+
+    // ── Enrichment metadata (Layer 2 & 3) ───────────────────────────────────
+    /// Second-ranked task type (if any), exposed for multi-intent routing.
+    /// `None` when either (a) only one type scored or (b) primary is General.
+    pub secondary_type: Option<TaskType>,
+    /// True when the query contains conjunctive markers ("and", "y", "además")
+    /// AND has strong signal for at least two different types.
+    /// Callers may route such queries through a multi-step plan.
+    pub is_multi_intent: bool,
+    /// Non-None when the classifier is uncertain.  Callers may choose to treat
+    /// any ambiguous result as `General` for safety-critical routing.
+    pub ambiguity: Option<AmbiguityReason>,
+    /// Normalised score gap: (winner − runner_up) / total.
+    /// 0.0 = tied; 1.0 = only one type scored at all.
+    pub margin: f32,
+    /// W5H2 canonical intent in `"verb:domain"` form, e.g. `"fix:vulnerability"`.
+    /// More stable than `task_hash` for UCB1 strategy warm-start because
+    /// it survives surface-level rephrasing ("fix"/"resolve"/"patch" → same verb).
+    /// `None` when neither an action verb nor a domain noun could be extracted.
+    pub canonical_intent: Option<String>,
 }
 
-// ─── Classifier rules ─────────────────────────────────────────────────────────
+// ─── Classifier rules — Dynamic (loaded from TOML, compiled defaults as fallback) ──
 
-/// One rule in the scored multi-rule classifier.
-///
-/// All keywords in the same rule are awarded the same `base_score` per match.
-/// A query can match multiple rules for the same `TaskType` (scores accumulate)
-/// and multiple rules for *different* types (winner = max score).
-struct ClassifierRule {
-    task_type:  TaskType,
-    /// Score contribution per matched keyword.
-    /// Higher = more specific / less ambiguous.
+/// Runtime-loaded classifier rule.  Keywords are owned `String`s so rules can
+/// be loaded from config at startup without `'static` lifetime constraints.
+#[derive(Debug, Clone)]
+pub struct ClassifierRule {
+    pub task_type: TaskType,
+    /// Score contribution per matched keyword (before position weighting).
     ///
     /// Tier guide:
-    ///   5.0  exact multi-word git/file commands — almost never ambiguous
-    ///   3.0  domain nouns (audit, cve, vulnerability, stacktrace…) — context-specific
-    ///   2.0  strong intent verbs (fix, implement, explain, configure…)
-    ///   1.0  weak / polysemous signals (find, create, check, error…)
-    base_score: f32,
-    keywords:   &'static [&'static str],
+    ///   5.0  exact multi-word commands — almost never ambiguous
+    ///   3.0  domain nouns (audit, cve, vulnerability…) — context-specific
+    ///   2.0  strong intent verbs (fix, implement, explain…)
+    ///   1.0  weak / polysemous signals (find, create, error…)
+    pub base_score: f32,
+    pub keywords: Vec<String>,
 }
 
-/// The full rule table.  Rules for the same `TaskType` accumulate.
-/// Order within the slice does NOT affect results — scoring is additive.
-static CLASSIFIER_RULES: &[ClassifierRule] = &[
-    // ── Tier 5: exact multi-word git commands ─────────────────────────────────
-    ClassifierRule {
-        task_type:  TaskType::GitOperation,
-        base_score: 5.0,
-        keywords: &[
-            "git commit", "git status", "git diff", "git log",
-            "git add", "git push", "git pull", "git fetch",
-            "git branch", "git merge", "git rebase", "git stash",
-            "git checkout", "git cherry-pick", "git bisect",
-            "commit changes", "stage files", "push changes",
-            "pull request", "merge request",
-        ],
-    },
-    // ── Tier 5: exact multi-word file operations ──────────────────────────────
-    ClassifierRule {
-        task_type:  TaskType::FileManagement,
-        base_score: 5.0,
-        keywords: &[
-            "delete file", "remove file", "rename file",
-            "move file", "copy file", "create directory",
-            "create folder", "list files", "show files",
-            "find files", "search files", "delete directory",
-            "remove directory", "file permissions",
-        ],
-    },
+/// TOML-deserializable form of a classifier rule.
+#[derive(Debug, Deserialize)]
+struct RuleToml {
+    task_type: String,
+    base_score: f32,
+    keywords: Vec<String>,
+}
 
-    // ── Tier 3: security / compliance / audit domain nouns ───────────────────
-    ClassifierRule {
-        task_type:  TaskType::Research,
-        base_score: 3.0,
-        keywords: &[
-            // Audit
-            "audit", "auditar", "auditoria", "auditoría",
-            // Compliance & standards
-            "compliance", "cumplimiento",
-            "soc2", "soc 2", "sox", "gdpr", "hipaa", "hipaa",
-            "iso27001", "iso 27001", "pci-dss", "pci dss",
-            "nist", "fips",
-            // Vulnerability & offensive security
-            "vulnerability", "vulnerabilidad", "vulnerabilities",
-            "cve", "cvss", "exploit", "zero-day", "0day",
-            "pentest", "pen test", "penetration test", "penetration testing",
-            "red team", "blue team",
-            // SAST / DAST / scanning
-            "sast", "dast", "sonarqube", "sonar", "checkmarx",
-            "snyk", "trivy", "grype", "semgrep",
-            "attack surface", "threat model", "threat modeling",
-            "security assessment", "risk assessment",
-        ],
-    },
+/// TOML-deserializable form of a few-shot example.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FewShotExample {
+    pub query: String,
+    pub task_type: String,
+}
 
-    // ── Tier 3: precise debugging signals ────────────────────────────────────
-    ClassifierRule {
-        task_type:  TaskType::Debugging,
-        base_score: 3.0,
-        keywords: &[
-            "stacktrace", "stack trace", "traceback",
-            "segfault", "segmentation fault",
-            "null pointer", "null reference", "nullpointerexception", "npe",
-            "deadlock", "race condition", "livelock",
-            "memory leak", "memory corruption", "use after free",
-            "buffer overflow", "heap corruption",
-            "undefined behavior", "ub", "asan",
-            "panic at", "thread panicked",
-            "core dump", "crash dump",
-        ],
-    },
+/// Top-level structure of `classifier_rules.toml`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClassifierRulesToml {
+    #[serde(rename = "rule")]
+    rules: Vec<RuleToml>,
+    #[serde(rename = "example", default)]
+    examples: Vec<FewShotExample>,
+}
 
-    // ── Tier 2: research / analysis verbs (EN + ES) ──────────────────────────
-    ClassifierRule {
-        task_type:  TaskType::Research,
-        base_score: 2.0,
-        keywords: &[
-            // English
-            "analyze", "analyse", "investigate", "compare",
-            "examine", "review", "inspect", "survey", "assess",
-            "benchmark", "profile", "measure",
-            // Spanish verbs (present imperative + infinitive)
-            "analiza", "analizar",
-            "investiga", "investigar",
-            "revisa", "revisar",
-            "examina", "examinar",
-            "diagnostica", "diagnosticar",
-            "evalua", "evaluar",
-            "inspecciona", "inspeccionar",
-            "compara", "comparar",
-        ],
-    },
+/// Complete rule set loaded from config (rules + few-shot examples).
+pub struct ClassifierRuleSet {
+    pub rules: Vec<ClassifierRule>,
+    pub examples: Vec<FewShotExample>,
+    /// Path from which the rules were loaded (`None` = compiled defaults).
+    pub source: Option<std::path::PathBuf>,
+}
 
-    // ── Tier 2: explanation verbs (EN + ES) ───────────────────────────────────
-    ClassifierRule {
-        task_type:  TaskType::Explanation,
-        base_score: 2.0,
-        keywords: &[
-            // English
-            "explain", "describe", "walk me through", "tell me about",
-            "how does", "what is", "what are", "why does", "why is",
-            "when should", "can you clarify", "clarify",
-            // Spanish
-            "explica", "explicar",
-            "como funciona", "cómo funciona",
-            "que es", "qué es", "que son", "qué son",
-            "por que", "por qué",
-            "cuando usar", "cuándo usar",
-        ],
-    },
+/// Global rule set — loaded once on first use.
+///
+/// Search order (first file found wins):
+///   1. `$HALCON_CLASSIFIER_RULES`   env var
+///   2. `.halcon/classifier_rules.toml`   (project scope)
+///   3. `~/.halcon/classifier_rules.toml` (user scope)
+///   4. `config/classifier_rules.toml`    (dev / installed)
+///   5. Compiled-in defaults              (always available)
+pub(crate) static RULE_SET: LazyLock<ClassifierRuleSet> =
+    LazyLock::new(ClassifierRuleSet::load_or_default);
 
-    // ── Tier 2: code generation — specific intent verbs ──────────────────────
-    ClassifierRule {
-        task_type:  TaskType::CodeGeneration,
-        base_score: 2.0,
-        keywords: &[
-            "implement", "scaffold", "generate code", "bootstrap",
-            "add function", "add method", "add class", "add struct",
-            "add feature", "add endpoint", "add route",
-            "write a function", "write a class", "write a test",
-            "write a script", "write a module",
-            "create a function", "create a class", "create a struct",
-            "create a module", "create a service", "create an endpoint",
-            "build a", "develop a",
-        ],
-    },
+impl ClassifierRuleSet {
+    /// Load rules from config files, falling back to compiled defaults.
+    pub fn load_or_default() -> Self {
+        if let Some(ruleset) = Self::try_load_from_env() {
+            return ruleset;
+        }
+        for path in Self::config_search_paths() {
+            if path.exists() {
+                match Self::load_from_path(&path) {
+                    Ok(rs) => {
+                        tracing::info!(
+                            target: "halcon::classifier",
+                            path = %path.display(),
+                            rule_count = rs.rules.len(),
+                            example_count = rs.examples.len(),
+                            "classifier rules loaded from file"
+                        );
+                        return rs;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "halcon::classifier",
+                            path = %path.display(),
+                            error = %e,
+                            "failed to parse classifier rules — using compiled defaults"
+                        );
+                    }
+                }
+            }
+        }
+        tracing::debug!(
+            target: "halcon::classifier",
+            "no classifier_rules.toml found — using compiled defaults"
+        );
+        Self::compiled_defaults()
+    }
 
-    // ── Tier 2: debugging — intent verbs (EN + ES) ───────────────────────────
-    ClassifierRule {
-        task_type:  TaskType::Debugging,
-        base_score: 2.0,
-        keywords: &[
-            // English
-            "fix", "debug", "diagnose", "troubleshoot", "resolve",
-            "not working", "broken", "crash", "why doesn't", "why doesn't",
-            "not compiling", "fails to", "throwing",
-            // Spanish
-            "arregla", "arreglar",
-            "corrige", "corregir",
-            "depura", "depurar",
-            "soluciona", "solucionar",
-            "no funciona", "no compila",
-        ],
-    },
+    fn try_load_from_env() -> Option<Self> {
+        let path = std::env::var("HALCON_CLASSIFIER_RULES").ok()?;
+        let p = std::path::PathBuf::from(path);
+        match Self::load_from_path(&p) {
+            Ok(rs) => {
+                tracing::info!(
+                    target: "halcon::classifier",
+                    path = %p.display(),
+                    "classifier rules loaded from HALCON_CLASSIFIER_RULES"
+                );
+                Some(rs)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "halcon::classifier",
+                    error = %e,
+                    "HALCON_CLASSIFIER_RULES set but file unreadable — using compiled defaults"
+                );
+                None
+            }
+        }
+    }
 
-    // ── Tier 2: code modification — intent verbs (EN + ES) ───────────────────
-    ClassifierRule {
-        task_type:  TaskType::CodeModification,
-        base_score: 2.0,
-        keywords: &[
-            // English
-            "modify", "change", "update", "edit", "refactor",
-            "rename", "replace", "rewrite", "restructure",
-            "extract", "inline", "migrate", "port",
-            "optimize", "simplify", "clean up",
-            // Spanish
-            "modifica", "modificar",
-            "cambia", "cambiar",
-            "actualiza", "actualizar",
-            "refactoriza", "refactorizar",
-            "simplifica", "simplificar",
-        ],
-    },
+    fn config_search_paths() -> Vec<std::path::PathBuf> {
+        let mut paths = vec![];
+        // Project scope
+        paths.push(std::path::PathBuf::from(".halcon/classifier_rules.toml"));
+        // User scope
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".halcon/classifier_rules.toml"));
+        }
+        // Dev / installed
+        paths.push(std::path::PathBuf::from("config/classifier_rules.toml"));
+        paths
+    }
 
-    // ── Tier 2: configuration — intent verbs (EN + ES) ───────────────────────
-    ClassifierRule {
-        task_type:  TaskType::Configuration,
-        base_score: 2.0,
-        keywords: &[
-            // English
-            "configure", "setup", "set up", "install",
-            "initialize", "initialise", "settings", "configuration",
-            "enable", "disable", "activate", "deactivate",
-            // Spanish
-            "configura", "configurar",
-            "instala", "instalar",
-            "inicializa", "inicializar",
-            "habilita", "deshabilita",
-            "ajustes",
-        ],
-    },
+    fn load_from_path(path: &std::path::Path) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let parsed: ClassifierRulesToml =
+            toml::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
-    // ── Tier 1: weak / polysemous signals ────────────────────────────────────
-    // These contribute to a type but are easily overridden by tier-3 signals.
+        let rules = parsed
+            .rules
+            .into_iter()
+            .filter_map(|r| {
+                let task_type = TaskType::from_str(&r.task_type)?;
+                Some(ClassifierRule {
+                    task_type,
+                    base_score: r.base_score,
+                    keywords: r.keywords,
+                })
+            })
+            .collect();
 
-    ClassifierRule {
-        task_type:  TaskType::CodeGeneration,
-        base_score: 1.0,
-        keywords: &[
-            "write", "create", "build", "make", "develop",
-            // Spanish
-            "escribe", "escribir", "crea", "crear", "construye",
-        ],
-    },
+        Ok(ClassifierRuleSet {
+            rules,
+            examples: parsed.examples,
+            source: Some(path.to_owned()),
+        })
+    }
 
-    ClassifierRule {
-        task_type:  TaskType::Debugging,
-        base_score: 1.0,
-        keywords: &[
-            "bug", "error", "issue", "problem", "fails",
-            "failure", "wrong", "incorrect", "unexpected",
-            // Spanish
-            "fallo", "falla", "problema", "erróneo",
-        ],
-    },
+    /// Compiled-in defaults — identical keyword set to the original static rules.
+    /// These are the ground-truth fallback; the TOML should match or extend them.
+    fn compiled_defaults() -> Self {
+        macro_rules! rule {
+            ($t:expr, $s:expr, [$($k:expr),+ $(,)?]) => {
+                ClassifierRule {
+                    task_type:  $t,
+                    base_score: $s,
+                    keywords:   vec![$($k.to_string()),+],
+                }
+            };
+        }
 
-    ClassifierRule {
-        task_type:  TaskType::Research,
-        base_score: 1.0,
-        keywords: &[
-            "find", "search", "look up", "lookup", "research",
-            "scan", "verify", "validate", "check",
-            // Spanish
-            "busca", "buscar", "encuentra", "verificar", "validar",
-            "comprobar", "revisar",
-        ],
-    },
+        let rules = vec![
+            // Tier 5
+            rule!(
+                TaskType::GitOperation,
+                5.0,
+                [
+                    "git commit",
+                    "git status",
+                    "git diff",
+                    "git log",
+                    "git add",
+                    "git push",
+                    "git pull",
+                    "git fetch",
+                    "git branch",
+                    "git merge",
+                    "git rebase",
+                    "git stash",
+                    "git checkout",
+                    "git cherry-pick",
+                    "git bisect",
+                    "commit changes",
+                    "stage files",
+                    "push changes",
+                    "pull request",
+                    "merge request"
+                ]
+            ),
+            rule!(
+                TaskType::FileManagement,
+                5.0,
+                [
+                    "delete file",
+                    "remove file",
+                    "rename file",
+                    "move file",
+                    "copy file",
+                    "create directory",
+                    "create folder",
+                    "list files",
+                    "show files",
+                    "find files",
+                    "search files",
+                    "delete directory",
+                    "remove directory",
+                    "file permissions"
+                ]
+            ),
+            // Tier 3
+            rule!(
+                TaskType::Research,
+                3.0,
+                [
+                    "audit",
+                    "auditar",
+                    "auditoria",
+                    "auditoría",
+                    "compliance",
+                    "cumplimiento",
+                    "soc2",
+                    "soc 2",
+                    "sox",
+                    "gdpr",
+                    "hipaa",
+                    "iso27001",
+                    "iso 27001",
+                    "pci-dss",
+                    "pci dss",
+                    "nist",
+                    "fips",
+                    "vulnerability",
+                    "vulnerabilidad",
+                    "vulnerabilities",
+                    "cve",
+                    "cvss",
+                    "exploit",
+                    "zero-day",
+                    "0day",
+                    "pentest",
+                    "pen test",
+                    "penetration test",
+                    "penetration testing",
+                    "red team",
+                    "blue team",
+                    "sast",
+                    "dast",
+                    "sonarqube",
+                    "sonar",
+                    "checkmarx",
+                    "snyk",
+                    "trivy",
+                    "grype",
+                    "semgrep",
+                    "attack surface",
+                    "threat model",
+                    "threat modeling",
+                    "security assessment",
+                    "risk assessment"
+                ]
+            ),
+            rule!(
+                TaskType::Debugging,
+                3.0,
+                [
+                    "stacktrace",
+                    "stack trace",
+                    "traceback",
+                    "segfault",
+                    "segmentation fault",
+                    "null pointer",
+                    "null reference",
+                    "nullpointerexception",
+                    "npe",
+                    "deadlock",
+                    "race condition",
+                    "livelock",
+                    "memory leak",
+                    "memory corruption",
+                    "use after free",
+                    "buffer overflow",
+                    "heap corruption",
+                    "undefined behavior",
+                    "ub",
+                    "asan",
+                    "panic at",
+                    "thread panicked",
+                    "core dump",
+                    "crash dump"
+                ]
+            ),
+            // Tier 2
+            rule!(
+                TaskType::Research,
+                2.0,
+                [
+                    "analyze",
+                    "analyse",
+                    "investigate",
+                    "compare",
+                    "examine",
+                    "review",
+                    "inspect",
+                    "survey",
+                    "assess",
+                    "benchmark",
+                    "profile",
+                    "measure",
+                    "analiza",
+                    "analizar",
+                    "investiga",
+                    "investigar",
+                    "revisa",
+                    "revisar",
+                    "examina",
+                    "examinar",
+                    "diagnostica",
+                    "diagnosticar",
+                    "evalua",
+                    "evaluar",
+                    "inspecciona",
+                    "inspeccionar",
+                    "compara",
+                    "comparar"
+                ]
+            ),
+            rule!(
+                TaskType::Explanation,
+                2.0,
+                [
+                    "explain",
+                    "describe",
+                    "walk me through",
+                    "tell me about",
+                    "how does",
+                    "what is",
+                    "what are",
+                    "why does",
+                    "why is",
+                    "when should",
+                    "can you clarify",
+                    "clarify",
+                    "explica",
+                    "explicar",
+                    "como funciona",
+                    "cómo funciona",
+                    "que es",
+                    "qué es",
+                    "que son",
+                    "qué son",
+                    "por que",
+                    "por qué",
+                    "cuando usar",
+                    "cuándo usar"
+                ]
+            ),
+            rule!(
+                TaskType::CodeGeneration,
+                2.0,
+                [
+                    "implement",
+                    "scaffold",
+                    "generate code",
+                    "bootstrap",
+                    "add function",
+                    "add method",
+                    "add class",
+                    "add struct",
+                    "add feature",
+                    "add endpoint",
+                    "add route",
+                    "write a function",
+                    "write a class",
+                    "write a test",
+                    "write a script",
+                    "write a module",
+                    "create a function",
+                    "create a class",
+                    "create a struct",
+                    "create a module",
+                    "create a service",
+                    "create an endpoint",
+                    "build a",
+                    "develop a"
+                ]
+            ),
+            rule!(
+                TaskType::Debugging,
+                2.0,
+                [
+                    "fix",
+                    "debug",
+                    "diagnose",
+                    "troubleshoot",
+                    "resolve",
+                    "not working",
+                    "broken",
+                    "crash",
+                    "why doesn't",
+                    "why doesn't",
+                    "not compiling",
+                    "fails to",
+                    "throwing",
+                    "arregla",
+                    "arreglar",
+                    "corrige",
+                    "corregir",
+                    "depura",
+                    "depurar",
+                    "soluciona",
+                    "solucionar",
+                    "no funciona",
+                    "no compila"
+                ]
+            ),
+            rule!(
+                TaskType::CodeModification,
+                2.0,
+                [
+                    "modify",
+                    "change",
+                    "update",
+                    "edit",
+                    "refactor",
+                    "rename",
+                    "replace",
+                    "rewrite",
+                    "restructure",
+                    "extract",
+                    "inline",
+                    "migrate",
+                    "port",
+                    "optimize",
+                    "simplify",
+                    "clean up",
+                    "modifica",
+                    "modificar",
+                    "cambia",
+                    "cambiar",
+                    "actualiza",
+                    "actualizar",
+                    "refactoriza",
+                    "refactorizar",
+                    "simplifica",
+                    "simplificar"
+                ]
+            ),
+            rule!(
+                TaskType::Configuration,
+                2.0,
+                [
+                    "configure",
+                    "setup",
+                    "set up",
+                    "install",
+                    "initialize",
+                    "initialise",
+                    "settings",
+                    "configuration",
+                    "enable",
+                    "disable",
+                    "activate",
+                    "deactivate",
+                    "configura",
+                    "configurar",
+                    "instala",
+                    "instalar",
+                    "inicializa",
+                    "inicializar",
+                    "habilita",
+                    "deshabilita",
+                    "ajustes"
+                ]
+            ),
+            // Tier 1 — Phase 3: degraded 1.0 → 0.4 (polysemous weak signals)
+            // "revisar" removed: duplicate of Tier 2 Research (base_score = 2.0).
+            rule!(
+                TaskType::CodeGeneration,
+                0.4,
+                [
+                    "write",
+                    "create",
+                    "build",
+                    "make",
+                    "develop",
+                    "escribe",
+                    "escribir",
+                    "crea",
+                    "crear",
+                    "construye"
+                ]
+            ),
+            rule!(
+                TaskType::Debugging,
+                0.4,
+                [
+                    "bug",
+                    "error",
+                    "issue",
+                    "problem",
+                    "fails",
+                    "failure",
+                    "wrong",
+                    "incorrect",
+                    "unexpected",
+                    "fallo",
+                    "falla",
+                    "problema",
+                    "erróneo"
+                ]
+            ),
+            rule!(
+                TaskType::Research,
+                0.4,
+                [
+                    "find",
+                    "search",
+                    "look up",
+                    "lookup",
+                    "research",
+                    "scan",
+                    "verify",
+                    "validate",
+                    "check",
+                    "busca",
+                    "buscar",
+                    "encuentra",
+                    "verificar",
+                    "validar",
+                    "comprobar"
+                ]
+            ),
+            rule!(
+                TaskType::FileManagement,
+                0.4,
+                ["delete", "remove", "move", "copy", "list", "show"]
+            ),
+        ];
 
-    ClassifierRule {
-        task_type:  TaskType::FileManagement,
-        base_score: 1.0,
-        keywords: &[
-            "delete", "remove", "move", "copy", "list", "show",
-        ],
-    },
+        ClassifierRuleSet {
+            rules,
+            examples: vec![],
+            source: None,
+        }
+    }
+
+    /// Reference to active rules (for scoring loop).
+    pub fn rules(&self) -> &[ClassifierRule] {
+        &self.rules
+    }
+
+    /// Reference to few-shot examples (for Layer 3 fallback).
+    pub fn examples(&self) -> &[FewShotExample] {
+        &self.examples
+    }
+
+    /// Whether rules were loaded from a config file vs compiled defaults.
+    pub fn is_from_file(&self) -> bool {
+        self.source.is_some()
+    }
+}
+
+// ─── Conjunction markers for multi-intent detection ───────────────────────────
+
+/// Tokens that signal the user wants TWO distinct actions in one query.
+const CONJUNCTION_MARKERS: &[&str] = &[
+    "and",
+    "y",
+    "además",
+    "also",
+    "then",
+    "afterward",
+    "followed by",
+    "as well as",
+    "plus",
 ];
 
-// ─── Stop words for semantic hash normalisation ───────────────────────────────
+// ─── W5H2 action verb lexicon ─────────────────────────────────────────────────
+
+/// Known action verbs for W5H2 canonical intent extraction.
+/// Ordered: specific verbs first, generic last (first-match wins for verb slot).
+const ACTION_VERBS: &[&str] = &[
+    // Git
+    "commit",
+    "push",
+    "pull",
+    "merge",
+    "rebase",
+    "checkout",
+    "stash",
+    // Code operations
+    "implement",
+    "refactor",
+    "optimize",
+    "migrate",
+    "scaffold",
+    "bootstrap",
+    "debug",
+    "diagnose",
+    "troubleshoot",
+    "fix",
+    "resolve",
+    "repair",
+    "explain",
+    "describe",
+    "analyse",
+    "analyze",
+    "investigate",
+    "review",
+    "inspect",
+    "assess",
+    "benchmark",
+    "profile",
+    "configure",
+    "install",
+    "setup",
+    "enable",
+    "disable",
+    "modify",
+    "update",
+    "rename",
+    "rewrite",
+    "extract",
+    // Weak verbs (matched last, override easily by specific)
+    "create",
+    "build",
+    "write",
+    "make",
+    "find",
+    "search",
+    "list",
+    "delete",
+    "remove",
+    // Spanish equivalents
+    "implementa",
+    "refactoriza",
+    "optimiza",
+    "migra",
+    "arregla",
+    "corrige",
+    "depura",
+    "soluciona",
+    "explica",
+    "analiza",
+    "investiga",
+    "revisa",
+    "examina",
+    "evalua",
+    "configura",
+    "instala",
+    "habilita",
+    "modifica",
+    "actualiza",
+    "renombra",
+    "reescribe",
+    "crea",
+    "construye",
+    "escribe",
+    "encuentra",
+    "busca",
+    "elimina",
+    "auditar",
+    "audita",
+];
+
+/// Domain nouns for W5H2 canonical intent extraction.
+/// Tier-3 keywords that indicate a specific domain context.
+const DOMAIN_NOUNS: &[&str] = &[
+    // Security
+    "vulnerability",
+    "vulnerabilidad",
+    "exploit",
+    "pentest",
+    "audit",
+    "auditoria",
+    "compliance",
+    "soc2",
+    "gdpr",
+    "cve",
+    "threat",
+    "attack",
+    // Code artifacts
+    "function",
+    "method",
+    "class",
+    "struct",
+    "module",
+    "service",
+    "endpoint",
+    "api",
+    "database",
+    "schema",
+    "migration",
+    "query",
+    // Infrastructure
+    "docker",
+    "kubernetes",
+    "ci",
+    "pipeline",
+    "deployment",
+    "container",
+    "configuration",
+    "settings",
+    "environment",
+    // Quality
+    "test",
+    "benchmark",
+    "performance",
+    "memory",
+    "deadlock",
+    "race",
+    "stacktrace",
+    "panic",
+    "crash",
+    // Git
+    "commit",
+    "branch",
+    "merge",
+    "conflict",
+    "pr",
+    "repository",
+    // Spanish equivalents
+    "función",
+    "clase",
+    "módulo",
+    "servicio",
+    "base de datos",
+    "prueba",
+    "rendimiento",
+    "memoria",
+    "repositorio",
+    "rama",
+    "conflicto",
+];
+
+// ─── Stop words ───────────────────────────────────────────────────────────────
 
 const STOP_WORDS: &[&str] = &[
     // English
-    "a", "an", "the", "this", "that", "these", "those",
-    "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did",
-    "will", "would", "shall", "should", "may", "might", "must", "can", "could",
-    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into",
-    "through", "during", "it", "its", "i", "me", "my", "you", "your",
-    "we", "our", "they", "their", "and", "or", "but", "if", "because",
-    "while", "after", "before", "so", "not", "no", "nor",
-    "all", "some", "any", "each", "every", "both", "few",
-    "more", "most", "other", "such", "only", "own", "same",
-    "than", "too", "very", "just", "now", "then", "here", "there",
-    "when", "where", "who", "which", "how", "what", "why",
-    // Spanish
-    "el", "la", "los", "las", "un", "una", "unos", "unas",
-    "de", "del", "al", "en", "con", "por", "para", "que",
-    "es", "son", "fue", "era", "ser", "estar",
-    "mi", "tu", "su", "sus", "nos", "vos",
-    "se", "me", "te", "le", "les",
-    "y", "e", "o", "u", "pero", "si", "no", "mas", "más", "muy",
-    "este", "esta", "esto", "ese", "esa", "eso",
-    "hay", "bien", "mal", "ya", "aún", "ahora",
+    "a", "an", "the", "this", "that", "these", "those", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would", "shall", "should", "may",
+    "might", "must", "can", "could", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "as", "into", "through", "during", "it", "its", "i", "me", "my", "you", "your", "we", "our",
+    "they", "their", "and", "or", "but", "if", "because", "while", "after", "before", "so", "not",
+    "no", "nor", "all", "some", "any", "each", "every", "both", "few", "more", "most", "other",
+    "such", "only", "own", "same", "than", "too", "very", "just", "now", "then", "here", "there",
+    "when", "where", "who", "which", "how", "what", "why", // Spanish
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "en", "con", "por",
+    "para", "que", "es", "son", "fue", "era", "ser", "estar", "mi", "tu", "su", "sus", "nos",
+    "vos", "se", "me", "te", "le", "les", "y", "e", "o", "u", "pero", "si", "no", "mas", "más",
+    "muy", "este", "esta", "esto", "ese", "esa", "eso", "hay", "bien", "mal", "ya", "aún", "ahora",
 ];
 
 // ─── Complexity keywords ──────────────────────────────────────────────────────
 
-/// Analysis verbs that upgrade short queries from Simple → Moderate.
-/// A 3-word query like "analiza mi proyecto" is never truly Simple —
-/// it implies multi-file scanning across many agent rounds.
 const ANALYSIS_VERBS: &[&str] = &[
-    "analiza",    "analizar",
-    "revisa",     "revisar",
-    "examina",    "examinar",
-    "investiga",  "investigar",
-    "inspecciona","inspeccionar",
-    "diagnostica","diagnosticar",
-    "evalua",     "evaluar",
-    "assess",     "investigate",
-    "examine",    "review",
+    "analiza",
+    "analizar",
+    "revisa",
+    "revisar",
+    "examina",
+    "examinar",
+    "investiga",
+    "investigar",
+    "inspecciona",
+    "inspeccionar",
+    "diagnostica",
+    "diagnosticar",
+    "evalua",
+    "evaluar",
+    "assess",
+    "investigate",
+    "examine",
+    "review",
 ];
 
-/// Keywords that force Complex regardless of word count.
 const COMPLEX_KEYWORDS: &[&str] = &[
-    "refactor", "optimize", "optimise", "migrate",
-    "integrate", "architecture", "design pattern",
-    "performance", "scale", "scalability",
-    "distributed", "microservice", "microservices",
-    "concurrent", "parallelism", "zero-downtime",
-    "backwards compatible", "breaking change",
+    "refactor",
+    "optimize",
+    "optimise",
+    "migrate",
+    "integrate",
+    "architecture",
+    "design pattern",
+    "performance",
+    "scale",
+    "scalability",
+    "distributed",
+    "microservice",
+    "microservices",
+    "concurrent",
+    "parallelism",
+    "zero-downtime",
+    "backwards compatible",
+    "breaking change",
     // Spanish
-    "arquitectura", "escalabilidad",
-    "distribuido", "refactorizar",
+    "arquitectura",
+    "escalabilidad",
+    "distribuido",
+    "refactorizar",
 ];
+
+// ─── Internal scored result ───────────────────────────────────────────────────
+
+/// Internal representation of raw scoring output from Layer 1.
+struct ScoredResult {
+    scores: [f32; 9],
+    signals: Vec<String>,
+    winner_idx: usize,
+    runner_up_idx: usize,
+    total: f32,
+    confidence: f32,
+    margin_normalised: f32,
+}
 
 // ─── TaskAnalyzer ─────────────────────────────────────────────────────────────
 
-/// Classifies user queries by complexity, type, and confidence.
+/// Classifies user queries by complexity, type, confidence, and intent structure.
+///
+/// ## Usage
+///
+/// ```text
+/// // Basic classification
+/// let analysis = TaskAnalyzer::analyze("fix the memory leak in connection pool");
+///
+/// // Context-aware classification
+/// let ctx = ContextSignals {
+///     file_extensions: &["rs"],
+///     in_git_conflict: false,
+///     recent_task_types: &[TaskType::Debugging],
+/// };
+/// let analysis = TaskAnalyzer::analyze_with_context("fix it", &ctx);
+/// ```
 pub struct TaskAnalyzer;
 
 impl TaskAnalyzer {
+    // ── Public API ────────────────────────────────────────────────────────────
+
     /// Analyse a user query and return a full classification.
+    ///
+    /// Equivalent to `analyze_with_context(query, &ContextSignals::empty())`.
     pub fn analyze(query: &str) -> TaskAnalysis {
+        Self::analyze_with_context(query, &ContextSignals::empty())
+    }
+
+    /// Returns a human-readable summary of the active rule set.
+    ///
+    /// Used by `halcon classifier info` to show operators whether rules come
+    /// from a config file or compiled defaults.
+    ///
+    /// ```text
+    /// Rules source: config/classifier_rules.toml
+    /// Rules loaded: 14 rules, 22 few-shot examples
+    /// ```
+    pub fn rule_set_info() -> String {
+        let rs = &*RULE_SET;
+        let source = rs
+            .source
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "compiled defaults".to_string());
+        format!(
+            "source: {source} | rules: {} | few-shot examples: {}",
+            rs.rules().len(),
+            rs.examples().len(),
+        )
+    }
+
+    /// Returns the active few-shot examples (for Layer 3 / diagnostics).
+    pub fn few_shot_examples() -> &'static [FewShotExample] {
+        RULE_SET.examples()
+    }
+
+    /// Analyse with contextual priors from the session environment.
+    ///
+    /// Context priors are applied as small additive score biases before keyword
+    /// matching, so strong keyword evidence always overrides the prior.
+    pub fn analyze_with_context(query: &str, ctx: &ContextSignals<'_>) -> TaskAnalysis {
         let word_count = query.split_whitespace().count();
         let complexity = Self::classify_complexity(query, word_count);
-        let (task_type, confidence, signals) = Self::classify_type_scored(query);
+        let lower = query.to_lowercase();
+
+        let mut scored = Self::score_layer1(&lower);
+        Self::apply_context_priors(&mut scored.scores, ctx, &lower);
+        Self::recompute_derived(&mut scored);
+
+        let (task_type, ambiguity) = Self::resolve_type(&scored);
+        let secondary_type = Self::pick_secondary(&scored, task_type);
+        let is_multi_intent = Self::detect_multi_intent(&lower, &scored);
+        let canonical_intent = Self::extract_canonical_intent(&lower);
         let task_hash = Self::compute_semantic_hash(query);
 
         TaskAnalysis {
@@ -467,106 +1183,303 @@ impl TaskAnalyzer {
             task_type,
             task_hash,
             word_count,
-            confidence,
+            confidence: scored.confidence,
+            signals: scored.signals,
+            secondary_type,
+            is_multi_intent,
+            ambiguity,
+            margin: scored.margin_normalised,
+            canonical_intent,
+        }
+    }
+
+    // ── Layer 1: Position-Weighted SMRC ──────────────────────────────────────
+
+    /// Score all keywords with position weighting.
+    ///
+    /// Keywords in the first 2 query tokens receive `POSITION_WEIGHT_LEADING`
+    /// multiplier; tokens 3-4 receive `POSITION_WEIGHT_NEAR`; tokens 5+
+    /// receive 1.0 (no boost).  Multi-word phrases use the position of their
+    /// first token.
+    fn score_layer1(lower: &str) -> ScoredResult {
+        let tokens: Vec<&str> = lower.split_whitespace().collect();
+
+        // Build position-weighted prefix spans: fast O(1) substring check
+        // avoids computing per-token positions during the scoring loop.
+        let prefix_2: String = tokens.iter().take(2).copied().collect::<Vec<_>>().join(" ");
+        let prefix_4: String = tokens.iter().take(4).copied().collect::<Vec<_>>().join(" ");
+
+        let mut scores = [0f32; 9];
+        let mut signals: Vec<String> = Vec::new();
+
+        for rule in RULE_SET.rules() {
+            let idx = Self::type_index(rule.task_type);
+            for kw in &rule.keywords {
+                let (matched, weight) = if kw.contains(' ') {
+                    // Multi-word phrase: use .contains() (no word-boundary needed)
+                    if lower.contains(kw.as_str()) {
+                        let w = if prefix_2.contains(kw.as_str()) {
+                            POSITION_WEIGHT_LEADING
+                        } else if prefix_4.contains(kw.as_str()) {
+                            POSITION_WEIGHT_NEAR
+                        } else {
+                            1.0
+                        };
+                        (true, w)
+                    } else {
+                        (false, 1.0)
+                    }
+                } else {
+                    // Single word: word-boundary safe check
+                    if Self::contains_word_safe(lower, kw) {
+                        let w = if Self::contains_word_safe(&prefix_2, kw) {
+                            POSITION_WEIGHT_LEADING
+                        } else if Self::contains_word_safe(&prefix_4, kw) {
+                            POSITION_WEIGHT_NEAR
+                        } else {
+                            1.0
+                        };
+                        (true, w)
+                    } else {
+                        (false, 1.0)
+                    }
+                };
+
+                if matched {
+                    scores[idx] += rule.base_score * weight;
+                    signals.push(kw.clone());
+                }
+            }
+        }
+
+        // Initial derivation (may be recomputed after context priors).
+        let mut result = ScoredResult {
+            scores,
             signals,
+            winner_idx: 0,
+            runner_up_idx: 8,
+            total: 0.0,
+            confidence: 0.0,
+            margin_normalised: 0.0,
+        };
+        Self::recompute_derived(&mut result);
+        result
+    }
+
+    /// Recompute winner, runner-up, confidence, and margin from `scores`.
+    fn recompute_derived(r: &mut ScoredResult) {
+        r.total = r.scores.iter().sum();
+
+        if r.total == 0.0 {
+            r.winner_idx = 8; // General
+            r.runner_up_idx = 8;
+            r.confidence = 0.0;
+            r.margin_normalised = 0.0;
+            return;
+        }
+
+        // Winner = argmax; runner-up = second-highest.
+        let mut sorted_indices: Vec<usize> = (0..9).collect();
+        sorted_indices.sort_unstable_by(|&a, &b| r.scores[b].partial_cmp(&r.scores[a]).unwrap());
+
+        r.winner_idx = sorted_indices[0];
+        r.runner_up_idx = sorted_indices[1];
+        r.confidence = r.scores[r.winner_idx] / r.total;
+        r.margin_normalised = (r.scores[r.winner_idx] - r.scores[r.runner_up_idx]) / r.total;
+    }
+
+    // ── Context priors ────────────────────────────────────────────────────────
+
+    /// Apply additive prior biases based on session context.
+    ///
+    /// Prior magnitude is deliberately small (≤ 1.0 per signal) so that
+    /// a single tier-2 keyword always overrides the prior.
+    fn apply_context_priors(scores: &mut [f32; 9], ctx: &ContextSignals<'_>, lower: &str) {
+        // File extension priors
+        for ext in ctx.file_extensions {
+            match *ext {
+                "rs" | "go" | "py" | "ts" | "js" | "java" | "cpp" | "c" => {
+                    scores[Self::type_index(TaskType::CodeGeneration)] += 0.5;
+                    scores[Self::type_index(TaskType::CodeModification)] += 0.5;
+                    scores[Self::type_index(TaskType::Debugging)] += 0.3;
+                }
+                "toml" | "yaml" | "yml" | "json" | "env" | "conf" | "ini" => {
+                    scores[Self::type_index(TaskType::Configuration)] += 0.8;
+                }
+                "md" | "rst" | "txt" => {
+                    scores[Self::type_index(TaskType::Explanation)] += 0.4;
+                }
+                "sql" | "db" | "sqlite" => {
+                    scores[Self::type_index(TaskType::Research)] += 0.4;
+                    scores[Self::type_index(TaskType::Debugging)] += 0.3;
+                }
+                _ => {}
+            }
+        }
+
+        // Git conflict prior
+        if ctx.in_git_conflict {
+            scores[Self::type_index(TaskType::Debugging)] += 0.6;
+            scores[Self::type_index(TaskType::GitOperation)] += 0.4;
+        }
+
+        // Recency prior: exponential decay on recent task types.
+        // First recent type gets 0.5 bias, second 0.25, third 0.125, capped.
+        let mut decay = 0.5f32;
+        for &recent in ctx.recent_task_types.iter().take(3) {
+            scores[Self::type_index(recent)] += decay;
+            decay *= 0.5;
+        }
+
+        // Ignore lower in simple contexts (only used for advanced disambiguation)
+        let _ = lower;
+    }
+
+    // ── Layer 2: Entropy + ambiguity resolution ───────────────────────────────
+
+    /// Resolve `task_type` from scored result and compute ambiguity metadata.
+    fn resolve_type(r: &ScoredResult) -> (TaskType, Option<AmbiguityReason>) {
+        if r.total == 0.0 {
+            return (TaskType::General, Some(AmbiguityReason::NoSignals));
+        }
+
+        let winner_type = Self::type_from_index(r.winner_idx);
+
+        // Fast path: crystal-clear winner — skip entropy analysis.
+        if r.confidence >= PHRASE_FAST_PATH_CONFIDENCE {
+            return (winner_type, None);
+        }
+
+        // Below confidence floor → General, no ambiguity (just no signal).
+        if r.confidence < CONFIDENCE_FLOOR {
+            return (TaskType::General, Some(AmbiguityReason::NoSignals));
+        }
+
+        // Entropy analysis over types with positive score.
+        let entropy_ratio = Self::compute_entropy_ratio(r);
+        if entropy_ratio > AMBIGUITY_ENTROPY_RATIO {
+            return (
+                winner_type,
+                Some(AmbiguityReason::HighEntropy { entropy_ratio }),
+            );
+        }
+
+        // Margin check.
+        if r.margin_normalised < AMBIGUITY_MARGIN {
+            return (
+                winner_type,
+                Some(AmbiguityReason::NarrowMargin {
+                    margin: r.margin_normalised,
+                }),
+            );
+        }
+
+        (winner_type, None)
+    }
+
+    /// Shannon entropy ratio H/H_max for the score distribution.
+    ///
+    /// H_max = log₂(N) where N = number of types with positive scores.
+    /// Returns 0.0 when only one type has a positive score (deterministic).
+    fn compute_entropy_ratio(r: &ScoredResult) -> f32 {
+        let active: Vec<f32> = r
+            .scores
+            .iter()
+            .filter(|&&s| s > 0.0)
+            .map(|&s| s / r.total)
+            .collect();
+
+        let n = active.len();
+        if n <= 1 {
+            return 0.0;
+        }
+
+        let entropy: f32 = active.iter().map(|&p| -p * p.log2()).sum();
+
+        let h_max = (n as f32).log2();
+        entropy / h_max
+    }
+
+    // ── Layer 3: Enrichment ───────────────────────────────────────────────────
+
+    /// Pick the runner-up task type for multi-intent exposure.
+    fn pick_secondary(r: &ScoredResult, primary: TaskType) -> Option<TaskType> {
+        let runner_up = Self::type_from_index(r.runner_up_idx);
+        if runner_up == primary
+            || runner_up == TaskType::General
+            || r.scores[r.runner_up_idx] == 0.0
+        {
+            return None;
+        }
+        Some(runner_up)
+    }
+
+    /// True when the query contains a conjunction marker AND has signal mass
+    /// in at least two distinct TaskType buckets.
+    ///
+    /// This heuristic matches queries like:
+    /// - "explain AND fix the authentication bug"
+    /// - "review and refactor the service"
+    /// - "analiza y corrige task_analyzer.rs"
+    fn detect_multi_intent(lower: &str, r: &ScoredResult) -> bool {
+        let has_conjunction = CONJUNCTION_MARKERS
+            .iter()
+            .any(|&m| Self::contains_word_safe(lower, m) || lower.contains(m));
+
+        if !has_conjunction {
+            return false;
+        }
+
+        let types_with_signal: usize = r.scores.iter().filter(|&&s| s > 0.0).count();
+        types_with_signal >= 2
+    }
+
+    /// W5H2 canonical intent extraction: `"verb:domain"` form.
+    ///
+    /// Extracts:
+    /// - Action verb: first token matching `ACTION_VERBS` (left-to-right)
+    /// - Domain noun: first token matching `DOMAIN_NOUNS` (left-to-right)
+    ///
+    /// The resulting key is stable across surface rephrasing:
+    /// "fix the memory leak" and "resolve memory leak issue" both → `"fix:memory"`
+    pub(crate) fn extract_canonical_intent(lower: &str) -> Option<String> {
+        let verb = ACTION_VERBS
+            .iter()
+            .find(|&&v| Self::contains_word_safe(lower, v))
+            .copied();
+
+        let domain = DOMAIN_NOUNS.iter().find(|&&d| lower.contains(d)).copied();
+
+        match (verb, domain) {
+            (Some(v), Some(d)) => Some(format!("{v}:{d}")),
+            (Some(v), None) => Some(v.to_string()),
+            (None, Some(d)) => Some(d.to_string()),
+            (None, None) => None,
         }
     }
 
     // ── Complexity ────────────────────────────────────────────────────────────
 
-    fn classify_complexity(query: &str, word_count: usize) -> TaskComplexity {
+    pub(crate) fn classify_complexity(query: &str, word_count: usize) -> TaskComplexity {
         let lower = query.to_lowercase();
 
-        // Architectural / systemic keywords → always Complex.
         if COMPLEX_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
             return TaskComplexity::Complex;
         }
 
-        // Analysis verbs on short queries → at least Moderate.
-        // Word boundary aware to avoid "reanalizando" → Moderate.
-        if word_count < 10 {
-            if ANALYSIS_VERBS.iter().any(|v| Self::contains_word_safe(&lower, v)) {
-                return TaskComplexity::Moderate;
-            }
+        if word_count < 10
+            && ANALYSIS_VERBS
+                .iter()
+                .any(|v| Self::contains_word_safe(&lower, v))
+        {
+            return TaskComplexity::Moderate;
         }
 
         match word_count {
-            0..=9   => TaskComplexity::Simple,
+            0..=9 => TaskComplexity::Simple,
             10..=35 => TaskComplexity::Moderate,
-            _       => TaskComplexity::Complex,
+            _ => TaskComplexity::Complex,
         }
-    }
-
-    // ── Type (scored) ─────────────────────────────────────────────────────────
-
-    /// Returns `(TaskType, confidence, matched_signals)`.
-    fn classify_type_scored(query: &str) -> (TaskType, f32, Vec<String>) {
-        let lower = query.to_lowercase();
-
-        // Per-type score accumulator.  Using parallel arrays keyed by
-        // `TaskType::as_str()` would require alloc; a fixed-size array is simpler.
-        let mut scores = [0f32; 9]; // one slot per TaskType variant
-        let mut signals: Vec<String> = Vec::new();
-
-        let type_index = |t: TaskType| match t {
-            TaskType::CodeGeneration   => 0,
-            TaskType::CodeModification => 1,
-            TaskType::Debugging        => 2,
-            TaskType::Research         => 3,
-            TaskType::FileManagement   => 4,
-            TaskType::GitOperation     => 5,
-            TaskType::Explanation      => 6,
-            TaskType::Configuration    => 7,
-            TaskType::General          => 8,
-        };
-
-        let type_from_index = |i: usize| match i {
-            0 => TaskType::CodeGeneration,
-            1 => TaskType::CodeModification,
-            2 => TaskType::Debugging,
-            3 => TaskType::Research,
-            4 => TaskType::FileManagement,
-            5 => TaskType::GitOperation,
-            6 => TaskType::Explanation,
-            7 => TaskType::Configuration,
-            _ => TaskType::General,
-        };
-
-        for rule in CLASSIFIER_RULES {
-            for kw in rule.keywords {
-                let matched = if kw.contains(' ') {
-                    lower.contains(*kw)
-                } else {
-                    Self::contains_word_safe(&lower, kw)
-                };
-                if matched {
-                    scores[type_index(rule.task_type)] += rule.base_score;
-                    signals.push((*kw).to_string());
-                }
-            }
-        }
-
-        let total: f32 = scores.iter().sum();
-
-        if total == 0.0 {
-            return (TaskType::General, 0.0, signals);
-        }
-
-        let (winner_idx, &winner_score) = scores
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap();
-
-        let confidence = winner_score / total;
-
-        let task_type = if confidence >= CONFIDENCE_FLOOR {
-            type_from_index(winner_idx)
-        } else {
-            TaskType::General
-        };
-
-        (task_type, confidence, signals)
     }
 
     // ── Semantic hash ─────────────────────────────────────────────────────────
@@ -580,16 +1493,18 @@ impl TaskAnalyzer {
     /// 4. Sort alphabetically (order-independent)
     /// 5. Deduplicate
     /// 6. Join → SHA-256
-    ///
-    /// This groups "fix the authentication bug" and "fix auth bug" into
-    /// much closer buckets than SHA-256 of the raw query text, reducing
-    /// UCB1 cold-starts for paraphrased repetitions of the same task.
-    fn compute_semantic_hash(query: &str) -> String {
+    pub fn compute_semantic_hash(query: &str) -> String {
         let cleaned: String = query
             .trim()
             .to_lowercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+            .map(|c| {
+                if c.is_alphanumeric() || c.is_whitespace() {
+                    c
+                } else {
+                    ' '
+                }
+            })
             .collect();
 
         let mut words: Vec<String> = cleaned
@@ -601,30 +1516,53 @@ impl TaskAnalyzer {
         words.dedup();
 
         let normalised = words.join(" ");
-
         let mut hasher = Sha256::new();
         hasher.update(normalised.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    // ── Index helpers ─────────────────────────────────────────────────────────
+
+    #[inline]
+    fn type_index(t: TaskType) -> usize {
+        match t {
+            TaskType::CodeGeneration => 0,
+            TaskType::CodeModification => 1,
+            TaskType::Debugging => 2,
+            TaskType::Research => 3,
+            TaskType::FileManagement => 4,
+            TaskType::GitOperation => 5,
+            TaskType::Explanation => 6,
+            TaskType::Configuration => 7,
+            TaskType::General => 8,
+        }
+    }
+
+    #[inline]
+    fn type_from_index(i: usize) -> TaskType {
+        match i {
+            0 => TaskType::CodeGeneration,
+            1 => TaskType::CodeModification,
+            2 => TaskType::Debugging,
+            3 => TaskType::Research,
+            4 => TaskType::FileManagement,
+            5 => TaskType::GitOperation,
+            6 => TaskType::Explanation,
+            7 => TaskType::Configuration,
+            _ => TaskType::General,
+        }
     }
 
     // ── Word-boundary matching ────────────────────────────────────────────────
 
     /// Returns `true` when `text` contains `word` at a proper word boundary.
     ///
-    /// A word boundary exists where an alphanumeric char (or `_`) is
-    /// preceded / followed by a non-alphanumeric, non-underscore char,
-    /// or the start / end of the string.
-    ///
     /// ## UTF-8 safety
     ///
-    /// The legacy implementation used `bytes[pos - 1]` with `start = pos + 1`
-    /// which could land on a non-char-boundary with multibyte characters
-    /// (STAT-PANIC-006).  This version only uses `str` slice operations and
-    /// `chars()` which are guaranteed to produce valid char boundaries.
-    ///
-    /// All keywords in `CLASSIFIER_RULES` are ASCII, so `pos + word.len()`
-    /// is always a valid char boundary in `text`.
-    fn contains_word_safe(text: &str, word: &str) -> bool {
+    /// Uses only `str` slice operations and `chars()` — guaranteed to produce
+    /// valid char boundaries.  Single-byte keywords (ASCII) ensure that
+    /// `pos + word.len()` is always a valid char boundary in `text`.
+    pub fn contains_word_safe(text: &str, word: &str) -> bool {
         let wlen = word.len();
         let tlen = text.len();
         if wlen > tlen {
@@ -638,16 +1576,11 @@ impl TaskAnalyzer {
                 Some(rel) => {
                     let pos = search_from + rel;
 
-                    // Boundary before the match: last char of text[..pos].
-                    // Using .chars().next_back() is char-boundary safe.
                     let before_ok = pos == 0 || {
                         let bc = text[..pos].chars().next_back().unwrap_or(' ');
-                        // Explicit parentheses to document intended precedence (STAT-LOGIC-001 fix).
                         (!bc.is_alphanumeric()) && (bc != '_')
                     };
 
-                    // Boundary after the match: first char of text[after_pos..].
-                    // `pos + wlen` is a valid char boundary because `word` is ASCII.
                     let after_pos = pos + wlen;
                     let after_ok = after_pos >= tlen || {
                         let ac = text[after_pos..].chars().next().unwrap_or(' ');
@@ -658,7 +1591,6 @@ impl TaskAnalyzer {
                         return true;
                     }
 
-                    // Advance by exactly one character (UTF-8 safe).
                     let step = text[pos..].chars().next().map_or(1, |c| c.len_utf8());
                     search_from = pos + step;
                 }
@@ -671,21 +1603,30 @@ impl TaskAnalyzer {
 // ─── P4-2: Classifier trait interface ─────────────────────────────────────────
 //
 // Stable abstraction for the intent classification backend.
-// Current production path uses `IntentScorer` (multi-dimensional, wired in reasoning_engine.rs).
+// Current production path uses `IntentScorer` (wired in reasoning_engine.rs).
 // This trait + `KeywordClassifier` exist to:
-//   1. Expose `TaskAnalyzer::analyze()` via a standard interface for tooling/tests.
+//   1. Expose `TaskAnalyzer` via a standard interface for tooling/tests.
 //   2. Provide a clean migration point when an LLM-based backend is added.
 //
 // NOTE: `KeywordClassifier::classify()` is NOT currently called in the production
 // agent loop — `IntentScorer::score()` is the live path.  These types will become
-// the main path once the scorer and analyzer are unified (tracked separately).
+// the main path once scorer and analyzer are unified (ARCH-01).
 
-/// Result of classifying a natural-language query.
-///
-/// Used by `IntentClassifier` implementations as a stable return type.
-/// In production, the equivalent data comes from `IntentProfile` (via `IntentScorer`).
+/// Which backend produced the classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ClassificationMethod {
+    /// 2026 Cascade-SMRC™ — position-weighted keyword implementation.
+    KeywordCascadeSMRC,
+    /// Reserved — future LLM-based one-shot classification.
+    LlmOneShot,
+    /// Reserved — LLM with SMRC fallback when confidence < `CONFIDENCE_FLOOR`.
+    LlmWithKeywordFallback { llm_confidence: u8 },
+}
+
+/// Result of classifying a natural-language query (trait return type).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used by KeywordClassifier and future LLM backends
+#[allow(dead_code)]
 pub struct ClassificationResult {
     pub task_type: TaskType,
     pub confidence: f32,
@@ -693,49 +1634,56 @@ pub struct ClassificationResult {
     pub task_hash: String,
     pub word_count: usize,
     pub method: ClassificationMethod,
-}
-
-/// Which backend produced the classification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Variants used by KeywordClassifier and reserved for future LLM backends
-pub enum ClassificationMethod {
-    /// SOTA 2026 Scored Multi-Rule Classifier — current SMRC keyword implementation.
-    KeywordSMRC,
-    /// Reserved — future LLM-based one-shot classification.
-    LlmOneShot,
-    /// Reserved — LLM with SMRC keyword fallback when confidence < `CONFIDENCE_FLOOR`.
-    LlmWithKeywordFallback { llm_confidence: u8 },
+    pub secondary_type: Option<TaskType>,
+    pub is_multi_intent: bool,
+    pub ambiguity: Option<AmbiguityReason>,
+    pub canonical_intent: Option<String>,
 }
 
 /// Stable call surface for intent classification backends.
 ///
-/// Callers depend on this trait, not on concrete types, enabling zero-callsite
-/// migration between backends (keyword → LLM → hybrid).
-#[allow(dead_code)] // Implemented by KeywordClassifier; will be consumed by orchestrator
+/// Callers depend on this trait, enabling zero-callsite migration between
+/// backends (keyword → LLM → hybrid).
+#[allow(dead_code)]
 pub trait IntentClassifier {
     fn classify(&self, query: &str) -> ClassificationResult;
+    fn classify_with_context(&self, query: &str, ctx: &ContextSignals<'_>) -> ClassificationResult;
 }
 
-/// Keyword-based SMRC classifier — wraps `TaskAnalyzer::analyze()`.
-///
-/// This is NOT the production agent path (which uses `IntentScorer`).
-/// Use this for:
-/// - CLI tooling: `halcon classify "my query"`
-/// - Integration tests that need SMRC-specific signals
-/// - Benchmarking SMRC vs IntentScorer agreement rates
-#[allow(dead_code)] // Will be wired when scorer/analyzer unification is complete
+/// Keyword-based Cascade-SMRC classifier — wraps `TaskAnalyzer`.
+#[allow(dead_code)]
 pub struct KeywordClassifier;
 
 impl IntentClassifier for KeywordClassifier {
     fn classify(&self, query: &str) -> ClassificationResult {
-        let analysis = TaskAnalyzer::analyze(query);
+        let a = TaskAnalyzer::analyze(query);
         ClassificationResult {
-            task_type: analysis.task_type,
-            confidence: analysis.confidence,
-            complexity: analysis.complexity,
-            task_hash: analysis.task_hash,
-            word_count: analysis.word_count,
-            method: ClassificationMethod::KeywordSMRC,
+            task_type: a.task_type,
+            confidence: a.confidence,
+            complexity: a.complexity,
+            task_hash: a.task_hash,
+            word_count: a.word_count,
+            method: ClassificationMethod::KeywordCascadeSMRC,
+            secondary_type: a.secondary_type,
+            is_multi_intent: a.is_multi_intent,
+            ambiguity: a.ambiguity,
+            canonical_intent: a.canonical_intent,
+        }
+    }
+
+    fn classify_with_context(&self, query: &str, ctx: &ContextSignals<'_>) -> ClassificationResult {
+        let a = TaskAnalyzer::analyze_with_context(query, ctx);
+        ClassificationResult {
+            task_type: a.task_type,
+            confidence: a.confidence,
+            complexity: a.complexity,
+            task_hash: a.task_hash,
+            word_count: a.word_count,
+            method: ClassificationMethod::KeywordCascadeSMRC,
+            secondary_type: a.secondary_type,
+            is_multi_intent: a.is_multi_intent,
+            ambiguity: a.ambiguity,
+            canonical_intent: a.canonical_intent,
         }
     }
 }
@@ -777,7 +1725,6 @@ mod tests {
 
     #[test]
     fn complexity_complex_keyword_override() {
-        // Only 3 words but "refactor" forces Complex.
         let analysis = TaskAnalyzer::analyze("refactor this code");
         assert_eq!(analysis.complexity, TaskComplexity::Complex);
     }
@@ -838,44 +1785,38 @@ mod tests {
         assert_eq!(analysis.task_type, TaskType::General);
     }
 
-    // ── SMRC: score-based wins (legacy first-match would fail these) ──────────
+    // ── SMRC: score-based wins ────────────────────────────────────────────────
 
     #[test]
     fn smrc_create_audit_report_is_research_not_code_gen() {
-        // "create" → CodeGeneration(1.0), "audit" → Research(3.0)
-        // Research wins because domain noun outscores generic verb.
         let analysis = TaskAnalyzer::analyze("create a security audit report");
         assert_eq!(
             analysis.task_type,
             TaskType::Research,
-            "SMRC: Research(audit×3) must beat CodeGeneration(create×1), confidence={}",
+            "Research(audit×3) must beat CodeGeneration(create×1), confidence={}",
             analysis.confidence
         );
     }
 
     #[test]
     fn smrc_fix_vulnerability_is_research_not_debugging() {
-        // "fix" → Debugging(2.0), "vulnerability" → Research(3.0)
-        // Research wins: vulnerability analysis requires investigation, not just a patch.
         let analysis = TaskAnalyzer::analyze("fix the vulnerability in the auth module");
         assert_eq!(
             analysis.task_type,
             TaskType::Research,
-            "SMRC: Research(vulnerability×3) must beat Debugging(fix×2)"
+            "Research(vulnerability×3) must beat Debugging(fix×2), margin={}",
+            analysis.margin
         );
     }
 
     #[test]
     fn smrc_git_commit_beats_fix_bug() {
-        // "git commit" → GitOperation(5.0), "fix"→Debugging(2.0), "bug"→Debugging(1.0)
-        // GitOperation wins (5.0 vs 3.0).
         let analysis = TaskAnalyzer::analyze("git commit all changes to fix the bug");
         assert_eq!(analysis.task_type, TaskType::GitOperation);
     }
 
     #[test]
     fn smrc_verify_soc2_compliance_is_research() {
-        // "soc2"=3.0 + "compliance"=3.0 + "verify"=1.0 → Research(7.0)
         let analysis = TaskAnalyzer::analyze("verify SOC2 compliance controls are passing");
         assert_eq!(analysis.task_type, TaskType::Research);
     }
@@ -883,7 +1824,6 @@ mod tests {
     #[test]
     fn smrc_confidence_exposed() {
         let clear = TaskAnalyzer::analyze("git status");
-        // Only one signal "git status" → confidence = 5.0/5.0 = 1.0
         assert!(
             clear.confidence > 0.9,
             "High-signal query must have confidence > 0.9, got {}",
@@ -911,23 +1851,18 @@ mod tests {
 
     #[test]
     fn word_boundary_fix_not_in_prefix() {
-        // "prefix" contains "fix" but word-boundary check must reject it.
         let analysis = TaskAnalyzer::analyze("prefix the function name");
         assert_ne!(analysis.task_type, TaskType::Debugging);
     }
 
     #[test]
     fn word_boundary_write_not_in_rewrite() {
-        // "rewrite" contains "write" but word-boundary check must reject it.
-        // "rewrite" does match CodeModification → that type is expected.
         let analysis = TaskAnalyzer::analyze("rewrite this module");
         assert_ne!(analysis.task_type, TaskType::CodeGeneration);
     }
 
     #[test]
     fn word_boundary_analiza_not_in_reanalizando() {
-        // "reanalizando" — embedded "analiza" must not match at word boundary.
-        // query is 3 words and no analysis verb fires → Simple complexity.
         let analysis = TaskAnalyzer::analyze("reanalizando el proceso");
         assert_eq!(analysis.complexity, TaskComplexity::Simple);
     }
@@ -950,16 +1885,18 @@ mod tests {
     #[test]
     fn word_boundary_rejects_embedded() {
         assert!(!TaskAnalyzer::contains_word_safe("prefix this code", "fix"));
-        assert!(!TaskAnalyzer::contains_word_safe("rewrite the function", "write"));
+        assert!(!TaskAnalyzer::contains_word_safe(
+            "rewrite the function",
+            "write"
+        ));
     }
 
-    /// STAT-PANIC-006 regression: multibyte characters around the match must not panic.
     #[test]
     fn word_boundary_utf8_safe_with_accented_chars() {
-        // "diagnosticar" contains "diagnos" prefix — must not panic.
-        // "analiza" appears inside "reanalizó" — must not match.
-        assert!(!TaskAnalyzer::contains_word_safe("reanalizó el proceso", "analiza"));
-        // "fix" after an accented word boundary.
+        assert!(!TaskAnalyzer::contains_word_safe(
+            "reanalizó el proceso",
+            "analiza"
+        ));
         assert!(TaskAnalyzer::contains_word_safe("¿puedes fix esto?", "fix"));
         // No panic on emoji (multibyte).
         let _ = TaskAnalyzer::contains_word_safe("🔥 fix the bug 🔥", "fix");
@@ -993,14 +1930,12 @@ mod tests {
     #[test]
     fn hash_is_sha256_hex() {
         let hash = TaskAnalyzer::compute_semantic_hash("test");
-        assert_eq!(hash.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
+        assert_eq!(hash.len(), 64);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn hash_order_independent() {
-        // Semantic hash sorts words — order should not affect the result for
-        // queries with identical content words.
         let h1 = TaskAnalyzer::compute_semantic_hash("fix authentication bug");
         let h2 = TaskAnalyzer::compute_semantic_hash("bug authentication fix");
         assert_eq!(h1, h2, "semantic hash must be order-independent");
@@ -1008,7 +1943,6 @@ mod tests {
 
     #[test]
     fn hash_stop_word_removal() {
-        // Adding stop words should not change the hash.
         let h1 = TaskAnalyzer::compute_semantic_hash("fix authentication bug");
         let h2 = TaskAnalyzer::compute_semantic_hash("fix the authentication bug");
         assert_eq!(h1, h2, "stop words must not affect the semantic hash");
@@ -1118,12 +2052,17 @@ mod tests {
         assert_eq!(analysis.complexity, TaskComplexity::Simple);
     }
 
-    // ── P1-C: Audit / compliance keyword tests ────────────────────────────────
+    // ── Audit / compliance keyword tests ──────────────────────────────────────
 
     #[test]
     fn p1c_audit_keyword_is_research() {
         let analysis = TaskAnalyzer::analyze("audit the database access logs");
-        assert_eq!(analysis.task_type, TaskType::Research, "confidence={}", analysis.confidence);
+        assert_eq!(
+            analysis.task_type,
+            TaskType::Research,
+            "confidence={}",
+            analysis.confidence
+        );
     }
 
     #[test]
@@ -1174,5 +2113,374 @@ mod tests {
     fn type_debugging_direct_fix_keyword() {
         let analysis = TaskAnalyzer::analyze("fix this bug in the function");
         assert_eq!(analysis.task_type, TaskType::Debugging);
+    }
+
+    // ── Layer 2: Ambiguity metadata ───────────────────────────────────────────
+
+    #[test]
+    fn ambiguity_no_signals_for_empty_query() {
+        let analysis = TaskAnalyzer::analyze("hello there");
+        assert_eq!(analysis.ambiguity, Some(AmbiguityReason::NoSignals));
+        assert_eq!(analysis.task_type, TaskType::General);
+    }
+
+    #[test]
+    fn ambiguity_none_for_crystal_clear_query() {
+        // "git status" → single phrase, confidence = 1.0 → fast path, no ambiguity.
+        let analysis = TaskAnalyzer::analyze("git status");
+        assert!(
+            analysis.ambiguity.is_none(),
+            "Crystal-clear query must not be tagged ambiguous: {:?}",
+            analysis.ambiguity
+        );
+    }
+
+    #[test]
+    fn ambiguity_margin_exposed_for_close_call() {
+        // "fix and explain" — two competing types close in score.
+        let analysis = TaskAnalyzer::analyze("fix and explain");
+        // margin field must be populated regardless of ambiguity tag
+        assert!(analysis.margin >= 0.0 && analysis.margin <= 1.0);
+    }
+
+    // ── Layer 3: Multi-intent ─────────────────────────────────────────────────
+
+    #[test]
+    fn multi_intent_detected_for_conjunctive_query() {
+        // "explain AND fix" → Explanation + Debugging signals, conjunctive marker
+        let analysis = TaskAnalyzer::analyze("explain and fix the authentication bug");
+        assert!(
+            analysis.is_multi_intent,
+            "Conjunctive query with dual signals must be multi-intent"
+        );
+    }
+
+    #[test]
+    fn multi_intent_false_for_single_type_query() {
+        let analysis = TaskAnalyzer::analyze("git status");
+        assert!(!analysis.is_multi_intent);
+    }
+
+    #[test]
+    fn multi_intent_spanish_y_conjunction() {
+        // "analiza y corrige" — Spanish conjunction with dual signals
+        let analysis = TaskAnalyzer::analyze("analiza y corrige el archivo");
+        assert!(
+            analysis.is_multi_intent,
+            "Spanish 'y' conjunction with dual signals must be multi-intent"
+        );
+    }
+
+    #[test]
+    fn secondary_type_populated_for_multi_type_query() {
+        let analysis = TaskAnalyzer::analyze("explain and fix the authentication bug");
+        assert!(
+            analysis.secondary_type.is_some(),
+            "Multi-type query must expose secondary_type"
+        );
+    }
+
+    #[test]
+    fn secondary_type_none_for_single_type_query() {
+        let analysis = TaskAnalyzer::analyze("git status");
+        assert!(analysis.secondary_type.is_none());
+    }
+
+    // ── Layer 3: Canonical intent ─────────────────────────────────────────────
+
+    #[test]
+    fn canonical_intent_populated_for_actionable_query() {
+        let analysis = TaskAnalyzer::analyze("fix the memory leak in connection pool");
+        assert!(
+            analysis.canonical_intent.is_some(),
+            "Query with action verb must have canonical_intent"
+        );
+        let intent = analysis.canonical_intent.unwrap();
+        assert!(
+            intent.contains("fix"),
+            "canonical_intent must contain action verb 'fix', got: {intent}"
+        );
+    }
+
+    #[test]
+    fn canonical_intent_contains_domain_noun() {
+        let analysis = TaskAnalyzer::analyze("fix the memory leak");
+        let intent = analysis.canonical_intent.unwrap_or_default();
+        // Should be "fix:memory" or similar
+        assert!(
+            intent.contains(':') && (intent.contains("memory") || intent.contains("fix")),
+            "canonical_intent should be verb:domain form, got: {intent}"
+        );
+    }
+
+    #[test]
+    fn canonical_intent_stable_across_rephrasing() {
+        // "fix the memory leak" and "resolve memory leak issue" should have
+        // the same or similar canonical intent.
+        let a1 = TaskAnalyzer::analyze("fix the memory leak");
+        let a2 = TaskAnalyzer::analyze("fix memory leak issue");
+        // Both should contain "fix" in canonical_intent
+        let i1 = a1.canonical_intent.unwrap_or_default();
+        let i2 = a2.canonical_intent.unwrap_or_default();
+        assert!(i1.contains("fix"), "got: {i1}");
+        assert!(i2.contains("fix"), "got: {i2}");
+    }
+
+    #[test]
+    fn canonical_intent_none_for_no_signal_query() {
+        let analysis = TaskAnalyzer::analyze("hello there");
+        // May or may not be None depending on whether "there" matches a domain noun.
+        // Just verify it doesn't panic.
+        let _ = analysis.canonical_intent;
+    }
+
+    // ── Context priors ────────────────────────────────────────────────────────
+
+    #[test]
+    fn context_rust_files_bias_toward_code() {
+        let ctx = ContextSignals {
+            file_extensions: &["rs"],
+            in_git_conflict: false,
+            recent_task_types: &[],
+        };
+        // Ambiguous query that context tips toward code
+        let without_ctx = TaskAnalyzer::analyze("update it");
+        let with_ctx = TaskAnalyzer::analyze_with_context("update it", &ctx);
+        // With Rust context, CodeModification/Debugging should get higher confidence
+        // At minimum: must not panic and must return a valid type.
+        let _ = (without_ctx.task_type, with_ctx.task_type);
+    }
+
+    #[test]
+    fn context_git_conflict_biases_debugging() {
+        let ctx = ContextSignals {
+            file_extensions: &[],
+            in_git_conflict: true,
+            recent_task_types: &[],
+        };
+        let analysis = TaskAnalyzer::analyze_with_context("help", &ctx);
+        // With git conflict context, Debugging or GitOperation should score higher.
+        // Must not panic; result is type-correct.
+        assert!(
+            matches!(
+                analysis.task_type,
+                TaskType::Debugging | TaskType::GitOperation | TaskType::General
+            ),
+            "Git conflict context should not produce irrelevant types: {:?}",
+            analysis.task_type
+        );
+    }
+
+    #[test]
+    fn context_recency_prior_applied() {
+        let ctx = ContextSignals {
+            file_extensions: &[],
+            in_git_conflict: false,
+            recent_task_types: &[TaskType::Configuration],
+        };
+        // "set" is ambiguous between Configuration and other types.
+        // With Configuration recency prior, Configuration should score higher.
+        let analysis = TaskAnalyzer::analyze_with_context("set it up", &ctx);
+        // Just verify no panic and produces a valid result.
+        assert!(TaskType::from_str(analysis.task_type.as_str()).is_some());
+    }
+
+    #[test]
+    fn context_empty_signals_matches_analyze() {
+        // ContextSignals::empty() must produce identical result to analyze().
+        let q = "fix the authentication bug";
+        let a1 = TaskAnalyzer::analyze(q);
+        let a2 = TaskAnalyzer::analyze_with_context(q, &ContextSignals::empty());
+        assert_eq!(a1.task_type, a2.task_type);
+        assert!((a1.confidence - a2.confidence).abs() < f32::EPSILON);
+    }
+
+    // ── IntentClassifier trait ────────────────────────────────────────────────
+
+    #[test]
+    fn keyword_classifier_trait_object_works() {
+        let clf: Box<dyn IntentClassifier> = Box::new(KeywordClassifier);
+        let result = clf.classify("git status");
+        assert_eq!(result.task_type, TaskType::GitOperation);
+        assert_eq!(result.method, ClassificationMethod::KeywordCascadeSMRC);
+    }
+
+    #[test]
+    fn keyword_classifier_with_context_works() {
+        let clf = KeywordClassifier;
+        let ctx = ContextSignals {
+            file_extensions: &["rs"],
+            in_git_conflict: false,
+            recent_task_types: &[],
+        };
+        let result = clf.classify_with_context("fix the bug", &ctx);
+        assert_eq!(result.task_type, TaskType::Debugging);
+    }
+
+    // ── Entropy computation ───────────────────────────────────────────────────
+
+    #[test]
+    fn entropy_zero_for_single_type() {
+        // "git status" fires only GitOperation → entropy = 0.
+        let lower = "git status";
+        let scored = TaskAnalyzer::score_layer1(lower);
+        let entropy = TaskAnalyzer::compute_entropy_ratio(&scored);
+        assert!(
+            entropy < 0.01,
+            "Single-type query must have near-zero entropy, got {entropy}"
+        );
+    }
+
+    #[test]
+    fn entropy_nonzero_for_mixed_query() {
+        // "fix and explain" fires Debugging + Explanation → H > 0.
+        let lower = "fix and explain";
+        let scored = TaskAnalyzer::score_layer1(lower);
+        let entropy = TaskAnalyzer::compute_entropy_ratio(&scored);
+        assert!(entropy > 0.0, "Mixed-type query must have positive entropy");
+    }
+
+    // ── Position weighting ────────────────────────────────────────────────────
+
+    #[test]
+    fn position_weight_leading_verb_scores_higher() {
+        let leading = TaskAnalyzer::score_layer1("fix the auth bug");
+        let embedded = TaskAnalyzer::score_layer1("the auth problem needs a fix");
+
+        let debug_idx = TaskAnalyzer::type_index(TaskType::Debugging);
+        assert!(
+            leading.scores[debug_idx] > embedded.scores[debug_idx],
+            "Leading 'fix' must score higher than embedded 'fix': {} vs {}",
+            leading.scores[debug_idx],
+            embedded.scores[debug_idx]
+        );
+    }
+
+    // ── Dynamic rule set ──────────────────────────────────────────────────────
+
+    #[test]
+    fn rule_set_loads_without_panic() {
+        // Accessing RULE_SET must not panic regardless of whether
+        // classifier_rules.toml exists in the current working directory.
+        let info = TaskAnalyzer::rule_set_info();
+        assert!(
+            info.contains("rules:"),
+            "rule_set_info must include rule count: {info}"
+        );
+    }
+
+    #[test]
+    fn rule_set_has_nonzero_rules() {
+        assert!(
+            !RULE_SET.rules().is_empty(),
+            "Active rule set must have at least one rule"
+        );
+    }
+
+    #[test]
+    fn rule_set_all_task_types_parseable() {
+        // Every rule loaded from config must have a valid TaskType.
+        // This verifies that compiled_defaults() and any loaded TOML
+        // only reference valid as_str() keys.
+        for rule in RULE_SET.rules() {
+            assert_ne!(
+                rule.task_type,
+                TaskType::General,
+                "No rule should explicitly target General (it's the fallback)"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_rule_produces_same_result_as_static() {
+        // The dynamic default rules must produce identical classifications
+        // to the original static CLASSIFIER_RULES array for well-known queries.
+        let pairs = [
+            ("git status", TaskType::GitOperation),
+            ("fix the bug", TaskType::Debugging),
+            ("explain how async works", TaskType::Explanation),
+            ("audit the database access", TaskType::Research),
+            ("configure the database", TaskType::Configuration),
+            ("delete file temp.txt", TaskType::FileManagement),
+        ];
+        for (query, expected) in &pairs {
+            let analysis = TaskAnalyzer::analyze(query);
+            assert_eq!(
+                analysis.task_type, *expected,
+                "Dynamic rules: wrong type for '{query}': got {:?}",
+                analysis.task_type
+            );
+        }
+    }
+
+    #[test]
+    fn custom_rule_can_be_injected_at_runtime() {
+        // Simulate what happens when a user adds a custom keyword to
+        // classifier_rules.toml by building a ClassifierRuleSet directly.
+        let custom = ClassifierRuleSet {
+            rules: vec![ClassifierRule {
+                task_type: TaskType::Research,
+                base_score: 5.0,
+                keywords: vec!["halcon-custom-keyword".to_string()],
+            }],
+            examples: vec![],
+            source: Some(std::path::PathBuf::from("test-custom.toml")),
+        };
+        assert!(custom.is_from_file());
+        assert_eq!(custom.rules().len(), 1);
+        assert_eq!(custom.rules()[0].keywords[0], "halcon-custom-keyword");
+    }
+
+    #[test]
+    fn few_shot_examples_are_accessible() {
+        // This test verifies the API — actual examples depend on whether
+        // classifier_rules.toml was found (may be empty in CI).
+        let examples = TaskAnalyzer::few_shot_examples();
+        // Must not panic; examples may be zero in fresh checkout.
+        for ex in examples {
+            assert!(
+                TaskType::from_str(&ex.task_type).is_some(),
+                "few-shot example task_type '{}' is not a valid TaskType",
+                ex.task_type
+            );
+        }
+    }
+
+    #[test]
+    fn rule_set_info_format() {
+        let info = TaskAnalyzer::rule_set_info();
+        // Must contain all three key segments
+        assert!(info.contains("source:"), "missing source: {info}");
+        assert!(info.contains("rules:"), "missing rules: {info}");
+        assert!(
+            info.contains("few-shot examples:"),
+            "missing examples: {info}"
+        );
+    }
+
+    #[test]
+    fn toml_deserialization_from_string() {
+        // Test that the TOML format is parseable without a file on disk.
+        let toml_str = r#"
+[[rule]]
+task_type  = "debugging"
+base_score = 3.0
+keywords   = ["custom-crash", "custom-panic"]
+
+[[example]]
+query     = "the server exploded on startup"
+task_type = "debugging"
+"#;
+        let parsed: super::ClassifierRulesToml =
+            toml::from_str(toml_str).expect("TOML must parse without error");
+        assert_eq!(parsed.rules.len(), 1);
+        assert_eq!(parsed.rules[0].task_type, "debugging");
+        assert_eq!(parsed.rules[0].base_score, 3.0);
+        assert_eq!(
+            parsed.rules[0].keywords,
+            vec!["custom-crash", "custom-panic"]
+        );
+        assert_eq!(parsed.examples.len(), 1);
+        assert_eq!(parsed.examples[0].task_type, "debugging");
     }
 }

@@ -83,8 +83,8 @@ pub struct StatusState {
 /// that only touch a subset of fields.
 ///
 /// # Example
-/// ```no_run
-/// use crate::tui::widgets::status::StatusPatch;
+/// ```text
+/// // status is a &mut StatusState
 /// status.apply_patch(StatusPatch { cost: Some(0.002), elapsed_ms: Some(1234), ..Default::default() });
 /// ```
 #[derive(Default)]
@@ -125,17 +125,17 @@ impl StatusState {
             agents_active: 0,
             activity_hints: Vec::new(),
             context_servers_count: 0,
-            search_active: false, // Phase 3 SRCH-003
+            search_active: false,       // Phase 3 SRCH-003
             search_mode: String::new(), // Phase 3 SRCH-003
-            search_current: None, // Phase 3 SRCH-003
-            search_total: 0, // Phase 3 SRCH-003
-            agent_running: false, // Phase 45C
+            search_current: None,       // Phase 3 SRCH-003
+            search_total: 0,            // Phase 3 SRCH-003
+            agent_running: false,       // Phase 45C
             spinner_active: false,
             spinner_frame: 0,
             full_session_id: String::new(), // Phase 45D
-            dev_gateway_port: None, // Dev Ecosystem Phase 5
-            ide_connected: false, // Dev Ecosystem Phase 5
-            open_buffers: 0, // Dev Ecosystem Phase 5
+            dev_gateway_port: None,         // Dev Ecosystem Phase 5
+            ide_connected: false,           // Dev Ecosystem Phase 5
+            open_buffers: 0,                // Dev Ecosystem Phase 5
         }
     }
 
@@ -148,11 +148,15 @@ impl StatusState {
     pub fn cost_summary(&self) -> String {
         let total_tok = self.input_tokens + self.output_tokens;
         if self.cost > 0.0 {
-            format!("${:.4}  ({} in + {} out = {} total tokens)  round {}",
-                self.cost, self.input_tokens, self.output_tokens, total_tok, self.round)
+            format!(
+                "${:.4}  ({} in + {} out = {} total tokens)  round {}",
+                self.cost, self.input_tokens, self.output_tokens, total_tok, self.round
+            )
         } else {
-            format!("{} in + {} out = {} total tokens  round {}",
-                self.input_tokens, self.output_tokens, total_tok, self.round)
+            format!(
+                "{} in + {} out = {} total tokens  round {}",
+                self.input_tokens, self.output_tokens, total_tok, self.round
+            )
         }
     }
 
@@ -196,7 +200,7 @@ impl StatusState {
             self.full_session_id = s.clone();
             // Display: first 8 chars abbreviated (session IDs are hex UUID — ASCII safe).
             self.session_id = if s.len() > 8 {
-                format!("{}…", &s[..8])  // safe: UUID hex chars are always single-byte
+                format!("{}…", &s[..8]) // safe: UUID hex chars are always single-byte
             } else {
                 s
             };
@@ -219,7 +223,8 @@ impl StatusState {
     /// at every call site except the full `StatusUpdate` event handler.
     ///
     /// # Example
-    /// ```no_run
+    /// ```text
+    /// // status is a &mut StatusState
     /// status.apply_patch(StatusPatch { tool_count: Some(0), ..Default::default() });
     /// ```
     pub fn apply_patch(&mut self, patch: StatusPatch) {
@@ -344,7 +349,9 @@ impl StatusState {
                 Span::styled(" ", Style::default()),
                 Span::styled(
                     spinner_prefix,
-                    Style::default().fg(p.running_ratatui()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(p.running_ratatui())
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     ctrl_label,
@@ -356,9 +363,7 @@ impl StatusState {
             if self.dry_run_active {
                 spans.push(Span::styled(
                     constants::DRY_RUN_LABEL,
-                    Style::default()
-                        .fg(c_warning)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(c_warning).add_modifier(Modifier::BOLD),
                 ));
             }
 
@@ -482,7 +487,10 @@ impl StatusState {
             }
 
             // Key hints when paused or step mode
-            if matches!(self.agent_control, AgentControl::Paused | AgentControl::StepMode) {
+            if matches!(
+                self.agent_control,
+                AgentControl::Paused | AgentControl::StepMode
+            ) {
                 spans.push(sep.clone());
                 spans.push(Span::styled(
                     "[Space] resume  [N] step  [Esc] cancel",
@@ -532,9 +540,7 @@ impl StatusState {
         let c_accent = p.accent_ratatui();
         let c_muted = p.muted_ratatui();
 
-        let mut spans = vec![
-            Span::styled("  Hints: ", Style::default().fg(c_muted)),
-        ];
+        let mut spans = vec![Span::styled("  Hints: ", Style::default().fg(c_muted))];
 
         for (i, (key, label)) in self.activity_hints.iter().enumerate() {
             if i > 0 {
@@ -560,9 +566,7 @@ impl StatusState {
         let c_success = p.success_ratatui();
         let c_muted = p.muted_ratatui();
 
-        let mut spans = vec![
-            Span::styled("  Search: ", Style::default().fg(c_muted)),
-        ];
+        let mut spans = vec![Span::styled("  Search: ", Style::default().fg(c_muted))];
 
         // Mode indicator
         spans.push(Span::styled(
@@ -580,10 +584,7 @@ impl StatusState {
             ));
         } else if self.search_total == 0 {
             spans.push(Span::styled(" │ ", Style::default().fg(c_muted)));
-            spans.push(Span::styled(
-                "No matches",
-                Style::default().fg(c_muted),
-            ));
+            spans.push(Span::styled("No matches", Style::default().fg(c_muted)));
         }
 
         Line::from(spans)
@@ -600,9 +601,7 @@ impl StatusState {
         let c_warning = p.warning_ratatui();
         let c_muted = p.muted_ratatui();
 
-        let mut expert_spans = vec![
-            Span::styled(" ", Style::default()),
-        ];
+        let mut expert_spans = vec![Span::styled(" ", Style::default())];
 
         // Reasoning strategy
         if !self.reasoning_strategy.is_empty() {
@@ -693,10 +692,16 @@ mod tests {
     fn update_sets_fields() {
         let mut status = StatusState::new();
         status.update(
-            Some("deepseek".into()), Some("deepseek-chat".into()),
-            Some(3), None, Some(0.0042),
-            Some("abc12345".into()), Some(2500), Some(5),
-            Some(1200), Some(450),
+            Some("deepseek".into()),
+            Some("deepseek-chat".into()),
+            Some(3),
+            None,
+            Some(0.0042),
+            Some("abc12345".into()),
+            Some(2500),
+            Some(5),
+            Some(1200),
+            Some(450),
         );
         assert_eq!(status.provider, "deepseek");
         assert_eq!(status.model, "deepseek-chat");
@@ -712,16 +717,28 @@ mod tests {
     fn multiple_updates_overwrite() {
         let mut status = StatusState::new();
         status.update(
-            Some("openai".into()), Some("gpt-4o".into()),
-            Some(1), None, Some(0.01),
-            Some("sess1".into()), Some(500), Some(2),
-            Some(300), Some(100),
+            Some("openai".into()),
+            Some("gpt-4o".into()),
+            Some(1),
+            None,
+            Some(0.01),
+            Some("sess1".into()),
+            Some(500),
+            Some(2),
+            Some(300),
+            Some(100),
         );
         status.update(
-            Some("deepseek".into()), Some("deepseek-coder".into()),
-            Some(2), None, Some(0.002),
-            None, Some(1500), Some(4),
-            Some(800), Some(350),
+            Some("deepseek".into()),
+            Some("deepseek-coder".into()),
+            Some(2),
+            None,
+            Some(0.002),
+            None,
+            Some(1500),
+            Some(4),
+            Some(800),
+            Some(350),
         );
         assert_eq!(status.provider, "deepseek");
         assert_eq!(status.model, "deepseek-coder");
@@ -822,20 +839,29 @@ mod tests {
         let mut status = StatusState::new();
         status.agent_control = AgentControl::Paused;
         // Key hints should appear when agent_control is Paused (verified in render).
-        assert!(matches!(status.agent_control, AgentControl::Paused | AgentControl::StepMode));
+        assert!(matches!(
+            status.agent_control,
+            AgentControl::Paused | AgentControl::StepMode
+        ));
     }
 
     #[test]
     fn key_hints_shown_when_step_mode() {
         let mut status = StatusState::new();
         status.agent_control = AgentControl::StepMode;
-        assert!(matches!(status.agent_control, AgentControl::Paused | AgentControl::StepMode));
+        assert!(matches!(
+            status.agent_control,
+            AgentControl::Paused | AgentControl::StepMode
+        ));
     }
 
     #[test]
     fn key_hints_hidden_when_running() {
         let status = StatusState::new();
-        assert!(!matches!(status.agent_control, AgentControl::Paused | AgentControl::StepMode));
+        assert!(!matches!(
+            status.agent_control,
+            AgentControl::Paused | AgentControl::StepMode
+        ));
     }
 
     #[test]
@@ -892,7 +918,10 @@ mod tests {
             failure_rate: 0.3,
             latency_p95_ms: 5000,
         };
-        assert!(matches!(status.provider_health, ProviderHealthStatus::Degraded { .. }));
+        assert!(matches!(
+            status.provider_health,
+            ProviderHealthStatus::Degraded { .. }
+        ));
     }
 
     #[test]
@@ -901,7 +930,10 @@ mod tests {
         status.provider_health = ProviderHealthStatus::Unhealthy {
             reason: "timeout".into(),
         };
-        assert!(matches!(status.provider_health, ProviderHealthStatus::Unhealthy { .. }));
+        assert!(matches!(
+            status.provider_health,
+            ProviderHealthStatus::Unhealthy { .. }
+        ));
     }
 
     // --- Dev Ecosystem Phase 5: IDE indicator tests ---
@@ -929,7 +961,18 @@ mod tests {
     fn current_provider_accessor() {
         let mut status = StatusState::new();
         assert_eq!(status.current_provider(), "");
-        status.update(Some("anthropic".into()), None, None, None, None, None, None, None, None, None);
+        status.update(
+            Some("anthropic".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(status.current_provider(), "anthropic");
     }
 
@@ -954,13 +997,22 @@ mod tests {
         let mut status = StatusState::new();
         // Seed known values via update().
         status.update(
-            Some("deepseek".into()), Some("deepseek-chat".into()),
-            Some(2), None, Some(0.001),
-            Some("sess-xyz".into()), Some(800), Some(3),
-            Some(500), Some(120),
+            Some("deepseek".into()),
+            Some("deepseek-chat".into()),
+            Some(2),
+            None,
+            Some(0.001),
+            Some("sess-xyz".into()),
+            Some(800),
+            Some(3),
+            Some(500),
+            Some(120),
         );
         // Patch only tool_count.
-        status.apply_patch(StatusPatch { tool_count: Some(0), ..Default::default() });
+        status.apply_patch(StatusPatch {
+            tool_count: Some(0),
+            ..Default::default()
+        });
         assert_eq!(status.tool_count, 0);
         // Other fields unchanged.
         assert_eq!(status.provider, "deepseek");
@@ -974,9 +1026,16 @@ mod tests {
     fn apply_patch_partial_round_ended_update() {
         let mut status = StatusState::new();
         status.update(
-            Some("openai".into()), Some("gpt-4o".into()),
-            Some(1), None, None,
-            Some("sess-abc".into()), None, None, None, None,
+            Some("openai".into()),
+            Some("gpt-4o".into()),
+            Some(1),
+            None,
+            None,
+            Some("sess-abc".into()),
+            None,
+            None,
+            None,
+            None,
         );
         // Simulate RoundEnded partial update.
         status.apply_patch(StatusPatch {
