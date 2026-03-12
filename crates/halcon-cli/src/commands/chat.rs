@@ -137,7 +137,14 @@ pub async fn run(
     // Precheck that the selected provider is available, falling back if needed.
     // In TUI mode, allow starting even without providers (show error on first prompt).
     let (provider, model) = if tui {
-        match provider_factory::precheck_providers_explicit(&registry, provider, model, explicit_model).await {
+        match provider_factory::precheck_providers_explicit(
+            &registry,
+            provider,
+            model,
+            explicit_model,
+        )
+        .await
+        {
             Ok((p, m)) => (p, m),
             Err(e) => {
                 feedback::user_warning(
@@ -149,7 +156,8 @@ pub async fn run(
         }
     } else {
         // Classic mode requires a valid provider.
-        provider_factory::precheck_providers_explicit(&registry, provider, model, explicit_model).await?
+        provider_factory::precheck_providers_explicit(&registry, provider, model, explicit_model)
+            .await?
     };
     let provider = provider.as_str();
     let model = model.as_str();
@@ -188,10 +196,7 @@ pub async fn run(
                 while let Ok(event) = audit_rx.recv().await {
                     // Use session_id embedded in the event (set by EXECUTION_CTX.scope).
                     let sid_str = event.session_id.map(|u| u.to_string());
-                    let _ = db_clone.append_audit_event_with_session(
-                        &event,
-                        sid_str.as_deref(),
-                    );
+                    let _ = db_clone.append_audit_event_with_session(&event, sid_str.as_deref());
                 }
             }))
         } else {
@@ -248,16 +253,15 @@ pub async fn run(
     } else {
         None
     };
-    let mut tool_registry = halcon_tools::full_registry(&config.tools, proc_reg, db.clone(), search_engine);
+    let mut tool_registry =
+        halcon_tools::full_registry(&config.tools, proc_reg, db.clone(), search_engine);
 
     // Connect to MCP servers and register their tools.
-    let _mcp_hosts =
-        provider_factory::connect_mcp_servers(&config.mcp, &mut tool_registry).await;
+    let _mcp_hosts = provider_factory::connect_mcp_servers(&config.mcp, &mut tool_registry).await;
 
     // Resume session if requested.
     let resume_session = if let Some(ref id_str) = resume {
-        let id =
-            Uuid::parse_str(id_str).map_err(|e| anyhow::anyhow!("Invalid session ID: {e}"))?;
+        let id = Uuid::parse_str(id_str).map_err(|e| anyhow::anyhow!("Invalid session ID: {e}"))?;
         match db.as_ref().and_then(|d| d.load_session(id).ok().flatten()) {
             Some(session) => {
                 println!("Resuming session {}", &id_str[..8.min(id_str.len())]);
@@ -300,7 +304,10 @@ pub async fn run(
     if config.multimodal.enabled {
         if let Some(ref db_arc) = repl.async_db {
             let db_clone = db_arc.clone();
-            match halcon_multimodal::MultimodalSubsystem::init(&config.multimodal, Arc::new(db_clone)) {
+            match halcon_multimodal::MultimodalSubsystem::init(
+                &config.multimodal,
+                Arc::new(db_clone),
+            ) {
                 Ok(sys) => {
                     tracing::info!("Multimodal subsystem initialized (--full)");
                     repl.multimodal = Some(Arc::new(sys));
@@ -362,38 +369,144 @@ pub async fn run(
         .await
 }
 
-/// Print --metrics summary and --timeline JSON on exit.
+/// Print session exit card — stats, plan summary, and resume command.
+///
+/// Always shown (no flag gate) when exiting TUI or REPL after any real work.
+/// Replaces the raw JSON dump with a structured, human-readable card.
 fn print_exit_hooks(repl: &Repl, flags: &FeatureFlags) {
-    if flags.metrics || flags.full {
-        let s = &repl.session;
+    let s = &repl.session;
+    let has_activity = s.agent_rounds > 0 || s.tool_invocations > 0;
+
+    // ── Always show the exit card if there was any activity ──────────────────
+    if has_activity || flags.metrics || flags.full {
         let total_tokens = s.total_usage.input_tokens + s.total_usage.output_tokens;
         let latency = s.total_latency_ms as f64 / 1000.0;
-        eprintln!("\nSession Summary:");
+        let session_id = s.id;
+
+        // Auto-save trace to ~/.halcon/sessions/<session_id>.jsonl for resume
+        let trace_path = dirs::home_dir()
+            .map(|h| h.join(".halcon").join("sessions").join(format!("{session_id}.jsonl")));
+
+        if let Some(ref tp) = trace_path {
+            let _ = std::fs::create_dir_all(tp.parent().unwrap());
+            write_trace_jsonl(repl, tp);
+        }
+
+        // Resolve resume command from the session's provider/model
+        let provider = &repl.provider;
+        let model = &repl.model;
+        let resume_cmd = if let Some(ref tp) = trace_path {
+            format!(
+                "halcon -p {provider} -m {model} chat --tui --full --expert --trace-in {}",
+                tp.display()
+            )
+        } else {
+            format!("halcon -p {provider} -m {model} chat --tui --full --expert")
+        };
+
+        // ── Exit card ────────────────────────────────────────────────────────
+        eprintln!();
+        eprintln!("╭─────────────────────────────────────────────────────────╮");
+        eprintln!("│                  HALCÓN — Resumen de Sesión             │");
+        eprintln!("╰─────────────────────────────────────────────────────────╯");
+
+        // Session identity
+        eprintln!("  ID:         {session_id}");
+        eprintln!("  Proveedor:  {provider}  │  Modelo: {model}");
+        eprintln!("  Directorio: {}", s.working_directory);
+        if let Some(ref title) = s.title {
+            eprintln!("  Título:     {title}");
+        }
+
+        // Stats
+        eprintln!();
+        eprintln!("  ┌── Estadísticas ─────────────────────────────────────┐");
         eprintln!(
-            "  Rounds: {} | Tokens: \u{2191}{} \u{2193}{} | Cost: ${:.4}",
-            s.agent_rounds,
+            "  │  Rounds: {:>3}  │  Herramientas: {:>4} llamadas        │",
+            s.agent_rounds, s.tool_invocations,
+        );
+        eprintln!(
+            "  │  Tokens: ↑{:<8} ↓{:<8} │  Total: {:>8}     │",
             format_k(s.total_usage.input_tokens),
             format_k(s.total_usage.output_tokens),
-            s.estimated_cost_usd,
+            format_k(total_tokens),
         );
         eprintln!(
-            "  Duration: {:.1}s | Tools: {} calls | Total tokens: {}",
-            latency,
-            s.tool_invocations,
-            total_tokens,
+            "  │  Costo:  ${:<10.4}  │  Duración: {:<10.1}s       │",
+            s.estimated_cost_usd, latency,
         );
+        eprintln!("  └─────────────────────────────────────────────────────┘");
+
+        // Plan / timeline summary (human-readable, not raw JSON)
+        if let Some(timeline_json) = repl.last_timeline_json() {
+            if let Ok(timeline) = serde_json::from_str::<serde_json::Value>(&timeline_json) {
+                eprintln!();
+                let goal = timeline["goal"].as_str().unwrap_or("(sin goal)");
+                let plan_id = timeline["plan_id"].as_str().unwrap_or("?");
+                let completed = timeline["completed_steps"].as_u64().unwrap_or(0);
+                let total_steps = timeline["total_steps"].as_u64().unwrap_or(0);
+                let elapsed_ms = timeline["total_elapsed_ms"].as_u64().unwrap_or(0);
+
+                eprintln!("  ┌── Plan de Ejecución ─────────────────────────────────┐");
+                eprintln!("  │  Goal:    {goal}");
+                eprintln!("  │  Plan ID: {plan_id}");
+                eprintln!(
+                    "  │  Pasos:   {completed}/{total_steps} completados  │  Plan: {:.1}s",
+                    elapsed_ms as f64 / 1000.0
+                );
+
+                if let Some(steps) = timeline["steps"].as_array() {
+                    eprintln!("  │");
+                    for step in steps {
+                        let idx = step["index"].as_u64().unwrap_or(0);
+                        let desc = step["description"].as_str().unwrap_or("?");
+                        let status = step["status"].as_str().unwrap_or("?");
+                        let dur_ms = step["duration_ms"].as_u64().unwrap_or(0);
+                        let delegated = step["delegated_to"].as_str().unwrap_or("-");
+                        let icon = match status {
+                            "Completed" => "✓",
+                            "Failed" => "✗",
+                            "Skipped" => "⊘",
+                            "Running" => "▸",
+                            _ => "○",
+                        };
+                        eprintln!(
+                            "  │  {icon} [{idx}] {desc}",
+                        );
+                        if dur_ms > 0 || delegated != "-" {
+                            eprintln!(
+                                "  │      → {status}  {:.1}s  agente: {delegated}",
+                                dur_ms as f64 / 1000.0
+                            );
+                        }
+                    }
+                }
+                eprintln!("  └─────────────────────────────────────────────────────┘");
+            }
+        }
+
+        // Trace file location
+        if let Some(ref tp) = trace_path {
+            eprintln!();
+            eprintln!("  Traza guardada → {}", tp.display());
+        }
+
+        // Resume command
+        eprintln!();
+        eprintln!("  ┌── Para retomar esta sesión ──────────────────────────┐");
+        eprintln!("  │  {resume_cmd}");
+        eprintln!("  └─────────────────────────────────────────────────────┘");
+        eprintln!();
     }
 
-    if flags.timeline || flags.full {
+    // Legacy flag: --timeline dumps raw JSON for scripting/piping
+    if flags.timeline && !flags.full {
         if let Some(timeline_json) = repl.last_timeline_json() {
-            // Always write to stderr — stdout must stay clean (TUI or piped consumers).
             eprintln!("{timeline_json}");
-        } else {
-            eprintln!("(no execution timeline available — no plan was generated)");
         }
     }
 
-    // P0.2: Write execution timeline as JSONL to --trace-out path.
+    // P0.2: Write execution timeline as JSONL to explicit --trace-out path.
     if let Some(ref trace_path) = flags.trace_out {
         write_trace_jsonl(repl, trace_path);
     }
@@ -422,17 +535,17 @@ pub fn read_trace_jsonl(path: &std::path::Path) {
 
     for (lineno, line) in content.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(v) => {
-                match v.get("type").and_then(|t| t.as_str()) {
-                    Some("header") => header = Some(v),
-                    Some("step") => steps.push(v),
-                    _ => {
-                        tracing::debug!(lineno, "trace-in: unknown line type — skipping");
-                    }
+            Ok(v) => match v.get("type").and_then(|t| t.as_str()) {
+                Some("header") => header = Some(v),
+                Some("step") => steps.push(v),
+                _ => {
+                    tracing::debug!(lineno, "trace-in: unknown line type — skipping");
                 }
-            }
+            },
             Err(e) => {
                 eprintln!("(--trace-in: line {}: parse error: {e})", lineno + 1);
             }
@@ -567,7 +680,10 @@ mod tests {
     fn feature_flags_orchestrate_ensures_enabled() {
         let mut config = AppConfig::default();
         assert!(config.orchestrator.enabled);
-        let flags = FeatureFlags { orchestrate: true, ..Default::default() };
+        let flags = FeatureFlags {
+            orchestrate: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
         assert!(config.orchestrator.enabled);
     }
@@ -576,7 +692,10 @@ mod tests {
     fn feature_flags_tasks_ensures_enabled() {
         let mut config = AppConfig::default();
         assert!(config.task_framework.enabled);
-        let flags = FeatureFlags { tasks: true, ..Default::default() };
+        let flags = FeatureFlags {
+            tasks: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
         assert!(config.task_framework.enabled);
     }
@@ -585,7 +704,10 @@ mod tests {
     fn feature_flags_reflexion_ensures_enabled() {
         let mut config = AppConfig::default();
         assert!(config.reflexion.enabled);
-        let flags = FeatureFlags { reflexion: true, ..Default::default() };
+        let flags = FeatureFlags {
+            reflexion: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
         assert!(config.reflexion.enabled);
     }
@@ -593,25 +715,52 @@ mod tests {
     #[test]
     fn feature_flags_full_enables_all() {
         let mut config = AppConfig::default();
-        let flags = FeatureFlags { full: true, ..Default::default() };
+        let flags = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.orchestrator.enabled, "full should enable orchestrator");
-        assert!(config.task_framework.enabled, "full should enable task_framework");
+        assert!(
+            config.orchestrator.enabled,
+            "full should enable orchestrator"
+        );
+        assert!(
+            config.task_framework.enabled,
+            "full should enable task_framework"
+        );
         assert!(config.reflexion.enabled, "full should enable reflexion");
-        assert!(config.planning.adaptive, "full should enable adaptive planning (orchestrator dependency)");
-        assert!(config.reasoning.enabled, "full should enable reasoning/UCB1");
+        assert!(
+            config.planning.adaptive,
+            "full should enable adaptive planning (orchestrator dependency)"
+        );
+        assert!(
+            config.reasoning.enabled,
+            "full should enable reasoning/UCB1"
+        );
         assert!(config.multimodal.enabled, "full should enable multimodal");
-        assert!(config.reasoning.enable_loop_critic, "full should enable loop_critic");
+        assert!(
+            config.reasoning.enable_loop_critic,
+            "full should enable loop_critic"
+        );
     }
 
     #[test]
     fn feature_flags_orchestrate_enables_planning() {
         let mut config = AppConfig::default();
         config.planning.adaptive = false; // Explicitly set to false
-        let flags = FeatureFlags { orchestrate: true, ..Default::default() };
+        let flags = FeatureFlags {
+            orchestrate: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.orchestrator.enabled, "orchestrate should enable orchestrator");
-        assert!(config.planning.adaptive, "orchestrate should enable planning.adaptive (dependency)");
+        assert!(
+            config.orchestrator.enabled,
+            "orchestrate should enable orchestrator"
+        );
+        assert!(
+            config.planning.adaptive,
+            "orchestrate should enable planning.adaptive (dependency)"
+        );
     }
 
     #[test]
@@ -643,14 +792,20 @@ mod tests {
 
     #[test]
     fn expert_flag_in_feature_flags() {
-        let flags = FeatureFlags { expert: true, ..Default::default() };
+        let flags = FeatureFlags {
+            expert: true,
+            ..Default::default()
+        };
         assert!(flags.expert);
     }
 
     #[test]
     fn full_flag_implies_expert_config() {
         // full + expert should both result in expert mode.
-        let flags_full = FeatureFlags { full: true, ..Default::default() };
+        let flags_full = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         assert!(flags_full.full);
         // In run(), expert_mode = flags.expert || flags.full
     }
@@ -659,13 +814,19 @@ mod tests {
 
     #[test]
     fn background_tools_flag_enables_background_tools() {
-        let flags = FeatureFlags { background_tools: true, ..Default::default() };
+        let flags = FeatureFlags {
+            background_tools: true,
+            ..Default::default()
+        };
         assert!(flags.enable_background_tools());
     }
 
     #[test]
     fn full_flag_enables_background_tools() {
-        let flags = FeatureFlags { full: true, ..Default::default() };
+        let flags = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         assert!(flags.enable_background_tools());
     }
 
@@ -752,8 +913,10 @@ mod tests {
         let header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert_eq!(header["type"], "header");
         assert_eq!(header["goal"], "test goal");
-        assert!(!header.as_object().unwrap().contains_key("steps"),
-            "header must not contain steps array");
+        assert!(
+            !header.as_object().unwrap().contains_key("steps"),
+            "header must not contain steps array"
+        );
     }
 
     #[test]
@@ -844,7 +1007,9 @@ mod tests {
     #[test]
     fn trace_in_missing_file_does_not_panic() {
         // read_trace_jsonl prints to stderr but must not panic.
-        read_trace_jsonl(std::path::Path::new("/tmp/halcon_nonexistent_trace_xyz.jsonl"));
+        read_trace_jsonl(std::path::Path::new(
+            "/tmp/halcon_nonexistent_trace_xyz.jsonl",
+        ));
     }
 
     #[test]
@@ -919,8 +1084,14 @@ mod tests {
     #[test]
     fn full_flag_enables_multimodal() {
         let mut config = AppConfig::default();
-        assert!(!config.multimodal.enabled, "multimodal defaults to disabled");
-        let flags = FeatureFlags { full: true, ..Default::default() };
+        assert!(
+            !config.multimodal.enabled,
+            "multimodal defaults to disabled"
+        );
+        let flags = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
         assert!(config.multimodal.enabled, "--full must enable multimodal");
     }
@@ -928,19 +1099,37 @@ mod tests {
     #[test]
     fn full_flag_enables_loop_critic() {
         let mut config = AppConfig::default();
-        assert!(!config.reasoning.enable_loop_critic, "loop_critic defaults to false");
-        let flags = FeatureFlags { full: true, ..Default::default() };
+        assert!(
+            !config.reasoning.enable_loop_critic,
+            "loop_critic defaults to false"
+        );
+        let flags = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.reasoning.enable_loop_critic, "--full must enable loop_critic");
+        assert!(
+            config.reasoning.enable_loop_critic,
+            "--full must enable loop_critic"
+        );
     }
 
     #[test]
     fn expert_flag_enables_loop_critic() {
         let mut config = AppConfig::default();
-        assert!(!config.reasoning.enable_loop_critic, "loop_critic defaults to false");
-        let flags = FeatureFlags { expert: true, ..Default::default() };
+        assert!(
+            !config.reasoning.enable_loop_critic,
+            "loop_critic defaults to false"
+        );
+        let flags = FeatureFlags {
+            expert: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.reasoning.enable_loop_critic, "--expert must enable loop_critic");
+        assert!(
+            config.reasoning.enable_loop_critic,
+            "--expert must enable loop_critic"
+        );
     }
 
     #[test]
@@ -948,9 +1137,15 @@ mod tests {
         // Multimodal requires --full (heavier subsystem with API costs).
         // --expert alone only activates loop_critic (latency-only overhead).
         let mut config = AppConfig::default();
-        let flags = FeatureFlags { expert: true, ..Default::default() };
+        let flags = FeatureFlags {
+            expert: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(!config.multimodal.enabled, "--expert alone must NOT enable multimodal");
+        assert!(
+            !config.multimodal.enabled,
+            "--expert alone must NOT enable multimodal"
+        );
     }
 
     #[test]
@@ -958,27 +1153,47 @@ mod tests {
         let mut config = AppConfig::default();
         // Verify that reasoning (UCB1 engine) is enabled by --full.
         config.reasoning.enabled = false; // ensure starting state
-        let flags = FeatureFlags { full: true, ..Default::default() };
+        let flags = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.reasoning.enabled, "--full must enable reasoning (UCB1/ReasoningEngine)");
+        assert!(
+            config.reasoning.enabled,
+            "--full must enable reasoning (UCB1/ReasoningEngine)"
+        );
     }
 
     #[test]
     fn full_flag_enables_plugins() {
         let mut config = AppConfig::default();
         assert!(!config.plugins.enabled, "plugins default to disabled");
-        let flags = FeatureFlags { full: true, ..Default::default() };
+        let flags = FeatureFlags {
+            full: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.plugins.enabled, "--full must enable the V3 plugin system");
+        assert!(
+            config.plugins.enabled,
+            "--full must enable the V3 plugin system"
+        );
     }
 
     #[test]
     fn non_full_flags_do_not_enable_plugins() {
         // Plugin system requires explicit --full (or manual config.toml edit).
-        let flags = FeatureFlags { expert: true, orchestrate: true, tasks: true, ..Default::default() };
+        let flags = FeatureFlags {
+            expert: true,
+            orchestrate: true,
+            tasks: true,
+            ..Default::default()
+        };
         let mut config = AppConfig::default();
         flags.apply(&mut config);
-        assert!(!config.plugins.enabled, "--expert/--orchestrate/--tasks must NOT auto-enable plugins");
+        assert!(
+            !config.plugins.enabled,
+            "--expert/--orchestrate/--tasks must NOT auto-enable plugins"
+        );
     }
 
     // --- Audit Fix: --expert coherent meta-cognitive loop ---
@@ -990,10 +1205,19 @@ mod tests {
         // --expert. Now --expert enables both so the full meta-cognitive loop is coherent.
         let mut config = AppConfig::default();
         config.reasoning.enabled = false;
-        let flags = FeatureFlags { expert: true, ..Default::default() };
+        let flags = FeatureFlags {
+            expert: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
-        assert!(config.reasoning.enabled, "--expert must enable reasoning/UCB1 (loop_critic needs an engine)");
-        assert!(config.reasoning.enable_loop_critic, "--expert must also enable loop_critic");
+        assert!(
+            config.reasoning.enabled,
+            "--expert must enable reasoning/UCB1 (loop_critic needs an engine)"
+        );
+        assert!(
+            config.reasoning.enable_loop_critic,
+            "--expert must also enable loop_critic"
+        );
     }
 
     #[test]
@@ -1001,8 +1225,14 @@ mod tests {
         // AUDIT FIX: strict_enforcement was defined (Phase 69) and documented as activated by
         // --expert but was never set by any CLI code. Dead config field. Now wired.
         let mut config = AppConfig::default();
-        assert!(!config.task_framework.strict_enforcement, "strict_enforcement defaults to false");
-        let flags = FeatureFlags { expert: true, ..Default::default() };
+        assert!(
+            !config.task_framework.strict_enforcement,
+            "strict_enforcement defaults to false"
+        );
+        let flags = FeatureFlags {
+            expert: true,
+            ..Default::default()
+        };
         flags.apply(&mut config);
         assert!(
             config.task_framework.strict_enforcement,
