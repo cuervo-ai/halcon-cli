@@ -12,31 +12,25 @@
 //! - recommendation: Heuristic engine for suggesting plugins based on project analysis
 //! - auto_bootstrap: Automatic plugin installation from recommendation reports
 
-pub mod registry;
-pub mod loader;
-pub mod manifest;
-pub mod transport;
-pub mod proxy_tool;
-pub mod permission_gate;
+pub mod auto_bootstrap;
 pub mod circuit_breaker;
 pub mod cost_tracker;
+pub mod loader;
+pub mod manifest;
+pub mod permission_gate;
+pub mod proxy_tool;
 pub mod recommendation;
-pub mod auto_bootstrap;
+pub mod registry;
+pub mod transport;
 
 // Re-exports to maintain backward compatibility for callers outside plugins/
-pub use registry::{PluginRegistry, PluginState, LoadedPlugin, InvokeGateResult};
-pub use loader::{PluginLoader, PluginLoaderResult};
-pub use manifest::{
-    PluginManifest, PluginTransport, PluginCategory, ToolCapabilityDescriptor,
-    SandboxContract, SupervisorPolicy, PluginPermissions, PluginMeta, RiskTier,
-};
-pub use transport::{PluginTransportRuntime, TransportHandle, PluginInvokeResult};
-pub use proxy_tool::PluginProxyTool;
-pub use permission_gate::{PluginPermissionGate, PluginPermissionDecision};
-pub use circuit_breaker::{PluginCircuitBreaker, CircuitState};
-pub use cost_tracker::{PluginCostTracker, PluginCostSnapshot, PluginBudgetError};
-pub use recommendation::{PluginRecommendation, PluginRecommendationEngine, RecommendationTier};
 pub use auto_bootstrap::{AutoPluginBootstrap, BootstrapOptions, BootstrapResult};
+pub use cost_tracker::PluginCostSnapshot;
+pub use loader::PluginLoader;
+pub use proxy_tool::PluginProxyTool;
+pub use recommendation::{PluginRecommendationEngine, RecommendationTier};
+pub use registry::{InvokeGateResult, PluginRegistry};
+pub use transport::PluginTransportRuntime;
 
 // C-1: capability files migrated from repl/ root
 pub mod capability_index;
@@ -51,5 +45,3 @@ pub mod tool_speculation;
 
 // Re-exports for capability types
 // capability_index, capability_orchestrator, capability_resolver: pub(crate) types — access via module path
-pub use capability_index::CapabilityIndex;
-pub use tool_manifest::{ToolManifest, ExternalTool, load_external_tools_default};

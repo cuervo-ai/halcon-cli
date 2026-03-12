@@ -4,14 +4,12 @@
 /// performance data, and observability signals.
 /// Phase: Monitoring
 /// Priority: 70
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct RuntimeMetricsServer {
     db: AsyncDatabase,
@@ -38,43 +36,49 @@ impl RuntimeMetricsServer {
 
         tokio::task::spawn_blocking(move || {
             let db_ref = db.inner();
-            let conn = db_ref.conn()
+            let conn = db_ref
+                .conn()
                 .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
             let metrics = if let Some(q) = query_opt {
                 // FTS5 search
-                let mut stmt = conn.prepare(
-                    "SELECT metric_id, metric_name, metric_type, metric_value, labels_json,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT metric_id, metric_name, metric_type, metric_value, labels_json,
                             service_name, environment, severity, message, timestamp
                      FROM runtime_metrics
                      WHERE metric_id IN (
                        SELECT rowid FROM runtime_metrics_fts WHERE runtime_metrics_fts MATCH ?
                      )
                      ORDER BY timestamp DESC
-                     LIMIT 20"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 20",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([q], |row| {
-                    Ok(MetricEntry {
-                        metric_id: row.get(0)?,
-                        metric_name: row.get(1)?,
-                        metric_type: row.get(2)?,
-                        metric_value: row.get(3)?,
-                        labels_json: row.get(4)?,
-                        service_name: row.get(5)?,
-                        environment: row.get(6)?,
-                        severity: row.get(7)?,
-                        message: row.get(8)?,
-                        timestamp: row.get(9)?,
+                let rows = stmt
+                    .query_map([q], |row| {
+                        Ok(MetricEntry {
+                            metric_id: row.get(0)?,
+                            metric_name: row.get(1)?,
+                            metric_type: row.get(2)?,
+                            metric_value: row.get(3)?,
+                            labels_json: row.get(4)?,
+                            service_name: row.get(5)?,
+                            environment: row.get(6)?,
+                            severity: row.get(7)?,
+                            message: row.get(8)?,
+                            timestamp: row.get(9)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
             } else {
                 // No query → return recent metrics (critical/error first, then recent)
-                let mut stmt = conn.prepare(
-                    "SELECT metric_id, metric_name, metric_type, metric_value, labels_json,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT metric_id, metric_name, metric_type, metric_value, labels_json,
                             service_name, environment, severity, message, timestamp
                      FROM runtime_metrics
                      ORDER BY
@@ -86,23 +90,26 @@ impl RuntimeMetricsServer {
                             ELSE 4
                         END,
                         timestamp DESC
-                     LIMIT 20"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 20",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([], |row| {
-                    Ok(MetricEntry {
-                        metric_id: row.get(0)?,
-                        metric_name: row.get(1)?,
-                        metric_type: row.get(2)?,
-                        metric_value: row.get(3)?,
-                        labels_json: row.get(4)?,
-                        service_name: row.get(5)?,
-                        environment: row.get(6)?,
-                        severity: row.get(7)?,
-                        message: row.get(8)?,
-                        timestamp: row.get(9)?,
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(MetricEntry {
+                            metric_id: row.get(0)?,
+                            metric_name: row.get(1)?,
+                            metric_type: row.get(2)?,
+                            metric_value: row.get(3)?,
+                            labels_json: row.get(4)?,
+                            service_name: row.get(5)?,
+                            environment: row.get(6)?,
+                            severity: row.get(7)?,
+                            message: row.get(8)?,
+                            timestamp: row.get(9)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
@@ -140,9 +147,7 @@ impl ContextSource for RuntimeMetricsServer {
     }
 
     async fn gather(&self, query: &ContextQuery) -> Result<Vec<ContextChunk>> {
-        let metrics = self
-            .fetch_metrics(query.user_message.as_deref())
-            .await?;
+        let metrics = self.fetch_metrics(query.user_message.as_deref()).await?;
 
         if metrics.is_empty() {
             return Ok(vec![]);
@@ -167,7 +172,16 @@ impl ContextSource for RuntimeMetricsServer {
             let message_info = if let Some(msg) = &metric.message {
                 // Truncate message to max 400 chars
                 let msg_preview = if msg.len() > 400 {
-                    format!("{}...", &msg[..{ let mut _fcb = (400).min(msg.len()); while _fcb > 0 && !msg.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                    format!(
+                        "{}...",
+                        &msg[..{
+                            let mut _fcb = (400).min(msg.len());
+                            while _fcb > 0 && !msg.is_char_boundary(_fcb) {
+                                _fcb -= 1;
+                            }
+                            _fcb
+                        }]
+                    )
                 } else {
                     msg.clone()
                 };
@@ -189,7 +203,8 @@ impl ContextSource for RuntimeMetricsServer {
                  Type: {}\n\
                  Value: {:.4}\n\
                  Service: {}{}{}\n\
-                 {}{}", metric.metric_name,
+                 {}{}",
+                metric.metric_name,
                 metric.metric_type,
                 metric.metric_value,
                 metric.service_name,
@@ -223,6 +238,8 @@ impl ContextSource for RuntimeMetricsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_runtime_metrics_server_creation() {

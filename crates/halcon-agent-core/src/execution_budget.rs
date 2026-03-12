@@ -10,15 +10,17 @@
 //!
 //! ## Usage
 //!
-//! ```rust,no_run
+//! ```rust
 //! use halcon_agent_core::execution_budget::{BudgetTracker, ExecutionBudget};
 //!
-//! let budget = ExecutionBudget { max_rounds: 20, ..Default::default() };
-//! let mut tracker = BudgetTracker::new(budget);
-//!
-//! // In the agent loop:
-//! tracker.consume_round()?; // returns Err if max_rounds exceeded
-//! tracker.consume_tool_call(1)?;
+//! fn example() -> Result<(), Box<dyn std::error::Error>> {
+//!     let budget = ExecutionBudget { max_rounds: 20, ..Default::default() };
+//!     let mut tracker = BudgetTracker::new(budget);
+//!     // In the agent loop:
+//!     tracker.consume_round()?; // returns Err if max_rounds exceeded
+//!     tracker.consume_tool_calls(1)?;
+//!     Ok(())
+//! }
 //! ```
 
 use std::time::{Duration, Instant};
@@ -285,7 +287,10 @@ mod tests {
 
     #[test]
     fn tool_calls_budget_enforced() {
-        let budget = ExecutionBudget { max_tool_calls: 3, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_tool_calls: 3,
+            ..Default::default()
+        };
         let mut t = BudgetTracker::new(budget);
         assert!(t.consume_tool_calls(3).is_ok());
         assert!(t.consume_tool_calls(1).is_err());
@@ -293,7 +298,10 @@ mod tests {
 
     #[test]
     fn replan_budget_enforced() {
-        let budget = ExecutionBudget { max_replans: 2, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_replans: 2,
+            ..Default::default()
+        };
         let mut t = BudgetTracker::new(budget);
         assert!(t.consume_replan().is_ok());
         assert!(t.consume_replan().is_ok());
@@ -302,7 +310,10 @@ mod tests {
 
     #[test]
     fn token_budget_enforced() {
-        let budget = ExecutionBudget { max_tokens: 1000, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_tokens: 1000,
+            ..Default::default()
+        };
         let mut t = BudgetTracker::new(budget);
         assert!(t.consume_tokens(999).is_ok());
         assert!(t.consume_tokens(2).is_err()); // total = 1001 > 1000
@@ -360,7 +371,10 @@ mod tests {
 
     #[test]
     fn cumulative_tool_calls_aggregated() {
-        let budget = ExecutionBudget { max_tool_calls: 10, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_tool_calls: 10,
+            ..Default::default()
+        };
         let mut t = BudgetTracker::new(budget);
         t.consume_tool_calls(3).unwrap();
         t.consume_tool_calls(3).unwrap();

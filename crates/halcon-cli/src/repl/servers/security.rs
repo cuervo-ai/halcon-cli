@@ -4,14 +4,12 @@
 /// compliance violations, and security audit results.
 /// Phase: Security (cross-cutting)
 /// Priority: 65
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct SecurityServer {
     db: AsyncDatabase,
@@ -39,13 +37,15 @@ impl SecurityServer {
 
         tokio::task::spawn_blocking(move || {
             let db_ref = db.inner();
-            let conn = db_ref.conn()
+            let conn = db_ref
+                .conn()
                 .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
             let findings = if let Some(q) = query_opt {
                 // FTS5 search
-                let mut stmt = conn.prepare(
-                    "SELECT finding_id, finding_type, severity, title, description,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT finding_id, finding_type, severity, title, description,
                             affected_file, affected_line, cve_id, cvss_score, remediation, status
                      FROM security_findings
                      WHERE finding_id IN (
@@ -60,31 +60,35 @@ impl SecurityServer {
                             WHEN 'info' THEN 4
                             ELSE 5
                         END
-                     LIMIT 12"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 12",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([q], |row| {
-                    Ok(SecurityFinding {
-                        finding_id: row.get(0)?,
-                        finding_type: row.get(1)?,
-                        severity: row.get(2)?,
-                        title: row.get(3)?,
-                        description: row.get(4)?,
-                        affected_file: row.get(5)?,
-                        affected_line: row.get(6)?,
-                        cve_id: row.get(7)?,
-                        cvss_score: row.get(8)?,
-                        remediation: row.get(9)?,
-                        status: row.get(10)?,
+                let rows = stmt
+                    .query_map([q], |row| {
+                        Ok(SecurityFinding {
+                            finding_id: row.get(0)?,
+                            finding_type: row.get(1)?,
+                            severity: row.get(2)?,
+                            title: row.get(3)?,
+                            description: row.get(4)?,
+                            affected_file: row.get(5)?,
+                            affected_line: row.get(6)?,
+                            cve_id: row.get(7)?,
+                            cvss_score: row.get(8)?,
+                            remediation: row.get(9)?,
+                            status: row.get(10)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
             } else {
                 // No query → return critical/high severity open findings first
-                let mut stmt = conn.prepare(
-                    "SELECT finding_id, finding_type, severity, title, description,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT finding_id, finding_type, severity, title, description,
                             affected_file, affected_line, cve_id, cvss_score, remediation, status
                      FROM security_findings
                      WHERE status IN ('open', 'acknowledged', 'in_progress')
@@ -97,24 +101,27 @@ impl SecurityServer {
                             WHEN 'info' THEN 4
                             ELSE 5
                         END
-                     LIMIT 12"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 12",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([], |row| {
-                    Ok(SecurityFinding {
-                        finding_id: row.get(0)?,
-                        finding_type: row.get(1)?,
-                        severity: row.get(2)?,
-                        title: row.get(3)?,
-                        description: row.get(4)?,
-                        affected_file: row.get(5)?,
-                        affected_line: row.get(6)?,
-                        cve_id: row.get(7)?,
-                        cvss_score: row.get(8)?,
-                        remediation: row.get(9)?,
-                        status: row.get(10)?,
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(SecurityFinding {
+                            finding_id: row.get(0)?,
+                            finding_type: row.get(1)?,
+                            severity: row.get(2)?,
+                            title: row.get(3)?,
+                            description: row.get(4)?,
+                            affected_file: row.get(5)?,
+                            affected_line: row.get(6)?,
+                            cve_id: row.get(7)?,
+                            cvss_score: row.get(8)?,
+                            remediation: row.get(9)?,
+                            status: row.get(10)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
@@ -153,9 +160,7 @@ impl ContextSource for SecurityServer {
     }
 
     async fn gather(&self, query: &ContextQuery) -> Result<Vec<ContextChunk>> {
-        let findings = self
-            .fetch_findings(query.user_message.as_deref())
-            .await?;
+        let findings = self.fetch_findings(query.user_message.as_deref()).await?;
 
         if findings.is_empty() {
             return Ok(vec![]);
@@ -197,7 +202,16 @@ impl ContextSource for SecurityServer {
             let remediation_info = if let Some(rem) = &finding.remediation {
                 // Truncate remediation to max 500 chars
                 let rem_preview = if rem.len() > 500 {
-                    format!("{}...", &rem[..{ let mut _fcb = (500).min(rem.len()); while _fcb > 0 && !rem.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                    format!(
+                        "{}...",
+                        &rem[..{
+                            let mut _fcb = (500).min(rem.len());
+                            while _fcb > 0 && !rem.is_char_boundary(_fcb) {
+                                _fcb -= 1;
+                            }
+                            _fcb
+                        }]
+                    )
                 } else {
                     rem.clone()
                 };
@@ -214,7 +228,8 @@ impl ContextSource for SecurityServer {
                  Status: {}\n\
                  {}{}\
                  Description:\n{}\n\
-                 {}", finding.title,
+                 {}",
+                finding.title,
                 finding.finding_type,
                 finding.severity.to_uppercase(),
                 finding.status,
@@ -248,6 +263,8 @@ impl ContextSource for SecurityServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_security_server_creation() {

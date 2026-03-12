@@ -17,7 +17,7 @@ use super::capability_index::CapabilityIndex;
 use super::capability_resolver::CapabilityResolver;
 use super::circuit_breaker::PluginCircuitBreaker;
 use super::cost_tracker::{PluginCostSnapshot, PluginCostTracker};
-use super::manifest::{PluginManifest, RiskTier};
+use super::manifest::PluginManifest;
 use super::permission_gate::{PluginPermissionDecision, PluginPermissionGate};
 
 // ─── UCB1 Arm ─────────────────────────────────────────────────────────────────
@@ -31,7 +31,11 @@ struct PluginUcbArm {
 
 impl PluginUcbArm {
     fn avg_reward(&self) -> f64 {
-        if self.n_uses == 0 { 0.5 } else { self.sum_rewards / self.n_uses as f64 }
+        if self.n_uses == 0 {
+            0.5
+        } else {
+            self.sum_rewards / self.n_uses as f64
+        }
     }
 
     fn ucb1_score(&self, total_uses: u32, c: f64) -> f64 {
@@ -131,7 +135,10 @@ impl PluginRegistry {
         );
         self.plugins.insert(
             plugin_id.clone(),
-            LoadedPlugin { manifest, state: PluginState::Active },
+            LoadedPlugin {
+                manifest,
+                state: PluginState::Active,
+            },
         );
 
         // Rebuild capability index after every registration
@@ -141,7 +148,12 @@ impl PluginRegistry {
     /// Pre-invoke gate: check circuit breaker + cost budget + permissions.
     ///
     /// Returns `Deny(reason)` when the call should be blocked; `Proceed` otherwise.
-    pub fn pre_invoke_gate(&self, plugin_id: &str, tool_name: &str, budget_low: bool) -> InvokeGateResult {
+    pub fn pre_invoke_gate(
+        &self,
+        plugin_id: &str,
+        tool_name: &str,
+        budget_low: bool,
+    ) -> InvokeGateResult {
         // Plugin must exist and be in an invocable state
         let plugin = match self.plugins.get(plugin_id) {
             Some(p) => p,
@@ -192,7 +204,11 @@ impl PluginRegistry {
         }
 
         // Permission gate: find the capability descriptor
-        let cap = plugin.manifest.capabilities.iter().find(|c| c.name == tool_name);
+        let cap = plugin
+            .manifest
+            .capabilities
+            .iter()
+            .find(|c| c.name == tool_name);
         if let Some(cap) = cap {
             let decision = self.permission_gate.evaluate(plugin_id, cap, budget_low);
             match decision {
@@ -225,7 +241,12 @@ impl PluginRegistry {
     ///
     /// Prefer this over `pre_invoke_gate()` when the caller already has `&mut PluginRegistry`.
     /// The state transition is required for `try_half_open()` to work correctly.
-    pub fn pre_invoke_gate_mut(&mut self, plugin_id: &str, tool_name: &str, budget_low: bool) -> InvokeGateResult {
+    pub fn pre_invoke_gate_mut(
+        &mut self,
+        plugin_id: &str,
+        tool_name: &str,
+        budget_low: bool,
+    ) -> InvokeGateResult {
         // Attempt half-open transition before delegating to the immutable gate.
         // try_half_open() returns true only when the cooldown has elapsed AND the circuit
         // was Open; in that case we allow one probe call through (HalfOpen state).
@@ -278,7 +299,9 @@ impl PluginRegistry {
                 // Update to Degraded state
                 if let Some(p) = self.plugins.get_mut(plugin_id) {
                     let consec = cb.consecutive_failures();
-                    p.state = PluginState::Degraded { consecutive_failures: consec };
+                    p.state = PluginState::Degraded {
+                        consecutive_failures: consec,
+                    };
                 }
             }
         }
@@ -310,9 +333,10 @@ impl PluginRegistry {
     /// Reward is clamped to [0.0, 1.0]. Accumulated per arm; UCB1 uses the total
     /// count across ALL arms as `t` (promotes exploration of under-used plugins).
     pub fn record_reward(&mut self, plugin_id: &str, reward: f64) {
-        let arm = self.plugin_bandits
+        let arm = self
+            .plugin_bandits
             .entry(plugin_id.to_string())
-            .or_insert_with(PluginUcbArm::default);
+            .or_default();
         arm.n_uses += 1;
         arm.sum_rewards += reward.clamp(0.0, 1.0);
     }
@@ -327,23 +351,34 @@ impl PluginRegistry {
             .iter()
             .filter(|(_, p)| p.state.is_active())
             .filter(|(_, p)| {
-                p.manifest.capabilities.iter().any(|c| c.name.contains(capability_tag))
+                p.manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c.name.contains(capability_tag))
             })
             .max_by(|(id_a, _), (id_b, _)| {
-                let score_a = self.plugin_bandits.get(*id_a)
+                let score_a = self
+                    .plugin_bandits
+                    .get(*id_a)
                     .map(|a| a.ucb1_score(total, 1.4))
                     .unwrap_or(f64::MAX);
-                let score_b = self.plugin_bandits.get(*id_b)
+                let score_b = self
+                    .plugin_bandits
+                    .get(*id_b)
                     .map(|b| b.ucb1_score(total, 1.4))
                     .unwrap_or(f64::MAX);
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(id, _)| id.as_str())
     }
 
     /// Average reward for a plugin (0.5 if no data yet).
     pub fn plugin_avg_reward(&self, plugin_id: &str) -> f64 {
-        self.plugin_bandits.get(plugin_id).map_or(0.5, |a| a.avg_reward())
+        self.plugin_bandits
+            .get(plugin_id)
+            .map_or(0.5, |a| a.avg_reward())
     }
 
     /// Snapshot UCB1 arm data as (plugin_id, n_uses, sum_rewards) for persistence.
@@ -357,20 +392,19 @@ impl PluginRegistry {
     /// Seed UCB1 arms from persisted data (loaded at session start).
     pub fn seed_ucb1_from_metrics(&mut self, seeds: &[(String, i64, f64)]) {
         for (plugin_id, n_uses, sum_rewards) in seeds {
-            let arm = self.plugin_bandits
-                .entry(plugin_id.clone())
-                .or_insert_with(PluginUcbArm::default);
+            let arm = self.plugin_bandits.entry(plugin_id.clone()).or_default();
             arm.n_uses = (*n_uses as u32).max(arm.n_uses);
-            arm.sum_rewards = if arm.n_uses > 0 { *sum_rewards } else { arm.sum_rewards };
+            arm.sum_rewards = if arm.n_uses > 0 {
+                *sum_rewards
+            } else {
+                arm.sum_rewards
+            };
         }
     }
 
     /// Collect cost snapshots for all registered plugins (for AgentLoopResult).
     pub fn cost_snapshot(&self) -> Vec<PluginCostSnapshot> {
-        self.cost_trackers
-            .values()
-            .map(|t| t.snapshot())
-            .collect()
+        self.cost_trackers.values().map(|t| t.snapshot()).collect()
     }
 
     /// Resolve a plugin ID for a tool name that uses the "plugin_<id>_<tool>" prefix pattern.
@@ -397,7 +431,10 @@ impl PluginRegistry {
 
     /// Count of active plugins.
     pub fn active_plugin_count(&self) -> usize {
-        self.plugins.values().filter(|p| p.state.is_active()).count()
+        self.plugins
+            .values()
+            .filter(|p| p.state.is_active())
+            .count()
     }
 
     /// Access the capability resolver (for plan step routing).
@@ -410,7 +447,9 @@ impl PluginRegistry {
     /// Used by the Repl to create `PluginProxyTool` instances and register them in
     /// the session `ToolRegistry` after `PluginLoader::load_into()` completes.
     pub fn loaded_plugins(&self) -> impl Iterator<Item = (&str, &PluginManifest)> {
-        self.plugins.iter().map(|(id, p)| (id.as_str(), &p.manifest))
+        self.plugins
+            .iter()
+            .map(|(id, p)| (id.as_str(), &p.manifest))
     }
 
     /// Iterate over all loaded plugin IDs.
@@ -432,10 +471,8 @@ impl PluginRegistry {
     pub fn auto_disable(&mut self, plugin_id: &str, reason: &str, duration: Duration) {
         self.suspend_plugin(plugin_id, reason.to_string());
         if !duration.is_zero() {
-            self.cooling_periods.insert(
-                plugin_id.to_string(),
-                std::time::Instant::now() + duration,
-            );
+            self.cooling_periods
+                .insert(plugin_id.to_string(), std::time::Instant::now() + duration);
         }
     }
 
@@ -562,20 +599,23 @@ impl Default for PluginRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::super::manifest::{PluginManifest, RiskTier, ToolCapabilityDescriptor};
     use super::*;
-    use super::super::manifest::{PluginManifest, ToolCapabilityDescriptor};
 
     fn make_manifest(id: &str) -> PluginManifest {
-        PluginManifest::new_local(id, id, "1.0.0", vec![
-            ToolCapabilityDescriptor {
+        PluginManifest::new_local(
+            id,
+            id,
+            "1.0.0",
+            vec![ToolCapabilityDescriptor {
                 name: format!("plugin_{}_run", id.replace('-', "_")),
                 description: format!("Run a task in {id}"),
                 risk_tier: RiskTier::Low,
                 idempotent: false,
                 permission_level: halcon_core::types::PermissionLevel::ReadOnly,
                 budget_tokens_per_call: 100,
-            },
-        ])
+            }],
+        )
     }
 
     #[test]
@@ -625,7 +665,10 @@ mod tests {
         reg.post_invoke("tracker-plugin", "tool", 150, 0.01, true, None);
 
         let snap = reg.cost_snapshot();
-        let tracker_snap = snap.iter().find(|s| s.plugin_id == "tracker-plugin").unwrap();
+        let tracker_snap = snap
+            .iter()
+            .find(|s| s.plugin_id == "tracker-plugin")
+            .unwrap();
         assert_eq!(tracker_snap.tokens_used, 150);
         assert_eq!(tracker_snap.calls_made, 1);
     }
@@ -730,16 +773,19 @@ mod tests {
         // not fall through to Proceed. Without an interactive confirmation prompt
         // wired in Phase 9, fail-closed is the only safe default.
         let mut reg = PluginRegistry::new();
-        let manifest = PluginManifest::new_local("high-risk-plugin", "high-risk-plugin", "1.0.0", vec![
-            ToolCapabilityDescriptor {
+        let manifest = PluginManifest::new_local(
+            "high-risk-plugin",
+            "high-risk-plugin",
+            "1.0.0",
+            vec![ToolCapabilityDescriptor {
                 name: "high_risk_plugin_analyze".into(),
                 description: "Sensitive data analysis requiring confirmation".into(),
                 risk_tier: RiskTier::High, // High → NeedsConfirmation from permission gate
                 idempotent: false,
                 permission_level: halcon_core::types::PermissionLevel::Destructive,
                 budget_tokens_per_call: 500,
-            },
-        ]);
+            }],
+        );
         reg.register(manifest);
 
         let result = reg.pre_invoke_gate("high-risk-plugin", "high_risk_plugin_analyze", false);
@@ -777,8 +823,10 @@ mod tests {
         let mut reg = PluginRegistry::new();
         reg.register(make_manifest("normal-plugin"));
 
-        let immutable_result = reg.pre_invoke_gate("normal-plugin", "plugin_normal_plugin_run", false);
-        let mutable_result = reg.pre_invoke_gate_mut("normal-plugin", "plugin_normal_plugin_run", false);
+        let immutable_result =
+            reg.pre_invoke_gate("normal-plugin", "plugin_normal_plugin_run", false);
+        let mutable_result =
+            reg.pre_invoke_gate_mut("normal-plugin", "plugin_normal_plugin_run", false);
 
         assert_eq!(
             matches!(immutable_result, InvokeGateResult::Proceed),
@@ -820,7 +868,9 @@ mod tests {
 
         // 4. cost_snapshot() should show calls_made = 1, tokens_used = 100.
         let snaps = reg.cost_snapshot();
-        let snap = snaps.iter().find(|s| s.plugin_id == plugin_id)
+        let snap = snaps
+            .iter()
+            .find(|s| s.plugin_id == plugin_id)
             .expect("e2e-plugin must appear in cost snapshot");
         assert_eq!(snap.calls_made, 1, "calls_made after one success");
         assert_eq!(snap.calls_failed, 0, "calls_failed after success");
@@ -876,11 +926,11 @@ mod tests {
     /// the ToolRegistry — this is the Phase 8-A (P1 fix) wiring contract.
     #[tokio::test]
     async fn proxy_tool_registered_in_tool_registry_is_callable() {
-        use std::sync::Arc;
-        use crate::repl::plugins::transport::{PluginTransportRuntime, TransportHandle};
         use crate::repl::plugins::proxy_tool::PluginProxyTool;
-        use halcon_tools::ToolRegistry;
+        use crate::repl::plugins::transport::{PluginTransportRuntime, TransportHandle};
         use halcon_core::types::ToolInput;
+        use halcon_tools::ToolRegistry;
+        use std::sync::Arc;
 
         // Build a registry with one Local-transport plugin (no subprocess needed).
         let mut reg = PluginRegistry::new();
@@ -927,7 +977,10 @@ mod tests {
             arguments: serde_json::json!({"action": "ping"}),
             working_directory: "/tmp".into(),
         };
-        let output = tool.execute(input).await.expect("Local transport must not error");
+        let output = tool
+            .execute(input)
+            .await
+            .expect("Local transport must not error");
         assert!(!output.is_error, "Local transport must return success");
         assert_eq!(output.tool_use_id, "test-invoke-001");
     }
@@ -944,7 +997,14 @@ mod tests {
 
         // Trip the circuit breaker.
         let tool = "plugin_cooldown_test_run";
-        reg.post_invoke("cooldown-test", tool, 0, 0.0, false, Some("connection refused"));
+        reg.post_invoke(
+            "cooldown-test",
+            tool,
+            0,
+            0.0,
+            false,
+            Some("connection refused"),
+        );
 
         // Both immutable and mutable gate should deny during cooldown.
         let imm = reg.pre_invoke_gate("cooldown-test", tool, false);
@@ -1027,10 +1087,20 @@ mod tests {
         reg.register(manifest);
 
         // Record one failure (threshold=5, so stays Degraded not Failed)
-        reg.post_invoke("fragile-plugin", "plugin_fragile_plugin_run", 0, 0.0, false, None);
+        reg.post_invoke(
+            "fragile-plugin",
+            "plugin_fragile_plugin_run",
+            0,
+            0.0,
+            false,
+            None,
+        );
 
         let snap = reg.circuit_state_snapshot();
-        let entry = snap.iter().find(|(id, _, _)| id == "fragile-plugin").unwrap();
+        let entry = snap
+            .iter()
+            .find(|(id, _, _)| id == "fragile-plugin")
+            .unwrap();
         assert_eq!(entry.1, "degraded");
         assert_eq!(entry.2, 1u32);
     }
@@ -1043,10 +1113,20 @@ mod tests {
         reg.register(manifest);
 
         // One failure trips circuit at threshold=1 → Failed state
-        reg.post_invoke("brittle-plugin", "plugin_brittle_plugin_run", 0, 0.0, false, Some("fatal"));
+        reg.post_invoke(
+            "brittle-plugin",
+            "plugin_brittle_plugin_run",
+            0,
+            0.0,
+            false,
+            Some("fatal"),
+        );
 
         let snap = reg.circuit_state_snapshot();
-        let entry = snap.iter().find(|(id, _, _)| id == "brittle-plugin").unwrap();
+        let entry = snap
+            .iter()
+            .find(|(id, _, _)| id == "brittle-plugin")
+            .unwrap();
         assert_eq!(entry.1, "failed");
     }
 
@@ -1067,7 +1147,9 @@ mod tests {
 
         assert!(matches!(
             reg.plugins.get("resume-plugin").map(|p| &p.state),
-            Some(PluginState::Degraded { consecutive_failures: 2 })
+            Some(PluginState::Degraded {
+                consecutive_failures: 2
+            })
         ));
     }
 
@@ -1084,7 +1166,8 @@ mod tests {
             Some(PluginState::Failed { .. })
         ));
         // Pre-invoke gate should deny a failed plugin
-        let result = reg.pre_invoke_gate("previously-failed", "plugin_previously_failed_run", false);
+        let result =
+            reg.pre_invoke_gate("previously-failed", "plugin_previously_failed_run", false);
         assert!(matches!(result, InvokeGateResult::Deny(_)));
     }
 
@@ -1094,7 +1177,11 @@ mod tests {
         reg.register(make_manifest("known-plugin"));
 
         // Seed a non-existent plugin — should not panic, should be silently ignored
-        let states = vec![("nonexistent-plugin".to_string(), "degraded".to_string(), 5u32)];
+        let states = vec![(
+            "nonexistent-plugin".to_string(),
+            "degraded".to_string(),
+            5u32,
+        )];
         reg.seed_circuit_states(&states);
 
         // Known plugin unchanged

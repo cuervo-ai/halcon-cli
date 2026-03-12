@@ -10,20 +10,10 @@
 //!
 //! All simulations are synthetic (no real LLM/tool calls) — deterministic via seeded RNG.
 
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{
-    confidence_hysteresis::{ConfidenceHysteresis, HysteresisConfig},
-    critic::{CriticConfig, CriticSignal, InLoopCritic, RoundMetrics},
-    execution_budget::{BudgetTracker, ExecutionBudget},
-    goal::{CriterionKind, GoalSpec, VerifiableCriterion},
-    metrics::GoalAlignmentScore,
-    oscillation_metric::OscillationTracker,
-    strategy::{StrategyLearner, StrategyLearnerConfig},
-};
+use crate::goal::{CriterionKind, GoalSpec, VerifiableCriterion};
 
 // ─── HorizonMetrics ───────────────────────────────────────────────────────────
 
@@ -41,6 +31,7 @@ pub struct HorizonMetrics {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn long_goal(max_rounds: u32) -> GoalSpec {
     GoalSpec {
         id: Uuid::new_v4(),
@@ -48,7 +39,9 @@ fn long_goal(max_rounds: u32) -> GoalSpec {
         criteria: vec![VerifiableCriterion {
             description: "done".into(),
             weight: 1.0,
-            kind: CriterionKind::KeywordPresence { keywords: vec!["done".into()] },
+            kind: CriterionKind::KeywordPresence {
+                keywords: vec!["done".into()],
+            },
             threshold: 0.8,
         }],
         completion_threshold: 0.8,
@@ -62,6 +55,16 @@ fn long_goal(max_rounds: u32) -> GoalSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        confidence_hysteresis::{ConfidenceHysteresis, HysteresisConfig},
+        critic::{CriticConfig, CriticSignal, InLoopCritic, RoundMetrics},
+        execution_budget::{BudgetTracker, ExecutionBudget},
+        fsm::{AgentFsm, AgentState},
+        metrics::GoalAlignmentScore,
+        oscillation_metric::OscillationTracker,
+        strategy::{StrategyLearner, StrategyLearnerConfig},
+    };
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     // ─── UCB1 50k round tests ─────────────────────────────────────────────────
 
@@ -83,7 +86,11 @@ mod tests {
         // All arms must have been selected at least once
         let stats = learner.arm_stats();
         for arm in &stats {
-            assert!(arm.pulls > 0, "arm {:?} never selected in 50k rounds", arm.name);
+            assert!(
+                arm.pulls > 0,
+                "arm {:?} never selected in 50k rounds",
+                arm.name
+            );
         }
 
         // Total pulls must equal 50k
@@ -116,7 +123,13 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
 
         // Warmup: pull each arm once to give all a mean
-        for arm in &["direct_tool", "plan_first", "multi_step", "exploratory", "goal_driven"] {
+        for arm in &[
+            "direct_tool",
+            "plan_first",
+            "multi_step",
+            "exploratory",
+            "goal_driven",
+        ] {
             learner.record_outcome(arm, 0.1, Uuid::new_v4());
         }
 
@@ -124,9 +137,9 @@ mod tests {
         for _ in 0u64..5_000 {
             let strategy = learner.select().to_string();
             let reward = if strategy == "goal_driven" {
-                (0.8 + rng.gen_range(-0.05_f64..0.05)).clamp(0.0, 1.0)
+                (0.8 + rng.gen_range(-0.05_f64..0.05_f64)).clamp(0.0_f64, 1.0_f64)
             } else {
-                (0.2 + rng.gen_range(-0.05_f64..0.05)).clamp(0.0, 1.0)
+                (0.2 + rng.gen_range(-0.05_f64..0.05_f64)).clamp(0.0_f64, 1.0_f64)
             };
             learner.record_outcome(&strategy, reward, Uuid::new_v4());
         }
@@ -151,7 +164,10 @@ mod tests {
 
         // All arms explored
         let stats = learner.arm_stats();
-        assert!(stats.iter().all(|a| a.pulls > 0), "all arms must be explored");
+        assert!(
+            stats.iter().all(|a| a.pulls > 0),
+            "all arms must be explored"
+        );
 
         // At least 2 arms with >1% of total pulls (entropy > 0)
         let total = learner.total_pulls();
@@ -266,8 +282,14 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(456);
         let signals = [
             CriticSignal::Continue,
-            CriticSignal::Replan { reason: "s".into(), alignment_score: 0.3 },
-            CriticSignal::InjectHint { hint: "h".into(), alignment_score: 0.5 },
+            CriticSignal::Replan {
+                reason: "s".into(),
+                alignment_score: 0.3,
+            },
+            CriticSignal::InjectHint {
+                hint: "h".into(),
+                alignment_score: 0.5,
+            },
         ];
 
         for _ in 0..1_000 {
@@ -299,9 +321,15 @@ mod tests {
             let raw_signal = if noise > 0.01 {
                 CriticSignal::Continue
             } else if noise < -0.01 {
-                CriticSignal::Replan { reason: "s".into(), alignment_score: confidence }
+                CriticSignal::Replan {
+                    reason: "s".into(),
+                    alignment_score: confidence,
+                }
             } else {
-                CriticSignal::InjectHint { hint: "h".into(), alignment_score: confidence }
+                CriticSignal::InjectHint {
+                    hint: "h".into(),
+                    alignment_score: confidence,
+                }
             };
 
             let filtered_signal = hysteresis.apply(raw_signal.clone(), confidence);
@@ -328,7 +356,10 @@ mod tests {
     #[test]
     fn budget_exhausts_deterministically_at_1k_rounds() {
         let max_rounds = 1_000u32;
-        let budget = ExecutionBudget { max_rounds, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_rounds,
+            ..Default::default()
+        };
         let mut tracker = BudgetTracker::new(budget);
         let mut rounds_run = 0u32;
         loop {
@@ -345,7 +376,10 @@ mod tests {
     #[test]
     fn budget_fraction_monotone_increasing() {
         let max_rounds = 100u32;
-        let budget = ExecutionBudget { max_rounds, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_rounds,
+            ..Default::default()
+        };
         let mut tracker = BudgetTracker::new(budget);
         let mut last_fraction = 0.0f32;
         for _ in 0..max_rounds {
@@ -448,6 +482,10 @@ mod tests {
         states_seen.insert(format!("{:?}", *fsm3.state()));
 
         // We expect: Idle, Planning, Executing, Verifying, Replanning, Converged, Error, Terminating = 8
-        assert!(states_seen.len() >= 7, "only {} distinct states seen", states_seen.len());
+        assert!(
+            states_seen.len() >= 7,
+            "only {} distinct states seen",
+            states_seen.len()
+        );
     }
 }

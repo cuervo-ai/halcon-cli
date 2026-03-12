@@ -4,14 +4,12 @@
 /// system diagrams, and technical specifications.
 /// Phase: Planning
 /// Priority: 90
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct ArchitectureServer {
     db: AsyncDatabase,
@@ -176,6 +174,8 @@ impl ContextSource for ArchitectureServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_architecture_server_creation() {

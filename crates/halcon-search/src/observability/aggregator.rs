@@ -3,7 +3,7 @@
 //! Periodically aggregates query instrumentations into time-series snapshots,
 //! computes trends, and detects regressions.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time;
@@ -12,7 +12,7 @@ use super::{
     AggregationWindow, MetricsSnapshot, ObservabilityStore, QueryMetrics, RegressionDetector,
     SnapshotStore, TimeSeriesMetrics,
 };
-use crate::{Result, SearchError};
+use crate::Result;
 
 /// Configuration for the metrics aggregator.
 #[derive(Debug, Clone)]
@@ -40,7 +40,7 @@ impl Default for AggregatorConfig {
     fn default() -> Self {
         Self {
             window: AggregationWindow::FiveMinutes,
-            max_windows: 288, // 24 hours of 5-minute windows
+            max_windows: 288,   // 24 hours of 5-minute windows
             interval_secs: 300, // 5 minutes
             detect_regressions: true,
             min_samples_per_window: 1,
@@ -117,7 +117,9 @@ impl MetricsAggregator {
         );
 
         // Fetch instrumentations from current window
-        let instrumentations = self.fetch_window_instrumentations(window_start, now).await?;
+        let instrumentations = self
+            .fetch_window_instrumentations(window_start, now)
+            .await?;
 
         if instrumentations.len() < self.config.min_samples_per_window {
             tracing::debug!(
@@ -151,10 +153,7 @@ impl MetricsAggregator {
             let alerts = self.detector.detect(&ts_snapshot, &metrics);
 
             if !alerts.is_empty() {
-                tracing::warn!(
-                    "Detected {} regression(s) in current window",
-                    alerts.len()
-                );
+                tracing::warn!("Detected {} regression(s) in current window", alerts.len());
 
                 for alert in &alerts {
                     tracing::warn!(
@@ -195,9 +194,7 @@ impl MetricsAggregator {
 
         let filtered: Vec<_> = recent
             .into_iter()
-            .filter(|instr| {
-                instr.started_at >= window_start && instr.started_at < window_end
-            })
+            .filter(|instr| instr.started_at >= window_start && instr.started_at < window_end)
             .collect();
 
         Ok(filtered)
@@ -255,6 +252,7 @@ impl MetricsAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
     use crate::observability::{QueryInstrumentation, SnapshotStore};
     use halcon_storage::Database;
 

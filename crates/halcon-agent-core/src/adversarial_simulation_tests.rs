@@ -14,13 +14,10 @@ use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
 use crate::{
-    confidence_hysteresis::{ConfidenceHysteresis, HysteresisConfig},
-    critic::{CriticConfig, CriticSignal, InLoopCritic, RoundMetrics},
-    execution_budget::{BudgetExceeded, BudgetTracker, ExecutionBudget},
+    critic::{CriticConfig, InLoopCritic, RoundMetrics},
     failure_injection::{FailureInjectionHarness, FailureMode},
-    goal::{ConfidenceScore, CriterionKind, GoalSpec, VerifiableCriterion},
-    invariants::check_confidence_invariant,
-    metrics::{GoalAlignmentScore, ReplanEfficiencyRatio, SandboxContainmentRate},
+    goal::{CriterionKind, GoalSpec, VerifiableCriterion},
+    metrics::GoalAlignmentScore,
     oscillation_metric::OscillationTracker,
 };
 
@@ -52,7 +49,9 @@ fn adversarial_goal() -> GoalSpec {
         criteria: vec![VerifiableCriterion {
             description: "done".into(),
             weight: 1.0,
-            kind: CriterionKind::KeywordPresence { keywords: vec!["done".into()] },
+            kind: CriterionKind::KeywordPresence {
+                keywords: vec!["done".into()],
+            },
             threshold: 0.8,
         }],
         completion_threshold: 0.8,
@@ -81,7 +80,9 @@ pub fn run_convergence_simulation(
     let mut oscillation = OscillationTracker::new();
     let mut harness = FailureInjectionHarness::new(
         seed.wrapping_add(1),
-        vec![FailureMode::ToolTimeout { probability: failure_prob }],
+        vec![FailureMode::ToolTimeout {
+            probability: failure_prob,
+        }],
     );
 
     let mut confidence = 0.0f32;
@@ -95,9 +96,9 @@ pub fn run_convergence_simulation(
 
         let pre = confidence;
         let delta: f32 = if tool_success {
-            rng.gen_range(0.04_f32..0.20_f32)
+            rng.random_range(0.04_f32..0.20_f32)
         } else {
-            rng.gen_range(-0.01_f32..0.03_f32) // near-zero — may regress
+            rng.random_range(-0.01_f32..0.03_f32) // near-zero — may regress
         };
         confidence = (pre + delta).clamp(0.0, 1.0);
 
@@ -111,7 +112,11 @@ pub fn run_convergence_simulation(
         let metrics = RoundMetrics {
             pre_confidence: pre,
             post_confidence: confidence,
-            tools_invoked: if tool_success { vec!["bash".into()] } else { vec![] },
+            tools_invoked: if tool_success {
+                vec!["bash".into()]
+            } else {
+                vec![]
+            },
             had_errors: !tool_success,
             round,
             max_rounds,
@@ -155,10 +160,18 @@ pub fn run_convergence_simulation(
 mod tests {
     use super::*;
     use crate::{
+        confidence_hysteresis::{ConfidenceHysteresis, HysteresisConfig},
+        critic::{CriticConfig, CriticSignal, InLoopCritic, RoundMetrics},
+        execution_budget::{BudgetExceeded, BudgetTracker, ExecutionBudget},
         fsm::{AgentFsm, AgentState},
+        goal::ConfidenceScore,
+        invariants::check_confidence_invariant,
+        metrics::{GoalAlignmentScore, ReplanEfficiencyRatio, SandboxContainmentRate},
+        oscillation_metric::OscillationTracker,
         strategy::{StrategyLearner, StrategyLearnerConfig},
     };
     use proptest::prelude::*;
+    use rand::{Rng, SeedableRng};
 
     // ─── Convergence stability ────────────────────────────────────────────────
 
@@ -242,7 +255,12 @@ mod tests {
         for v in [0.0f32, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
             let score = ConfidenceScore::new(v);
             let violations = check_confidence_invariant(score, 0.5);
-            assert!(violations.is_empty(), "violations at v={}: {:?}", v, violations);
+            assert!(
+                violations.is_empty(),
+                "violations at v={}: {:?}",
+                v,
+                violations
+            );
         }
     }
 
@@ -290,7 +308,10 @@ mod tests {
                 injected_successes += 1;
             }
         }
-        assert_eq!(injected_successes, 50, "all 50 errors should be flipped to success");
+        assert_eq!(
+            injected_successes, 50,
+            "all 50 errors should be flipped to success"
+        );
     }
 
     // ─── FSM adversarial correctness ─────────────────────────────────────────
@@ -307,7 +328,11 @@ mod tests {
             AgentState::Replanning,
         ] {
             let result = fsm.transition(invalid.clone());
-            assert!(result.is_err(), "transition to {:?} from Idle should fail", invalid);
+            assert!(
+                result.is_err(),
+                "transition to {:?} from Idle should fail",
+                invalid
+            );
             // State must remain Idle after rejected transition
             assert_eq!(*fsm.state(), AgentState::Idle);
         }
@@ -391,7 +416,10 @@ mod tests {
 
     #[test]
     fn budget_terminates_at_max_rounds() {
-        let budget = ExecutionBudget { max_rounds: 10, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_rounds: 10,
+            ..Default::default()
+        };
         let mut tracker = BudgetTracker::new(budget);
         let mut exceeded = false;
         let mut actual_rounds = 0u32;
@@ -409,7 +437,10 @@ mod tests {
     #[test]
     fn random_adversarial_cannot_exceed_max_rounds() {
         let max_rounds = 15u32;
-        let budget = ExecutionBudget { max_rounds, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_rounds,
+            ..Default::default()
+        };
         let mut tracker = BudgetTracker::new(budget);
         let mut rounds_run = 0u32;
         loop {
@@ -424,19 +455,28 @@ mod tests {
 
     #[test]
     fn repeated_replan_cycles_exhaust_replan_budget() {
-        let budget = ExecutionBudget { max_replans: 3, ..Default::default() };
+        let budget = ExecutionBudget {
+            max_replans: 3,
+            ..Default::default()
+        };
         let mut tracker = BudgetTracker::new(budget);
         for _ in 0..3 {
             assert!(tracker.consume_replan().is_ok());
         }
-        assert!(matches!(tracker.consume_replan(), Err(BudgetExceeded::Replans { .. })));
+        assert!(matches!(
+            tracker.consume_replan(),
+            Err(BudgetExceeded::Replans { .. })
+        ));
     }
 
     // ─── Hysteresis stability ─────────────────────────────────────────────────
 
     #[test]
     fn hysteresis_suppresses_oscillation_in_small_delta_regime() {
-        let config = HysteresisConfig { epsilon: 0.05, required_consecutive: 2 };
+        let config = HysteresisConfig {
+            epsilon: 0.05,
+            required_consecutive: 2,
+        };
         let mut hysteresis = ConfidenceHysteresis::new(config);
 
         // Baseline: large delta passes through
@@ -446,7 +486,10 @@ mod tests {
         // 10 alternating signals in small-delta regime
         for i in 0..10 {
             let signal = if i % 2 == 0 {
-                CriticSignal::Replan { reason: "stall".into(), alignment_score: 0.5 }
+                CriticSignal::Replan {
+                    reason: "stall".into(),
+                    alignment_score: 0.5,
+                }
             } else {
                 CriticSignal::Continue
             };
@@ -503,7 +546,11 @@ mod tests {
         let stats = learner.arm_stats();
         for arm in &stats {
             let mr = arm.mean_reward();
-            assert!(mr >= 0.0 && mr <= 1.0 + 1e-6, "mean_reward out of bounds: {}", mr);
+            assert!(
+                mr >= 0.0 && mr <= 1.0 + 1e-6,
+                "mean_reward out of bounds: {}",
+                mr
+            );
         }
     }
 
@@ -527,7 +574,11 @@ mod tests {
     fn rer_never_negative_across_inputs() {
         for replan_count in 0u32..=30 {
             let rer = ReplanEfficiencyRatio::compute(replan_count, 20, None);
-            assert!(rer.score >= 0.0, "RER negative at replan_count={}", replan_count);
+            assert!(
+                rer.score >= 0.0,
+                "RER negative at replan_count={}",
+                replan_count
+            );
         }
     }
 

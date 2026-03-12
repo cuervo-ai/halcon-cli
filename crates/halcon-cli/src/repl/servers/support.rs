@@ -4,14 +4,12 @@
 /// support tickets, and incident resolution history.
 /// Phase: Support
 /// Priority: 60
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct SupportServer {
     db: AsyncDatabase,
@@ -38,13 +36,15 @@ impl SupportServer {
 
         tokio::task::spawn_blocking(move || {
             let db_ref = db.inner();
-            let conn = db_ref.conn()
+            let conn = db_ref
+                .conn()
                 .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
             let incidents = if let Some(q) = query_opt {
                 // FTS5 search
-                let mut stmt = conn.prepare(
-                    "SELECT incident_id, incident_type, priority, title, description,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT incident_id, incident_type, priority, title, description,
                             reporter, affected_component, reproducible, reproduction_steps,
                             error_message, stack_trace, resolution, status
                      FROM support_incidents
@@ -59,33 +59,37 @@ impl SupportServer {
                             WHEN 'low' THEN 3
                             ELSE 4
                         END
-                     LIMIT 15"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 15",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([q], |row| {
-                    Ok(SupportIncident {
-                        incident_id: row.get(0)?,
-                        incident_type: row.get(1)?,
-                        priority: row.get(2)?,
-                        title: row.get(3)?,
-                        description: row.get(4)?,
-                        reporter: row.get(5)?,
-                        affected_component: row.get(6)?,
-                        reproducible: row.get(7)?,
-                        reproduction_steps: row.get(8)?,
-                        error_message: row.get(9)?,
-                        stack_trace: row.get(10)?,
-                        resolution: row.get(11)?,
-                        status: row.get(12)?,
+                let rows = stmt
+                    .query_map([q], |row| {
+                        Ok(SupportIncident {
+                            incident_id: row.get(0)?,
+                            incident_type: row.get(1)?,
+                            priority: row.get(2)?,
+                            title: row.get(3)?,
+                            description: row.get(4)?,
+                            reporter: row.get(5)?,
+                            affected_component: row.get(6)?,
+                            reproducible: row.get(7)?,
+                            reproduction_steps: row.get(8)?,
+                            error_message: row.get(9)?,
+                            stack_trace: row.get(10)?,
+                            resolution: row.get(11)?,
+                            status: row.get(12)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
             } else {
                 // No query → return open high-priority incidents first
-                let mut stmt = conn.prepare(
-                    "SELECT incident_id, incident_type, priority, title, description,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT incident_id, incident_type, priority, title, description,
                             reporter, affected_component, reproducible, reproduction_steps,
                             error_message, stack_trace, resolution, status
                      FROM support_incidents
@@ -98,26 +102,29 @@ impl SupportServer {
                             WHEN 'low' THEN 3
                             ELSE 4
                         END
-                     LIMIT 15"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 15",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([], |row| {
-                    Ok(SupportIncident {
-                        incident_id: row.get(0)?,
-                        incident_type: row.get(1)?,
-                        priority: row.get(2)?,
-                        title: row.get(3)?,
-                        description: row.get(4)?,
-                        reporter: row.get(5)?,
-                        affected_component: row.get(6)?,
-                        reproducible: row.get(7)?,
-                        reproduction_steps: row.get(8)?,
-                        error_message: row.get(9)?,
-                        stack_trace: row.get(10)?,
-                        resolution: row.get(11)?,
-                        status: row.get(12)?,
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(SupportIncident {
+                            incident_id: row.get(0)?,
+                            incident_type: row.get(1)?,
+                            priority: row.get(2)?,
+                            title: row.get(3)?,
+                            description: row.get(4)?,
+                            reporter: row.get(5)?,
+                            affected_component: row.get(6)?,
+                            reproducible: row.get(7)?,
+                            reproduction_steps: row.get(8)?,
+                            error_message: row.get(9)?,
+                            stack_trace: row.get(10)?,
+                            resolution: row.get(11)?,
+                            status: row.get(12)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
@@ -158,9 +165,7 @@ impl ContextSource for SupportServer {
     }
 
     async fn gather(&self, query: &ContextQuery) -> Result<Vec<ContextChunk>> {
-        let incidents = self
-            .fetch_incidents(query.user_message.as_deref())
-            .await?;
+        let incidents = self.fetch_incidents(query.user_message.as_deref()).await?;
 
         if incidents.is_empty() {
             return Ok(vec![]);
@@ -198,7 +203,16 @@ impl ContextSource for SupportServer {
             let repro_steps = if let Some(steps) = &incident.reproduction_steps {
                 // Truncate steps to max 400 chars
                 let steps_preview = if steps.len() > 400 {
-                    format!("{}...", &steps[..{ let mut _fcb = (400).min(steps.len()); while _fcb > 0 && !steps.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                    format!(
+                        "{}...",
+                        &steps[..{
+                            let mut _fcb = (400).min(steps.len());
+                            while _fcb > 0 && !steps.is_char_boundary(_fcb) {
+                                _fcb -= 1;
+                            }
+                            _fcb
+                        }]
+                    )
                 } else {
                     steps.clone()
                 };
@@ -210,7 +224,16 @@ impl ContextSource for SupportServer {
             let error_info = if let Some(err) = &incident.error_message {
                 // Truncate error to max 300 chars
                 let err_preview = if err.len() > 300 {
-                    format!("{}...", &err[..{ let mut _fcb = (300).min(err.len()); while _fcb > 0 && !err.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                    format!(
+                        "{}...",
+                        &err[..{
+                            let mut _fcb = (300).min(err.len());
+                            while _fcb > 0 && !err.is_char_boundary(_fcb) {
+                                _fcb -= 1;
+                            }
+                            _fcb
+                        }]
+                    )
                 } else {
                     err.clone()
                 };
@@ -222,7 +245,16 @@ impl ContextSource for SupportServer {
             let resolution_info = if let Some(res) = &incident.resolution {
                 // Truncate resolution to max 400 chars
                 let res_preview = if res.len() > 400 {
-                    format!("{}...", &res[..{ let mut _fcb = (400).min(res.len()); while _fcb > 0 && !res.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                    format!(
+                        "{}...",
+                        &res[..{
+                            let mut _fcb = (400).min(res.len());
+                            while _fcb > 0 && !res.is_char_boundary(_fcb) {
+                                _fcb -= 1;
+                            }
+                            _fcb
+                        }]
+                    )
                 } else {
                     res.clone()
                 };
@@ -239,7 +271,8 @@ impl ContextSource for SupportServer {
                  Status: {}\n\
                  {}{}{}\
                  Description:\n{}\n\
-                 {}{}{}", incident.title,
+                 {}{}{}",
+                incident.title,
                 incident.incident_type,
                 incident.priority.to_uppercase(),
                 incident.status,
@@ -276,6 +309,8 @@ impl ContextSource for SupportServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_support_server_creation() {

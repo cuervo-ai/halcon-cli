@@ -101,17 +101,19 @@ pub struct HarmonyArgs {
 #[cfg(feature = "color-science")]
 pub fn run(args: ThemeArgs) -> Result<()> {
     match args.command {
-        ThemeCommand::Optimize(opt_args)  => optimize(opt_args),
-        ThemeCommand::Audit(audit_args)   => audit(audit_args),
-        ThemeCommand::Cvd(cvd_args)       => cvd(cvd_args),
-        ThemeCommand::Generate(gen_args)  => generate(gen_args),
-        ThemeCommand::Harmony(harm_args)  => harmony(harm_args),
+        ThemeCommand::Optimize(opt_args) => optimize(opt_args),
+        ThemeCommand::Audit(audit_args) => audit(audit_args),
+        ThemeCommand::Cvd(cvd_args) => cvd(cvd_args),
+        ThemeCommand::Generate(gen_args) => generate(gen_args),
+        ThemeCommand::Harmony(harm_args) => harmony(harm_args),
     }
 }
 
 #[cfg(not(feature = "color-science"))]
 pub fn run(_args: ThemeArgs) -> Result<()> {
-    anyhow::bail!("Theme commands require the 'color-science' feature. Rebuild with --features color-science")
+    anyhow::bail!(
+        "Theme commands require the 'color-science' feature. Rebuild with --features color-science"
+    )
 }
 
 // ============================================================================
@@ -142,14 +144,18 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
         other => anyhow::bail!("Unknown config preset: {}", other),
     };
 
-    if args.verbose { config.verbose = true; }
+    if args.verbose {
+        config.verbose = true;
+    }
     if let Some(target) = args.target {
         if !(0.0..=1.0).contains(&target) {
             anyhow::bail!("Target quality must be between 0.0 and 1.0");
         }
         config.target_quality = target;
     }
-    if let Some(max_iter) = args.max_iterations { config.max_iterations = max_iter; }
+    if let Some(max_iter) = args.max_iterations {
+        config.max_iterations = max_iter;
+    }
 
     println!("\n  Adaptive Palette Optimization");
     println!("══════════════════════════════════════");
@@ -161,14 +167,19 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
 
     let start = Instant::now();
     let mut optimizer = AdaptivePaletteOptimizer::with_config(builder, config);
-    let result = optimizer.optimize_from_hue(args.hue).context("Failed to optimize palette")?;
+    let result = optimizer
+        .optimize_from_hue(args.hue)
+        .context("Failed to optimize palette")?;
     let elapsed = start.elapsed();
 
     println!("\n✓ Optimization Complete");
     println!("══════════════════════════════════════");
     println!("  Iterations:          {}", result.iterations);
     println!("  Quality improvement: {:.4}", result.quality_improvement);
-    println!("  Final quality:       {:.4}", result.final_palette.quality_report.average_overall());
+    println!(
+        "  Final quality:       {:.4}",
+        result.final_palette.quality_report.average_overall()
+    );
     println!("  Convergence:         {}", result.convergence_status);
     println!("  Duration:            {:.2}s", elapsed.as_secs_f64());
     println!();
@@ -176,11 +187,11 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
     let palette = &result.final_palette.palette;
     println!("  Final Palette:");
     println!("  ──────────────────────────────────────");
-    print_color_token("text",    &palette.text);
+    print_color_token("text", &palette.text);
     print_color_token("primary", &palette.primary);
-    print_color_token("accent",  &palette.accent);
+    print_color_token("accent", &palette.accent);
     print_color_token("warning", &palette.warning);
-    print_color_token("error",   &palette.error);
+    print_color_token("error", &palette.error);
     print_color_token("success", &palette.success);
     println!();
 
@@ -222,8 +233,7 @@ fn optimize(args: OptimizeArgs) -> Result<()> {
 #[cfg(feature = "color-science")]
 fn audit(args: AuditArgs) -> Result<()> {
     use crate::render::color_science::{
-        palette_from_hue, validate_all_cvd, validate_with_apca_usage,
-        harmony_score_for_palette,
+        harmony_score_for_palette, palette_from_hue, validate_all_cvd, validate_with_apca_usage,
     };
 
     if !(0.0..=360.0).contains(&args.hue) {
@@ -243,19 +253,40 @@ fn audit(args: AuditArgs) -> Result<()> {
     let protan_ok = cvd_report.protan_failures.is_empty();
     let deutan_ok = cvd_report.deutan_failures.is_empty();
     let tritan_ok = cvd_report.tritan_failures.is_empty();
-    println!("  Protanopia:   {}", if protan_ok { "✓ safe" } else { "✗ failures" });
+    println!(
+        "  Protanopia:   {}",
+        if protan_ok {
+            "✓ safe"
+        } else {
+            "✗ failures"
+        }
+    );
     if !protan_ok {
         for (a, b, de) in &cvd_report.protan_failures {
             println!("    - {} / {}: ΔE={:.1} (< 15.0)", a, b, de);
         }
     }
-    println!("  Deuteranopia: {}", if deutan_ok { "✓ safe" } else { "✗ failures" });
+    println!(
+        "  Deuteranopia: {}",
+        if deutan_ok {
+            "✓ safe"
+        } else {
+            "✗ failures"
+        }
+    );
     if !deutan_ok {
         for (a, b, de) in &cvd_report.deutan_failures {
             println!("    - {} / {}: ΔE={:.1} (< 15.0)", a, b, de);
         }
     }
-    println!("  Tritanopia:   {}", if tritan_ok { "✓ safe" } else { "✗ failures" });
+    println!(
+        "  Tritanopia:   {}",
+        if tritan_ok {
+            "✓ safe"
+        } else {
+            "✗ failures"
+        }
+    );
     if !tritan_ok {
         for (a, b, de) in &cvd_report.tritan_failures {
             println!("    - {} / {}: ΔE={:.1} (< 15.0)", a, b, de);
@@ -270,8 +301,13 @@ fn audit(args: AuditArgs) -> Result<()> {
     let mut any_apca_fail = false;
     for (name, lc, required, passes) in &apca_results {
         let icon = if *passes { "✓" } else { "✗" };
-        println!("  {} {:<14} Lc={:>6.1}  (req ≥ {:.0})", icon, name, lc, required);
-        if !passes { any_apca_fail = true; }
+        println!(
+            "  {} {:<14} Lc={:>6.1}  (req ≥ {:.0})",
+            icon, name, lc, required
+        );
+        if !passes {
+            any_apca_fail = true;
+        }
     }
     if !any_apca_fail {
         println!("\n  ✓ All APCA semantic checks passed");
@@ -301,7 +337,10 @@ fn audit(args: AuditArgs) -> Result<()> {
         println!("  ✓ Audit PASSED — palette is fully accessible");
     } else {
         println!("  ✗ Audit FAILED — see failures above");
-        println!("    Tip: run `halcon theme generate --hue {:.0} --harmony analogous --solver`", args.hue);
+        println!(
+            "    Tip: run `halcon theme generate --hue {:.0} --harmony analogous --solver`",
+            args.hue
+        );
     }
     println!();
 
@@ -322,14 +361,16 @@ fn cvd(args: CvdArgs) -> Result<()> {
             println!("  Set HALCON_CVD_MODE=off or unset to disable CVD simulation.");
         }
         t => {
-            let cvd = CVDType::from_str(t)
-                .ok_or_else(|| anyhow::anyhow!(
-                    "Unknown CVD type '{}'. Use: deuteranopia, protanopia, tritanopia, off", t
-                ))?;
+            let cvd = CVDType::from_str(t).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown CVD type '{}'. Use: deuteranopia, protanopia, tritanopia, off",
+                    t
+                )
+            })?;
             let label = match cvd {
-                CVDType::Protanopia   => "Protanopia  (L-cone absent, red-green confusion)",
+                CVDType::Protanopia => "Protanopia  (L-cone absent, red-green confusion)",
                 CVDType::Deuteranopia => "Deuteranopia (M-cone absent, most common red-green)",
-                CVDType::Tritanopia   => "Tritanopia   (S-cone absent, blue-yellow, rare)",
+                CVDType::Tritanopia => "Tritanopia   (S-cone absent, blue-yellow, rare)",
             };
             println!("\n  CVD mode: {}", label);
             println!();
@@ -370,30 +411,38 @@ fn generate(args: GenerateArgs) -> Result<()> {
     println!("══════════════════════════════════════");
     println!("  Base hue:  {:.1}°", args.hue);
     println!("  Harmony:   {}", args.harmony);
-    println!("  Solver:    {}", if args.solver { "enabled" } else { "disabled" });
-    println!("  HCT:       {}", if args.hct { "enabled" } else { "disabled" });
+    println!(
+        "  Solver:    {}",
+        if args.solver { "enabled" } else { "disabled" }
+    );
+    println!(
+        "  HCT:       {}",
+        if args.hct { "enabled" } else { "disabled" }
+    );
     println!();
 
     if args.hct {
         // Generate using HCT tonal system
-        let seed_hex = format!("#{:02x}{:02x}{:02x}",
+        let seed_hex = format!(
+            "#{:02x}{:02x}{:02x}",
             (args.hue.to_radians().cos() * 127.0 + 127.0) as u8,
             (args.hue.to_radians().sin() * 127.0 + 127.0) as u8,
             100u8,
         );
-        let palette = builder.generate_hct_palette(&seed_hex)
+        let palette = builder
+            .generate_hct_palette(&seed_hex)
             .context("Failed to generate HCT palette")?;
 
         println!("  HCT Tonal Palette:");
         println!("  ──────────────────────────────────────");
-        print_color_token("primary",  &palette.primary);
-        print_color_token("accent",   &palette.accent);
-        print_color_token("text",     &palette.text);
+        print_color_token("primary", &palette.primary);
+        print_color_token("accent", &palette.accent);
+        print_color_token("text", &palette.text);
         print_color_token("text_dim", &palette.text_dim);
         print_color_token("bg_panel", &palette.bg_panel);
-        print_color_token("running",  &palette.running);
+        print_color_token("running", &palette.running);
         print_color_token("planning", &palette.planning);
-        print_color_token("error",    &palette.error);
+        print_color_token("error", &palette.error);
         println!();
         return Ok(());
     }
@@ -402,23 +451,29 @@ fn generate(args: GenerateArgs) -> Result<()> {
         // Parse harmony type
         let harmony = parse_harmony_type(&args.harmony)?;
 
-        let result = builder.generate_constrained(args.hue, harmony, true)
+        let result = builder
+            .generate_constrained(args.hue, harmony, true)
             .context("Constraint solver failed to generate palette")?;
 
         println!("  Constrained Palette:");
         println!("  ──────────────────────────────────────");
         let palette = &result.palette;
-        print_color_token("primary",  &palette.primary);
-        print_color_token("accent",   &palette.accent);
-        print_color_token("text",     &palette.text);
+        print_color_token("primary", &palette.primary);
+        print_color_token("accent", &palette.accent);
+        print_color_token("text", &palette.text);
         print_color_token("bg_panel", &palette.bg_panel);
-        print_color_token("error",    &palette.error);
+        print_color_token("error", &palette.error);
         println!();
 
         println!("  Harmony Score: {:.3}", result.harmony_score);
         if let Some(ref sr) = result.solver_result {
-            println!("  Solver: {} in {} iterations (penalty={:.4})",
-                if sr.converged { "converged" } else { "max iterations" },
+            println!(
+                "  Solver: {} in {} iterations (penalty={:.4})",
+                if sr.converged {
+                    "converged"
+                } else {
+                    "max iterations"
+                },
                 sr.iterations,
                 sr.final_penalty,
             );
@@ -431,19 +486,20 @@ fn generate(args: GenerateArgs) -> Result<()> {
         }
     } else {
         // Standard generation
-        let result = builder.generate_from_hue(args.hue)
+        let result = builder
+            .generate_from_hue(args.hue)
             .context("Failed to generate palette")?;
 
         let palette = &result.palette;
         println!("  Generated Palette:");
         println!("  ──────────────────────────────────────");
-        print_color_token("primary",  &palette.primary);
-        print_color_token("accent",   &palette.accent);
-        print_color_token("text",     &palette.text);
+        print_color_token("primary", &palette.primary);
+        print_color_token("accent", &palette.accent);
+        print_color_token("text", &palette.text);
         print_color_token("bg_panel", &palette.bg_panel);
-        print_color_token("error",    &palette.error);
-        print_color_token("success",  &palette.success);
-        print_color_token("warning",  &palette.warning);
+        print_color_token("error", &palette.error);
+        print_color_token("success", &palette.success);
+        print_color_token("warning", &palette.warning);
         println!();
         println!("  Quality: {:.3}", result.quality_report.average_overall());
     }
@@ -474,11 +530,18 @@ fn harmony(args: HarmonyArgs) -> Result<()> {
     println!("══════════════════════════════════════");
     println!("  Base hue: {:.1}°", args.hue);
     println!("  Colors:   {}", palette.colors.len());
-    println!("  Score:    {:.3}  ({})", score,
-        if score >= 0.8 { "Excellent" }
-        else if score >= 0.6 { "Good" }
-        else if score >= 0.4 { "Fair" }
-        else { "Poor" }
+    println!(
+        "  Score:    {:.3}  ({})",
+        score,
+        if score >= 0.8 {
+            "Excellent"
+        } else if score >= 0.6 {
+            "Good"
+        } else if score >= 0.4 {
+            "Fair"
+        } else {
+            "Poor"
+        }
     );
     println!();
     println!("  Palette Colors:");
@@ -486,8 +549,14 @@ fn harmony(args: HarmonyArgs) -> Result<()> {
     for (i, oklch) in palette.colors.iter().enumerate() {
         let name = format!("color_{}", i + 1);
         let tc = crate::render::theme::ThemeColor::oklch(oklch.l, oklch.c, oklch.h);
-        println!("  {:12} L={:.2} C={:.2} H={:>5.1}°  {}",
-            format!("{}:", name), oklch.l, oklch.c, oklch.h, tc.fg());
+        println!(
+            "  {:12} L={:.2} C={:.2} H={:>5.1}°  {}",
+            format!("{}:", name),
+            oklch.l,
+            oklch.c,
+            oklch.h,
+            tc.fg()
+        );
     }
     println!();
 
@@ -502,15 +571,16 @@ fn harmony(args: HarmonyArgs) -> Result<()> {
 fn parse_harmony_type(s: &str) -> Result<momoto_intelligence::HarmonyType> {
     use momoto_intelligence::HarmonyType;
     match s.to_lowercase().as_str() {
-        "complementary"       => Ok(HarmonyType::Complementary),
+        "complementary" => Ok(HarmonyType::Complementary),
         "split-complementary" => Ok(HarmonyType::SplitComplementary),
-        "triadic"             => Ok(HarmonyType::Triadic),
-        "tetradic"            => Ok(HarmonyType::Tetradic),
-        "analogous"           => Ok(HarmonyType::Analogous { spread: 45.0 }),
-        "monochromatic"       => Ok(HarmonyType::Monochromatic { steps: 5 }),
+        "triadic" => Ok(HarmonyType::Triadic),
+        "tetradic" => Ok(HarmonyType::Tetradic),
+        "analogous" => Ok(HarmonyType::Analogous { spread: 45.0 }),
+        "monochromatic" => Ok(HarmonyType::Monochromatic { steps: 5 }),
         other => anyhow::bail!(
             "Unknown harmony type '{}'. Choose: complementary, split-complementary, \
-             triadic, tetradic, analogous, monochromatic", other
+             triadic, tetradic, analogous, monochromatic",
+            other
         ),
     }
 }

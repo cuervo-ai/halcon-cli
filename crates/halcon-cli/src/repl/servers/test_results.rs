@@ -4,14 +4,12 @@
 /// and historical test reliability data.
 /// Phase: Testing
 /// Priority: 75
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct TestResultsServer {
     db: AsyncDatabase,
@@ -38,13 +36,15 @@ impl TestResultsServer {
 
         tokio::task::spawn_blocking(move || {
             let db_ref = db.inner();
-            let conn = db_ref.conn()
+            let conn = db_ref
+                .conn()
                 .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
             let results = if let Some(q) = query_opt {
                 // FTS5 search
-                let mut stmt = conn.prepare(
-                    "SELECT test_id, test_suite, test_name, test_file, status,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT test_id, test_suite, test_name, test_file, status,
                             duration_ms, failure_message, stack_trace, coverage_percent,
                             assertions_count, run_at
                      FROM test_results
@@ -52,31 +52,35 @@ impl TestResultsServer {
                        SELECT rowid FROM test_results_fts WHERE test_results_fts MATCH ?
                      )
                      ORDER BY run_at DESC
-                     LIMIT 15"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 15",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([q], |row| {
-                    Ok(TestResult {
-                        test_id: row.get(0)?,
-                        test_suite: row.get(1)?,
-                        test_name: row.get(2)?,
-                        test_file: row.get(3)?,
-                        status: row.get(4)?,
-                        duration_ms: row.get(5)?,
-                        failure_message: row.get(6)?,
-                        stack_trace: row.get(7)?,
-                        coverage_percent: row.get(8)?,
-                        assertions_count: row.get(9)?,
-                        run_at: row.get(10)?,
+                let rows = stmt
+                    .query_map([q], |row| {
+                        Ok(TestResult {
+                            test_id: row.get(0)?,
+                            test_suite: row.get(1)?,
+                            test_name: row.get(2)?,
+                            test_file: row.get(3)?,
+                            status: row.get(4)?,
+                            duration_ms: row.get(5)?,
+                            failure_message: row.get(6)?,
+                            stack_trace: row.get(7)?,
+                            coverage_percent: row.get(8)?,
+                            assertions_count: row.get(9)?,
+                            run_at: row.get(10)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
             } else {
                 // No query → return recent test failures first, then recent successes
-                let mut stmt = conn.prepare(
-                    "SELECT test_id, test_suite, test_name, test_file, status,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT test_id, test_suite, test_name, test_file, status,
                             duration_ms, failure_message, stack_trace, coverage_percent,
                             assertions_count, run_at
                      FROM test_results
@@ -89,24 +93,27 @@ impl TestResultsServer {
                             ELSE 4
                         END,
                         run_at DESC
-                     LIMIT 15"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 15",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([], |row| {
-                    Ok(TestResult {
-                        test_id: row.get(0)?,
-                        test_suite: row.get(1)?,
-                        test_name: row.get(2)?,
-                        test_file: row.get(3)?,
-                        status: row.get(4)?,
-                        duration_ms: row.get(5)?,
-                        failure_message: row.get(6)?,
-                        stack_trace: row.get(7)?,
-                        coverage_percent: row.get(8)?,
-                        assertions_count: row.get(9)?,
-                        run_at: row.get(10)?,
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(TestResult {
+                            test_id: row.get(0)?,
+                            test_suite: row.get(1)?,
+                            test_name: row.get(2)?,
+                            test_file: row.get(3)?,
+                            status: row.get(4)?,
+                            duration_ms: row.get(5)?,
+                            failure_message: row.get(6)?,
+                            stack_trace: row.get(7)?,
+                            coverage_percent: row.get(8)?,
+                            assertions_count: row.get(9)?,
+                            run_at: row.get(10)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
@@ -181,7 +188,16 @@ impl ContextSource for TestResultsServer {
                 if let Some(msg) = &result.failure_message {
                     // Truncate failure message to max 500 chars
                     let msg_preview = if msg.len() > 500 {
-                        format!("{}...", &msg[..{ let mut _fcb = (500).min(msg.len()); while _fcb > 0 && !msg.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                        format!(
+                            "{}...",
+                            &msg[..{
+                                let mut _fcb = (500).min(msg.len());
+                                while _fcb > 0 && !msg.is_char_boundary(_fcb) {
+                                    _fcb -= 1;
+                                }
+                                _fcb
+                            }]
+                        )
                     } else {
                         msg.clone()
                     };
@@ -190,7 +206,16 @@ impl ContextSource for TestResultsServer {
                 if let Some(trace) = &result.stack_trace {
                     // Truncate stack trace to max 600 chars
                     let trace_preview = if trace.len() > 600 {
-                        format!("{}...", &trace[..{ let mut _fcb = (600).min(trace.len()); while _fcb > 0 && !trace.is_char_boundary(_fcb) { _fcb -= 1; } _fcb }])
+                        format!(
+                            "{}...",
+                            &trace[..{
+                                let mut _fcb = (600).min(trace.len());
+                                while _fcb > 0 && !trace.is_char_boundary(_fcb) {
+                                    _fcb -= 1;
+                                }
+                                _fcb
+                            }]
+                        )
                     } else {
                         trace.clone()
                     };
@@ -207,7 +232,8 @@ impl ContextSource for TestResultsServer {
                  Suite: {}\n\
                  File: {}\n\
                  Status: {}{}{}{}\n\
-                 {}", result.test_name,
+                 {}",
+                result.test_name,
                 result.test_suite,
                 result.test_file,
                 result.status.to_uppercase(),
@@ -241,6 +267,8 @@ impl ContextSource for TestResultsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_test_results_server_creation() {

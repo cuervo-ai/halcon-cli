@@ -6,11 +6,14 @@
 
 use halcon_core::types::{AgentLimits, ModelInfo};
 
-use super::super::agent::{AgentLoopResult, StopCondition};
+#[cfg(test)]
+use crate::repl::agent_types::{AgentLoopResult, StopCondition};
+
+use super::super::hybrid_classifier::{HybridConfig, HybridIntentClassifier, NullLlmLayer};
 use super::super::intent_scorer::IntentScorer;
 use super::super::model_router::ModelRouter;
 use super::super::strategy_selector::{ReasoningStrategy, StrategyPlan, StrategySelector};
-use super::super::task_analyzer::{TaskAnalysis, TaskComplexity, TaskType};
+use super::super::task_analyzer::{TaskAnalysis, TaskType};
 
 /// Temporary inline config (will be moved to halcon_core::types in Phase 4)
 #[derive(Debug, Clone)]
@@ -60,6 +63,9 @@ pub struct ReasoningEngine {
     /// P2-1 (SOTA-LEARN-001): guard against double UCB1 update within one session.
     /// post_loop_with_reward() sets this to true; record_per_round_signals() checks it.
     ucb1_updated_this_session: bool,
+    /// HybridIntentClassifier — unifica las capas heurística + embedding + LLM.
+    /// Reemplaza el uso dual de IntentScorer + TaskAnalyzer.
+    classifier: HybridIntentClassifier,
 }
 
 impl ReasoningEngine {
@@ -70,7 +76,15 @@ impl ReasoningEngine {
             config,
             experience_loaded: false,
             ucb1_updated_this_session: false,
+            classifier: HybridIntentClassifier::default(),
         }
+    }
+
+    /// Crear con configuración personalizada del clasificador híbrido.
+    pub fn with_classifier(config: ReasoningConfig, clf_config: HybridConfig) -> Self {
+        let mut engine = Self::new(config);
+        engine.classifier = HybridIntentClassifier::with_llm(Box::new(NullLlmLayer), clf_config);
+        engine
     }
 
     /// Load cross-session UCB1 experience from DB records.
@@ -78,10 +92,21 @@ impl ReasoningEngine {
     /// Parses task_type and strategy strings (same format as save_reasoning_experience)
     /// and seeds the internal StrategySelector so UCB1 exploitation starts informed.
     /// Safe to call multiple times — only processes the first call (idempotent).
-    pub fn load_experience(&mut self, experiences: Vec<(super::super::task_analyzer::TaskType, ReasoningStrategy, f64, usize)>) {
+    pub fn load_experience(
+        &mut self,
+        experiences: Vec<(
+            super::super::task_analyzer::TaskType,
+            ReasoningStrategy,
+            f64,
+            usize,
+        )>,
+    ) {
         self.selector.load_experience(experiences);
         self.experience_loaded = true;
-        tracing::info!(count = self.selector.total_experience_count(), "UCB1: cross-session experience seeded");
+        tracing::info!(
+            count = self.selector.total_experience_count(),
+            "UCB1: cross-session experience seeded"
+        );
     }
 
     /// Returns true if cross-session experience has already been loaded this session.
@@ -99,56 +124,49 @@ impl ReasoningEngine {
     /// `provider_models` is the list of models supported by the active provider — used to
     /// build a provider-aware `ModelRouter` instead of relying on hardcoded DeepSeek defaults.
     /// Pass `&[]` to fall back to `ModelRouter::deepseek_defaults()` (backward compatible).
-    pub fn pre_loop(&mut self, user_query: &str, base_limits: &AgentLimits, provider_models: &[ModelInfo]) -> PreLoopAnalysis {
-        // SOTA 2026: Multi-signal IntentScorer replaces keyword-only TaskAnalyzer.
-        let profile = IntentScorer::score(user_query);
+    pub fn pre_loop(
+        &mut self,
+        user_query: &str,
+        base_limits: &AgentLimits,
+        provider_models: &[ModelInfo],
+    ) -> PreLoopAnalysis {
+        // ── HybridIntentClassifier (Fase 2) ───────────────────────────────────
+        // Reemplaza IntentScorer::score() + TaskAnalyzer::analyze() como fuente única
+        // de clasificación. El clasificador híbrido produce confidence real (semántica)
+        // y traza completa para observabilidad.
+        //
+        // IntentScorer se mantiene para ModelRouter.routing_bias_for() que consume
+        // IntentProfile.scope y IntentProfile.reasoning_depth — campos que el
+        // HybridIntentClassifier no produce aún (ARCH-01 pendiente: unificación total).
+        let classification = self.classifier.classify(user_query);
+        let analysis = classification.into_task_analysis();
 
-        // Map IntentProfile → TaskAnalysis for backward-compat with UCB1 experience tables.
-        // R-02: propagate the real multi-signal confidence from IntentScorer instead of
-        // hardcoding 1.0.  Callers (UCB1 guard, strategy selector) can now gate on
-        // CONFIDENCE_FLOOR to reject uncertain classifications.
-        let analysis = TaskAnalysis {
-            task_type: profile.task_type,
-            complexity: profile.complexity,
-            task_hash: profile.task_hash.clone(),
-            word_count: profile.word_count,
-            // IntentProfile.confidence is f64 [0,1]; TaskAnalysis.confidence is f32.
-            confidence: profile.confidence as f32,
-            // IntentScorer does not produce keyword-level signals; leave empty.
-            // When TaskAnalyzer::analyze() is used directly (tests, CLI tooling),
-            // signals are populated by the SMRC keyword scan.
-            signals: vec![],
-        };
+        // IntentScorer sigue activo SOLO para ModelRouter (routing_bias).
+        // Una vez ARCH-01 complete, esto se eliminará.
+        let profile = IntentScorer::score(user_query);
 
         let strategy = self.selector.select(&analysis);
         let mut plan = self.selector.configure(strategy, analysis.complexity);
 
-        // Wire ModelRouter: always derive routing_bias from IntentProfile (D2 fix).
-        // ModelRouter has primary authority — StrategySelector no longer sets routing_bias.
-        // P0-1: Use provider-aware router when models are supplied; fall back to DeepSeek
-        // defaults when the provider list is empty (backward-compatible behaviour).
-        plan.routing_bias = ModelRouter::from_provider_models(provider_models).routing_bias_for(&profile);
+        // ModelRouter: usa IntentProfile.scope/depth para routing_bias.
+        plan.routing_bias =
+            ModelRouter::from_provider_models(provider_models).routing_bias_for(&profile);
 
-        // NOTE: intentionally do NOT cap plan.max_rounds by profile.suggested_max_rounds().
-        // The profile suggestion is used by ConvergenceController for EARLY-EXIT signals
-        // (stagnation, goal-coverage) — it is guidance, not a hard ceiling.
-        // Using it as a cap here produced a double-min() that limited top-level agents to
-        // 4 rounds for "Simple" tasks regardless of the user-configured max_rounds=40.
-        // The StrategySelector's plan.max_rounds is kept as a convergence-phase hint
-        // (e.g. "aim for 5 rounds") consumed by LoopCritic / Reflexion timing logic.
         let profile_max = profile.suggested_max_rounds() as usize;
 
         tracing::info!(
-            task_type = ?analysis.task_type,
-            complexity = ?analysis.complexity,
-            strategy = ?strategy,
-            scope = ?profile.scope,
-            reasoning_depth = ?profile.reasoning_depth,
-            routing_bias = ?plan.routing_bias,
-            plan_max_rounds = plan.max_rounds,
+            task_type        = ?analysis.task_type,
+            complexity       = ?analysis.complexity,
+            confidence       = analysis.confidence,
+            strategy         = ?strategy,
+            is_multi_intent  = analysis.is_multi_intent,
+            scope            = ?profile.scope,
+            reasoning_depth  = ?profile.reasoning_depth,
+            routing_bias     = ?plan.routing_bias,
+            plan_max_rounds  = plan.max_rounds,
             profile_suggested_max = profile_max,
-            config_max_rounds = base_limits.max_rounds,
-            "Reasoning pre-loop (SOTA 2026)"
+            config_max_rounds     = base_limits.max_rounds,
+            "Reasoning pre-loop (HybridClassifier + SOTA 2026)"
         );
 
         // For top-level agents the user-configured max_rounds is the authoritative hard limit.
@@ -179,7 +197,11 @@ impl ReasoningEngine {
         reward: f64,
     ) -> PostLoopEvaluation {
         let success = reward >= self.config.success_threshold;
-        self.selector.update(pre_analysis.analysis.task_type, pre_analysis.strategy, reward);
+        self.selector.update(
+            pre_analysis.analysis.task_type,
+            pre_analysis.strategy,
+            reward,
+        );
         // P2-1 (SOTA-LEARN-001): mark UCB1 as updated for this session so
         // record_per_round_signals() does not cause a second update on the same arm.
         self.ucb1_updated_this_session = true;
@@ -220,16 +242,33 @@ impl ReasoningEngine {
         // Decay factor: most-recent round counts for 2x relative to earliest.
         // Weights: w_i = 0.5 + 0.5 * (i / (n-1)) where i=0 is oldest, i=n-1 is newest.
         // Sum of weights for n rounds: n * 0.5 + 0.5 * (n-1)/2 ≈ 0.75n for large n.
-        let total_weight: f64 = per_round_scores.iter().enumerate().map(|(i, _)| {
-            let frac = if n > 1 { i as f64 / (n - 1) as f64 } else { 1.0 };
-            0.5 + 0.5 * frac
-        }).sum();
+        let total_weight: f64 = per_round_scores
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let frac = if n > 1 {
+                    i as f64 / (n - 1) as f64
+                } else {
+                    1.0
+                };
+                0.5 + 0.5 * frac
+            })
+            .sum();
 
-        let weighted_reward: f64 = per_round_scores.iter().enumerate().map(|(i, &score)| {
-            let frac = if n > 1 { i as f64 / (n - 1) as f64 } else { 1.0 };
-            let w = 0.5 + 0.5 * frac;
-            score as f64 * w
-        }).sum::<f64>() / total_weight.max(1e-9);
+        let weighted_reward: f64 = per_round_scores
+            .iter()
+            .enumerate()
+            .map(|(i, &score)| {
+                let frac = if n > 1 {
+                    i as f64 / (n - 1) as f64
+                } else {
+                    1.0
+                };
+                let w = 0.5 + 0.5 * frac;
+                score as f64 * w
+            })
+            .sum::<f64>()
+            / total_weight.max(1e-9);
 
         // P2-1 (SOTA-LEARN-001): only update UCB1 if post_loop_with_reward() has NOT already
         // updated this session. Prevents double-incrementing `uses` counter which causes
@@ -286,10 +325,18 @@ impl ReasoningEngine {
         // Falls back to stop_score when no rounds were evaluated.
         let trajectory_score = if !result.round_evaluations.is_empty() {
             let n = result.round_evaluations.len() as f64;
-            let mean: f64 = result.round_evaluations.iter().map(|e| e.combined_score as f64).sum::<f64>() / n;
+            let mean: f64 = result
+                .round_evaluations
+                .iter()
+                .map(|e| e.combined_score as f64)
+                .sum::<f64>()
+                / n;
             let blended = 0.5 * base_score + 0.5 * mean;
             tracing::debug!(
-                base_score, round_mean = mean, blended, rounds = n as usize,
+                base_score,
+                round_mean = mean,
+                blended,
+                rounds = n as usize,
                 "UCB1 reward blended with RoundScorer trajectory"
             );
             blended
@@ -303,13 +350,15 @@ impl ReasoningEngine {
         // When critic is unavailable (None), score is unchanged (backward-compatible).
         let score = if let Some(ref cv) = result.critic_verdict {
             let critic_signal = if cv.achieved {
-                cv.confidence as f64  // critic agrees: full confidence weight
+                cv.confidence as f64 // critic agrees: full confidence weight
             } else {
-                (1.0 - cv.confidence as f64) * 0.5  // critic disagrees: partial credit proportional to uncertainty
+                (1.0 - cv.confidence as f64) * 0.5 // critic disagrees: partial credit proportional to uncertainty
             };
             let blended = 0.6 * trajectory_score + 0.4 * critic_signal;
             tracing::debug!(
-                trajectory_score, critic_confidence = cv.confidence, blended,
+                trajectory_score,
+                critic_confidence = cv.confidence,
+                blended,
                 "UCB1 reward blended with LoopCritic signal"
             );
             blended
@@ -325,7 +374,13 @@ impl ReasoningEngine {
             score,
         );
 
-        tracing::info!(score, base_score, trajectory_score, success, "Reasoning post-loop");
+        tracing::info!(
+            score,
+            base_score,
+            trajectory_score,
+            success,
+            "Reasoning post-loop"
+        );
 
         PostLoopEvaluation {
             success,
@@ -346,13 +401,28 @@ impl ReasoningEngine {
     /// Includes engine config, UCB1 experience summary, and total learning state.
     pub fn inspect_summary(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("Enabled:              true\n"));
-        out.push_str(&format!("Success threshold:    {:.2}\n", self.config.success_threshold));
-        out.push_str(&format!("Max retries:          {}\n", self.config.max_retries));
-        out.push_str(&format!("Exploration factor:   {:.2} (UCB1 c)\n", self.config.exploration_factor));
-        out.push_str(&format!("Experience loaded:    {}\n", self.experience_loaded));
+        out.push_str("Enabled:              true\n");
+        out.push_str(&format!(
+            "Success threshold:    {:.2}\n",
+            self.config.success_threshold
+        ));
+        out.push_str(&format!(
+            "Max retries:          {}\n",
+            self.config.max_retries
+        ));
+        out.push_str(&format!(
+            "Exploration factor:   {:.2} (UCB1 c)\n",
+            self.config.exploration_factor
+        ));
+        out.push_str(&format!(
+            "Experience loaded:    {}\n",
+            self.experience_loaded
+        ));
         let total_exp = self.selector.total_experience_count();
-        out.push_str(&format!("UCB1 total uses:      {} (across all strategy×task_type pairs)\n", total_exp));
+        out.push_str(&format!(
+            "UCB1 total uses:      {} (across all strategy×task_type pairs)\n",
+            total_exp
+        ));
         out
     }
 }
@@ -360,6 +430,8 @@ impl ReasoningEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repl::agent_types::{AgentLoopResult, StopCondition};
+    use crate::repl::domain::task_analyzer::TaskComplexity;
 
     fn make_test_config() -> ReasoningConfig {
         ReasoningConfig {
@@ -452,7 +524,10 @@ mod tests {
 
         // Record a high-quality outcome via the reward pipeline.
         let eval = engine.post_loop_with_reward(&analysis, 0.92);
-        assert!(eval.success, "reward 0.92 must exceed success_threshold=0.60");
+        assert!(
+            eval.success,
+            "reward 0.92 must exceed success_threshold=0.60"
+        );
         assert_eq!(eval.strategy, chosen_strategy);
 
         // Verify the experience was recorded in the UCB1 selector.
@@ -479,7 +554,11 @@ mod tests {
 
         // Simulate 5 complex tasks all solved well by PlanExecuteReflect.
         for _ in 0..5 {
-            let analysis = engine.pre_loop("design a distributed caching system with sharding", &limits, &[]);
+            let analysis = engine.pre_loop(
+                "design a distributed caching system with sharding",
+                &limits,
+                &[],
+            );
             engine.post_loop_with_reward(&analysis, 0.90);
         }
 
@@ -496,7 +575,7 @@ mod tests {
         // (not the unexplored one, which gets INFINITY score — unless it was already explored).
         // Either way, the strategy chosen should be a valid ReasoningStrategy variant.
         let _ = next.strategy; // no panic = structural integrity
-        // The strategy must have a configured plan
+                               // The strategy must have a configured plan
         assert!(next.adjusted_limits.max_rounds > 0);
     }
 
@@ -547,7 +626,10 @@ mod tests {
         engine.record_per_round_signals(&analysis, &round_scores);
 
         let stats = engine.selector.get_stats(task_type, strategy);
-        assert!(stats.is_some(), "UCB1 experience must be recorded after record_per_round_signals");
+        assert!(
+            stats.is_some(),
+            "UCB1 experience must be recorded after record_per_round_signals"
+        );
         let stats = stats.unwrap();
         assert_eq!(stats.uses, 1, "exactly one experience entry expected");
         // Weighted reward = (0.4*0.5 + 0.7*0.75 + 0.9*1.0) / (0.5+0.75+1.0) ≈ 0.7222

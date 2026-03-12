@@ -13,22 +13,24 @@ use chrono::Utc;
 use futures::StreamExt;
 use halcon_core::traits::ModelProvider;
 use halcon_core::types::{
-    AgentLimits, AgentResult, AgentType, ChatMessage, ContentBlock, DEFAULT_CONTEXT_WINDOW_TOKENS,
-    DomainEvent, EventPayload, MessageContent, ModelChunk, ModelRequest, Role, RoutingConfig,
-    Session, StopReason, TokenUsage,
+    AgentLimits, AgentResult, AgentType, ChatMessage, ContentBlock, DomainEvent, EventPayload,
+    MessageContent, ModelChunk, ModelRequest, Role, RoutingConfig, Session, StopReason, TokenUsage,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
 };
 use halcon_core::EventSender;
 use halcon_storage::{AsyncDatabase, InvocationMetric, TraceStepType};
 use halcon_tools::ToolRegistry;
 
 use super::super::accumulator::{CompletedToolUse, ToolUseAccumulator};
-use super::super::agent_utils::{auto_checkpoint, classify_error_hint, compute_fingerprint, record_trace};
+use super::super::agent_utils::{
+    auto_checkpoint, classify_error_hint, compute_fingerprint, record_trace,
+};
 use super::super::resilience::ResilienceManager;
 use super::super::round_scorer::RoundEvaluation;
 use super::super::tool_speculation::ToolSpeculator;
+use super::budget_guards;
 use super::loop_state::{LoopState, SynthesisOrigin, SynthesisPriority, SynthesisTrigger};
 use super::provider_client::{check_control, invoke_with_fallback};
-use super::budget_guards;
 use crate::render::sink::RenderSink;
 
 use super::super::agent_types::StopCondition;
@@ -61,7 +63,6 @@ use super::super::agent_types::StopCondition;
 // FASE 7: XML artifact functions moved to `model_quirks` module.
 // Aliases for backward-compat within this file.
 use super::super::model_quirks::contains_tool_xml_artifacts;
-
 
 /// Plain-data struct for early returns from the provider round phase.
 /// The caller in `mod.rs` reconstructs the full `AgentLoopResult` adding
@@ -136,7 +137,9 @@ pub(super) async fn run(
     replay_tool_executor: Option<&super::super::replay_executor::ReplayToolExecutor>,
 ) -> Result<ProviderRoundOutcome> {
     // Reset stream renderer state for a new round.
-    if !state.silent { render_sink.stream_reset(); }
+    if !state.silent {
+        render_sink.stream_reset();
+    }
     let mut silent_text = String::new(); // text accumulator for state.silent mode
     let mut accumulator = ToolUseAccumulator::new();
     let mut stop_reason = StopReason::EndTurn;
@@ -148,7 +151,7 @@ pub(super) async fn run(
     let mut round_provider_name = String::new();
     let round_model_name = round_request.model.clone();
     state.last_round_model_name = round_model_name.clone(); // Phase 4: track for post-loop quality recording
-    // Track the actual provider Arc for cost estimation (updated on fallback).
+                                                            // Track the actual provider Arc for cost estimation (updated on fallback).
     let mut round_cost_provider: Arc<dyn ModelProvider> = Arc::clone(effective_provider);
 
     // Phase 43: Check control channel before model invocation (yield point 1).
@@ -178,7 +181,9 @@ pub(super) async fn run(
         }
         match check_control(rx, render_sink).await {
             super::ControlAction::Continue => {}
-            super::ControlAction::StepOnce => { state.auto_pause = true; }
+            super::ControlAction::StepOnce => {
+                state.auto_pause = true;
+            }
             super::ControlAction::Cancel => {
                 state.ctrl_cancelled = true;
                 return Ok(ProviderRoundOutcome::BreakLoop);
@@ -191,7 +196,10 @@ pub(super) async fn run(
     #[cfg(not(feature = "tui"))]
     if let Some(ref mut rx) = ctrl_rx {
         if rx.try_recv().is_ok() {
-            tracing::info!(round, "Classic REPL: Ctrl-C received — cancelling agent loop gracefully");
+            tracing::info!(
+                round,
+                "Classic REPL: Ctrl-C received — cancelling agent loop gracefully"
+            );
             render_sink.info("Session cancelled by user (Ctrl-C). Partial results saved.");
             state.ctrl_cancelled = true;
             return Ok(ProviderRoundOutcome::BreakLoop);
@@ -359,476 +367,492 @@ pub(super) async fn run(
     let mut round_usage = TokenUsage::default();
 
     'invoke_retry: loop {
-    let invoke_attempt = tokio::time::timeout(
-        provider_timeout,
-        invoke_with_fallback(
-            effective_provider,
-            &round_request,
-            fallback_providers,
-            resilience,
-            routing_config,
-            event_tx,
-        ),
-    )
-    .await;
+        let invoke_attempt = tokio::time::timeout(
+            provider_timeout,
+            invoke_with_fallback(
+                effective_provider,
+                &round_request,
+                fallback_providers,
+                resilience,
+                routing_config,
+                event_tx,
+            ),
+        )
+        .await;
 
-    // Flatten timeout into the error path.
-    let invoke_attempt = match invoke_attempt {
-        Ok(inner) => inner,
-        Err(_elapsed) => {
-            render_sink.spinner_stop();
-            let timeout_latency_ms = round_start.elapsed().as_millis() as u64;
-            // Record timeout metric.
-            if let Some(db) = trace_db {
-                let metric = InvocationMetric {
-                    provider: provider.name().to_string(),
-                    model: request.model.clone(),
-                    latency_ms: timeout_latency_ms,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    estimated_cost_usd: 0.0,
-                    success: false,
-                    stop_reason: "timeout".to_string(),
-                    session_id: Some(state.session_id.to_string()),
-                    created_at: Utc::now(),
-                };
-                if let Err(me) = db.inner().insert_metric(&metric) {
-                    tracing::warn!("Failed to persist timeout metric: {me}");
-                }
-            }
-            record_trace(
-                trace_db,
-                state.session_id,
-                &mut state.trace_step_index,
-                TraceStepType::Error,
-                serde_json::json!({
-                    "round": round,
-                    "context": "provider_timeout",
-                    "timeout_secs": limits.provider_timeout_secs,
-                    "retry": round_retry_count,
-                })
-                .to_string(),
-                timeout_latency_ms,
-                exec_clock,
-            );
-            // Retry on timeout if retries remain.
-            if round_retry_count < MAX_ROUND_RETRIES {
-                round_retry_count += 1;
-                tracing::info!(retry = round_retry_count, "Retrying round after provider timeout");
-                if !state.silent {
-                    render_sink.warning(
-                        "provider timed out, retrying...",
-                        None,
-                    );
-                }
-                tokio::time::sleep(Duration::from_secs(2u64.pow(round_retry_count))).await;
-                spinner_active = !state.silent;
-                continue 'invoke_retry;
-            }
-            if !state.silent {
-                render_sink.error(
-                    &format!("provider timed out after {}s", limits.provider_timeout_secs),
-                    Some("Increase provider_timeout_secs or check network connectivity"),
-                );
-            }
-            // P3 FIX: Emit AgentCompleted on early return (provider timeout).
-            let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-                agent_type: AgentType::Chat,
-                result: AgentResult {
-                    success: false,
-                    summary: format!("ProviderError: timeout after {}s", limits.provider_timeout_secs),
-                    files_modified: vec![],
-                    tools_used: vec![],
-                },
-            }));
-            return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(ProviderEarlyReturnData {
-                full_text: state.full_text.clone(),
-                rounds: state.rounds,
-                stop_condition: StopCondition::ProviderError,
-                call_input_tokens: state.tokens.call_input_tokens,
-                call_output_tokens: state.tokens.call_output_tokens,
-                call_cost: state.tokens.call_cost,
-                latency_ms: state.loop_start.elapsed().as_millis() as u64,
-                execution_fingerprint: compute_fingerprint(&round_request.messages),
-                round_evaluations: state.convergence.round_evaluations.clone(),
-                timeline_json: None,
-                last_model_used: None,
-                plan_completion_ratio: 0.0,
-            })));
-        }
-    };
-
-    match invoke_attempt {
-        Ok(attempt) => {
-            let _permit = attempt.permit;
-            let used_provider_name = attempt.provider_name.clone();
-            round_provider_name = attempt.provider_name.clone();
-            if attempt.is_fallback {
-                if !state.silent {
-                    render_sink.provider_fallback(
-                        effective_provider.name(),
-                        &attempt.provider_name,
-                        "primary provider failed",
-                    );
-                }
-                // Adapt model for subsequent rounds: the fallback provider may not
-                // support the original model (e.g., anthropic→ollama). Without this,
-                // round 2+ would fail model validation with the original model name.
-                if let Some((_, fb_prov)) = fallback_providers.iter()
-                    .find(|(n, _)| *n == attempt.provider_name)
-                {
-                    // Update cost estimation provider to the actual fallback Arc.
-                    round_cost_provider = Arc::clone(fb_prov);
-                    if !fb_prov.supported_models().iter().any(|m| m.id == round_request.model) {
-                        if let Some(default_model) = fb_prov.supported_models().first() {
-                            tracing::info!(
-                                old_model = %round_request.model,
-                                new_model = %default_model.id,
-                                provider = %attempt.provider_name,
-                                "Adapted model for fallback provider on subsequent state.rounds"
-                            );
-                            if !state.silent {
-                                render_sink.model_selected(&default_model.id, &attempt.provider_name, "adapted for fallback provider");
-                            }
-                            round_request.model = default_model.id.clone();
-                            state.fallback_adapted_model = Some(default_model.id.clone());
-                        }
-                    }
-
-                    // ── Dynamic Budget Reconciliation ──────────────────────────────────
-                    // The state.tokens.pipeline_budget was computed pre-loop from the PRIMARY provider's
-                    // context_window. After fallback to a provider with a SMALLER window
-                    // (e.g., Anthropic 200K → Ollama 32K), the old budget is too large:
-                    // L0 alone (40% × 200K = 80K) would exceed Ollama's full context window.
-                    //
-                    // Reconciliation: look up the fallback model's context_window, recompute
-                    // the budget, and propagate the change to the pipeline's TokenAccountant.
-                    // This prevents context overflow on the NEXT round's model invocation.
-                    let fallback_context_window: u32 = fb_prov
-                        .supported_models()
-                        .iter()
-                        .find(|m| m.id == round_request.model)
-                        .map(|m| m.context_window)
-                        .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
-                    let new_pipeline_budget = {
-                        let input_fraction = (fallback_context_window as f64 * 0.80) as u32;
-                        if limits.max_total_tokens > 0 {
-                            input_fraction.min(limits.max_total_tokens)
-                        } else {
-                            input_fraction
-                        }
-                    };
-                    if new_pipeline_budget != state.tokens.pipeline_budget {
-                        tracing::info!(
-                            old_budget = state.tokens.pipeline_budget,
-                            new_budget = new_pipeline_budget,
-                            fallback_context_window,
-                            provider = %attempt.provider_name,
-                            model = %round_request.model,
-                            "Dynamic Budget Reconciliation: adjusting pipeline budget for fallback provider"
-                        );
-                        state.tokens.pipeline_budget = new_pipeline_budget;
-                        state.context_pipeline.update_budget(new_pipeline_budget);
-                    }
-                    // Keep state.compaction_model in sync with the now-active model.
-                    state.compaction_model = round_request.model.clone();
-                }
-            }
-            let mut stream = attempt.stream;
-            let mut stream_had_error = false;
-            // FIX: track Done separately so we can drain post-Done chunks (e.g. the
-            // OpenAI-compat Usage chunk that DeepSeek/OpenAI send AFTER the finish_reason
-            // chunk but BEFORE [DONE]). Without this drain, output_tokens stays 0 because
-            // the Usage chunk arrives after Done but the old code broke immediately on Done.
-            let mut stream_done_seen = false;
-            let cancelled = loop {
-                tokio::select! {
-                    chunk_opt = stream.next() => {
-                        match chunk_opt {
-                            Some(Ok(chunk)) => {
-                                // Stop spinner on first non-thinking content.
-                                // ThinkingDelta keeps the spinner alive so its label can be
-                                // updated live ("Razonando... N chars") during reasoning.
-                                // Spinner stops when actual text/tool/error begins streaming.
-                                if spinner_active
-                                    && matches!(
-                                        chunk,
-                                        ModelChunk::TextDelta(_)
-                                            | ModelChunk::ToolUseStart { .. }
-                                            | ModelChunk::Error(_)
-                                    )
-                                {
-                                    render_sink.spinner_stop();
-                                    spinner_active = false;
-                                }
-                                // Track usage (session cumulative + per-round).
-                                // Must happen BEFORE render so token_delta() reflects
-                                // any Usage chunk that arrives after Done.
-                                if let ModelChunk::Usage(ref u) = chunk {
-                                    session.total_usage.input_tokens += u.input_tokens;
-                                    session.total_usage.output_tokens += u.output_tokens;
-                                    round_usage.input_tokens += u.input_tokens;
-                                    round_usage.output_tokens += u.output_tokens;
-                                    // Propagate reasoning_tokens for cost transparency.
-                                    // Thinking tokens are billed as output tokens but tracked
-                                    // separately so the status bar can display "🧠 N tok".
-                                    if let Some(rt) = u.reasoning_tokens {
-                                        *session.total_usage.reasoning_tokens.get_or_insert(0) += rt;
-                                        *round_usage.reasoning_tokens.get_or_insert(0) += rt;
-                                    }
-                                    // Phase 45B: Emit real-time token delta for live status bar.
-                                    if !state.silent {
-                                        render_sink.token_delta(
-                                            round_usage.input_tokens,
-                                            round_usage.output_tokens,
-                                            session.total_usage.input_tokens,
-                                            session.total_usage.output_tokens,
-                                        );
-                                    }
-                                    // If we already saw Done, this was the post-Done Usage
-                                    // chunk (standard OpenAI include_usage behavior). Break now.
-                                    if stream_done_seen {
-                                        break false;
-                                    }
-                                }
-                                // Capture stop reason.
-                                if let ModelChunk::Done(reason) = &chunk {
-                                    stop_reason = *reason;
-                                }
-                                // Feed to accumulator first.
-                                accumulator.process(&chunk);
-                                // Render via sink (or silently accumulate).
-                                if !state.silent {
-                                    match &chunk {
-                                        ModelChunk::TextDelta(t) => render_sink.stream_text(t),
-                                        // ThinkingDelta: visual distinction (dim/italic).
-                                        // NOT added to state.full_text — thinking stays out of
-                                        // episodic memory and plan-completion scoring.
-                                        ModelChunk::ThinkingDelta(t) => render_sink.stream_thinking(t),
-                                        ModelChunk::ToolUseStart { name, .. } => render_sink.stream_tool_marker(name),
-                                        ModelChunk::Error(msg) => render_sink.stream_error(msg),
-                                        ModelChunk::Done(_) => {
-                                            render_sink.stream_done();
-                                            // Don't break yet — a Usage chunk may follow.
-                                            stream_done_seen = true;
-                                        }
-                                        _ => {}
-                                    }
-                                } else {
-                                    // Silent: accumulate text, detect done.
-                                    // ThinkingDelta intentionally excluded — same as non-state.silent.
-                                    if let ModelChunk::TextDelta(t) = &chunk {
-                                        silent_text.push_str(t);
-                                    }
-                                    if matches!(chunk, ModelChunk::Done(_)) {
-                                        // Don't break yet — a Usage chunk may follow.
-                                        stream_done_seen = true;
-                                    }
-                                }
-                            }
-                            Some(Err(e)) => {
-                                if !state.silent {
-                                    render_sink.stream_error(&format!("{e}"));
-                                }
-                                // Record stream failure for health scoring.
-                                if resilience.is_enabled() {
-                                    resilience.record_failure(&used_provider_name).await;
-                                    // Phase E3/E4: emit provider health as degraded after failure.
-                                    if !state.silent {
-                                        render_sink.provider_health_update(
-                                            &used_provider_name, "degraded", 0.0,
-                                            round_start.elapsed().as_millis() as u64,
-                                        );
-                                    }
-                                }
-                                stream_had_error = true;
-                                break false;
-                            }
-                            // Stream exhausted (includes post-[DONE] None) — always safe to exit.
-                            None => break false,
-                        }
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        break true;
-                    }
-                }
-            };
-
-            // P0 FIX: Stream finalization barrier.
-            // Guarantee spinner_stop() runs whenever the stream exits — regardless of
-            // whether the stream was empty, hit a guardrail, was cancelled, or had an
-            // error. Without this, an empty response (Done with no prior TextDelta or
-            // ToolUseStart) left the spinner active forever.
-            if spinner_active {
+        // Flatten timeout into the error path.
+        let invoke_attempt = match invoke_attempt {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
                 render_sink.spinner_stop();
-                spinner_active = false;
-            }
-
-            if cancelled {
-                if !state.silent { render_sink.warning("response interrupted by user", None); }
-                drop(stream);
-                // P3 FIX: Emit AgentCompleted on early return (user cancellation).
-                let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-                    agent_type: AgentType::Chat,
-                    result: AgentResult {
-                        success: false,
-                        summary: format!("Interrupted: user cancelled at round {round}"),
-                        files_modified: vec![],
-                        tools_used: vec![],
-                    },
-                }));
-                return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(ProviderEarlyReturnData {
-                    full_text: state.full_text.clone(),
-                    rounds: state.rounds,
-                    stop_condition: StopCondition::Interrupted,
-                    call_input_tokens: state.tokens.call_input_tokens,
-                    call_output_tokens: state.tokens.call_output_tokens,
-                    call_cost: state.tokens.call_cost,
-                    latency_ms: state.loop_start.elapsed().as_millis() as u64,
-                    execution_fingerprint: compute_fingerprint(&round_request.messages),
-                    round_evaluations: state.convergence.round_evaluations.clone(),
-                    timeline_json: None,
-                    last_model_used: None,
-                    plan_completion_ratio: 0.0,
-                })));
-            }
-
-            // Resilience: record success for the provider that was used.
-            if resilience.is_enabled() && !stream_had_error {
-                resilience.record_success(&used_provider_name).await;
-                // Phase E3/E4: emit provider health as healthy after success.
-                if !state.silent {
-                    render_sink.provider_health_update(&used_provider_name, "healthy", 0.0, 0);
-                }
-            }
-
-            // Stream error: retry the round if retries remain, discarding partial output.
-            if stream_had_error {
+                let timeout_latency_ms = round_start.elapsed().as_millis() as u64;
+                // Record timeout metric.
                 if let Some(db) = trace_db {
                     let metric = InvocationMetric {
-                        provider: used_provider_name.clone(),
+                        provider: provider.name().to_string(),
                         model: request.model.clone(),
-                        latency_ms: round_start.elapsed().as_millis() as u64,
-                        input_tokens: round_usage.input_tokens,
-                        output_tokens: round_usage.output_tokens,
+                        latency_ms: timeout_latency_ms,
+                        input_tokens: 0,
+                        output_tokens: 0,
                         estimated_cost_usd: 0.0,
                         success: false,
-                        stop_reason: "stream_error".to_string(),
+                        stop_reason: "timeout".to_string(),
                         session_id: Some(state.session_id.to_string()),
                         created_at: Utc::now(),
                     };
                     if let Err(me) = db.inner().insert_metric(&metric) {
-                        tracing::warn!("Failed to persist stream error metric: {me}");
+                        tracing::warn!("Failed to persist timeout metric: {me}");
                     }
                 }
+                record_trace(
+                    trace_db,
+                    state.session_id,
+                    &mut state.trace_step_index,
+                    TraceStepType::Error,
+                    serde_json::json!({
+                        "round": round,
+                        "context": "provider_timeout",
+                        "timeout_secs": limits.provider_timeout_secs,
+                        "retry": round_retry_count,
+                    })
+                    .to_string(),
+                    timeout_latency_ms,
+                    exec_clock,
+                );
+                // Retry on timeout if retries remain.
                 if round_retry_count < MAX_ROUND_RETRIES {
                     round_retry_count += 1;
-                    tracing::info!(retry = round_retry_count, "Retrying round after stream error");
+                    tracing::info!(
+                        retry = round_retry_count,
+                        "Retrying round after provider timeout"
+                    );
                     if !state.silent {
-                        render_sink.warning(
-                            "stream error, retrying...",
-                            None,
+                        render_sink.warning("provider timed out, retrying...", None);
+                    }
+                    tokio::time::sleep(Duration::from_secs(2u64.pow(round_retry_count))).await;
+                    spinner_active = !state.silent;
+                    continue 'invoke_retry;
+                }
+                if !state.silent {
+                    render_sink.error(
+                        &format!("provider timed out after {}s", limits.provider_timeout_secs),
+                        Some("Increase provider_timeout_secs or check network connectivity"),
+                    );
+                }
+                // P3 FIX: Emit AgentCompleted on early return (provider timeout).
+                let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
+                    agent_type: AgentType::Chat,
+                    result: AgentResult {
+                        success: false,
+                        summary: format!(
+                            "ProviderError: timeout after {}s",
+                            limits.provider_timeout_secs
+                        ),
+                        files_modified: vec![],
+                        tools_used: vec![],
+                    },
+                }));
+                return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
+                    ProviderEarlyReturnData {
+                        full_text: state.full_text.clone(),
+                        rounds: state.rounds,
+                        stop_condition: StopCondition::ProviderError,
+                        call_input_tokens: state.tokens.call_input_tokens,
+                        call_output_tokens: state.tokens.call_output_tokens,
+                        call_cost: state.tokens.call_cost,
+                        latency_ms: state.loop_start.elapsed().as_millis() as u64,
+                        execution_fingerprint: compute_fingerprint(&round_request.messages),
+                        round_evaluations: state.convergence.round_evaluations.clone(),
+                        timeline_json: None,
+                        last_model_used: None,
+                        plan_completion_ratio: 0.0,
+                    },
+                )));
+            }
+        };
+
+        match invoke_attempt {
+            Ok(attempt) => {
+                let _permit = attempt.permit;
+                let used_provider_name = attempt.provider_name.clone();
+                round_provider_name = attempt.provider_name.clone();
+                if attempt.is_fallback {
+                    if !state.silent {
+                        render_sink.provider_fallback(
+                            effective_provider.name(),
+                            &attempt.provider_name,
+                            "primary provider failed",
                         );
                     }
-                    // Reset round-level accumulators for retry.
-                    accumulator = ToolUseAccumulator::new();
-                    if !state.silent { render_sink.stream_reset(); }
-                    silent_text.clear();
-                    round_usage = TokenUsage::default();
+                    // Adapt model for subsequent rounds: the fallback provider may not
+                    // support the original model (e.g., anthropic→ollama). Without this,
+                    // round 2+ would fail model validation with the original model name.
+                    if let Some((_, fb_prov)) = fallback_providers
+                        .iter()
+                        .find(|(n, _)| *n == attempt.provider_name)
+                    {
+                        // Update cost estimation provider to the actual fallback Arc.
+                        round_cost_provider = Arc::clone(fb_prov);
+                        if !fb_prov
+                            .supported_models()
+                            .iter()
+                            .any(|m| m.id == round_request.model)
+                        {
+                            if let Some(default_model) = fb_prov.supported_models().first() {
+                                tracing::info!(
+                                    old_model = %round_request.model,
+                                    new_model = %default_model.id,
+                                    provider = %attempt.provider_name,
+                                    "Adapted model for fallback provider on subsequent state.rounds"
+                                );
+                                if !state.silent {
+                                    render_sink.model_selected(
+                                        &default_model.id,
+                                        &attempt.provider_name,
+                                        "adapted for fallback provider",
+                                    );
+                                }
+                                round_request.model = default_model.id.clone();
+                                state.fallback_adapted_model = Some(default_model.id.clone());
+                            }
+                        }
+
+                        // ── Dynamic Budget Reconciliation ──────────────────────────────────
+                        // The state.tokens.pipeline_budget was computed pre-loop from the PRIMARY provider's
+                        // context_window. After fallback to a provider with a SMALLER window
+                        // (e.g., Anthropic 200K → Ollama 32K), the old budget is too large:
+                        // L0 alone (40% × 200K = 80K) would exceed Ollama's full context window.
+                        //
+                        // Reconciliation: look up the fallback model's context_window, recompute
+                        // the budget, and propagate the change to the pipeline's TokenAccountant.
+                        // This prevents context overflow on the NEXT round's model invocation.
+                        let fallback_context_window: u32 = fb_prov
+                            .supported_models()
+                            .iter()
+                            .find(|m| m.id == round_request.model)
+                            .map(|m| m.context_window)
+                            .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
+                        let new_pipeline_budget = {
+                            let input_fraction = (fallback_context_window as f64 * 0.80) as u32;
+                            if limits.max_total_tokens > 0 {
+                                input_fraction.min(limits.max_total_tokens)
+                            } else {
+                                input_fraction
+                            }
+                        };
+                        if new_pipeline_budget != state.tokens.pipeline_budget {
+                            tracing::info!(
+                                old_budget = state.tokens.pipeline_budget,
+                                new_budget = new_pipeline_budget,
+                                fallback_context_window,
+                                provider = %attempt.provider_name,
+                                model = %round_request.model,
+                                "Dynamic Budget Reconciliation: adjusting pipeline budget for fallback provider"
+                            );
+                            state.tokens.pipeline_budget = new_pipeline_budget;
+                            state.context_pipeline.update_budget(new_pipeline_budget);
+                        }
+                        // Keep state.compaction_model in sync with the now-active model.
+                        state.compaction_model = round_request.model.clone();
+                    }
+                }
+                let mut stream = attempt.stream;
+                let mut stream_had_error = false;
+                // FIX: track Done separately so we can drain post-Done chunks (e.g. the
+                // OpenAI-compat Usage chunk that DeepSeek/OpenAI send AFTER the finish_reason
+                // chunk but BEFORE [DONE]). Without this drain, output_tokens stays 0 because
+                // the Usage chunk arrives after Done but the old code broke immediately on Done.
+                let mut stream_done_seen = false;
+                let cancelled = loop {
+                    tokio::select! {
+                        chunk_opt = stream.next() => {
+                            match chunk_opt {
+                                Some(Ok(chunk)) => {
+                                    // Stop spinner on first non-thinking content.
+                                    // ThinkingDelta keeps the spinner alive so its label can be
+                                    // updated live ("Razonando... N chars") during reasoning.
+                                    // Spinner stops when actual text/tool/error begins streaming.
+                                    if spinner_active
+                                        && matches!(
+                                            chunk,
+                                            ModelChunk::TextDelta(_)
+                                                | ModelChunk::ToolUseStart { .. }
+                                                | ModelChunk::Error(_)
+                                        )
+                                    {
+                                        render_sink.spinner_stop();
+                                        spinner_active = false;
+                                    }
+                                    // Track usage (session cumulative + per-round).
+                                    // Must happen BEFORE render so token_delta() reflects
+                                    // any Usage chunk that arrives after Done.
+                                    if let ModelChunk::Usage(ref u) = chunk {
+                                        session.total_usage.input_tokens += u.input_tokens;
+                                        session.total_usage.output_tokens += u.output_tokens;
+                                        round_usage.input_tokens += u.input_tokens;
+                                        round_usage.output_tokens += u.output_tokens;
+                                        // Propagate reasoning_tokens for cost transparency.
+                                        // Thinking tokens are billed as output tokens but tracked
+                                        // separately so the status bar can display "🧠 N tok".
+                                        if let Some(rt) = u.reasoning_tokens {
+                                            *session.total_usage.reasoning_tokens.get_or_insert(0) += rt;
+                                            *round_usage.reasoning_tokens.get_or_insert(0) += rt;
+                                        }
+                                        // Phase 45B: Emit real-time token delta for live status bar.
+                                        if !state.silent {
+                                            render_sink.token_delta(
+                                                round_usage.input_tokens,
+                                                round_usage.output_tokens,
+                                                session.total_usage.input_tokens,
+                                                session.total_usage.output_tokens,
+                                            );
+                                        }
+                                        // If we already saw Done, this was the post-Done Usage
+                                        // chunk (standard OpenAI include_usage behavior). Break now.
+                                        if stream_done_seen {
+                                            break false;
+                                        }
+                                    }
+                                    // Capture stop reason.
+                                    if let ModelChunk::Done(reason) = &chunk {
+                                        stop_reason = *reason;
+                                    }
+                                    // Feed to accumulator first.
+                                    accumulator.process(&chunk);
+                                    // Render via sink (or silently accumulate).
+                                    if !state.silent {
+                                        match &chunk {
+                                            ModelChunk::TextDelta(t) => render_sink.stream_text(t),
+                                            // ThinkingDelta: visual distinction (dim/italic).
+                                            // NOT added to state.full_text — thinking stays out of
+                                            // episodic memory and plan-completion scoring.
+                                            ModelChunk::ThinkingDelta(t) => render_sink.stream_thinking(t),
+                                            ModelChunk::ToolUseStart { name, .. } => render_sink.stream_tool_marker(name),
+                                            ModelChunk::Error(msg) => render_sink.stream_error(msg),
+                                            ModelChunk::Done(_) => {
+                                                render_sink.stream_done();
+                                                // Don't break yet — a Usage chunk may follow.
+                                                stream_done_seen = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    } else {
+                                        // Silent: accumulate text, detect done.
+                                        // ThinkingDelta intentionally excluded — same as non-state.silent.
+                                        if let ModelChunk::TextDelta(t) = &chunk {
+                                            silent_text.push_str(t);
+                                        }
+                                        if matches!(chunk, ModelChunk::Done(_)) {
+                                            // Don't break yet — a Usage chunk may follow.
+                                            stream_done_seen = true;
+                                        }
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    if !state.silent {
+                                        render_sink.stream_error(&format!("{e}"));
+                                    }
+                                    // Record stream failure for health scoring.
+                                    if resilience.is_enabled() {
+                                        resilience.record_failure(&used_provider_name).await;
+                                        // Phase E3/E4: emit provider health as degraded after failure.
+                                        if !state.silent {
+                                            render_sink.provider_health_update(
+                                                &used_provider_name, "degraded", 0.0,
+                                                round_start.elapsed().as_millis() as u64,
+                                            );
+                                        }
+                                    }
+                                    stream_had_error = true;
+                                    break false;
+                                }
+                                // Stream exhausted (includes post-[DONE] None) — always safe to exit.
+                                None => break false,
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            break true;
+                        }
+                    }
+                };
+
+                // P0 FIX: Stream finalization barrier.
+                // Guarantee spinner_stop() runs whenever the stream exits — regardless of
+                // whether the stream was empty, hit a guardrail, was cancelled, or had an
+                // error. Without this, an empty response (Done with no prior TextDelta or
+                // ToolUseStart) left the spinner active forever.
+                if spinner_active {
+                    render_sink.spinner_stop();
+                    spinner_active = false;
+                }
+
+                if cancelled {
+                    if !state.silent {
+                        render_sink.warning("response interrupted by user", None);
+                    }
+                    drop(stream);
+                    // P3 FIX: Emit AgentCompleted on early return (user cancellation).
+                    let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
+                        agent_type: AgentType::Chat,
+                        result: AgentResult {
+                            success: false,
+                            summary: format!("Interrupted: user cancelled at round {round}"),
+                            files_modified: vec![],
+                            tools_used: vec![],
+                        },
+                    }));
+                    return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
+                        ProviderEarlyReturnData {
+                            full_text: state.full_text.clone(),
+                            rounds: state.rounds,
+                            stop_condition: StopCondition::Interrupted,
+                            call_input_tokens: state.tokens.call_input_tokens,
+                            call_output_tokens: state.tokens.call_output_tokens,
+                            call_cost: state.tokens.call_cost,
+                            latency_ms: state.loop_start.elapsed().as_millis() as u64,
+                            execution_fingerprint: compute_fingerprint(&round_request.messages),
+                            round_evaluations: state.convergence.round_evaluations.clone(),
+                            timeline_json: None,
+                            last_model_used: None,
+                            plan_completion_ratio: 0.0,
+                        },
+                    )));
+                }
+
+                // Resilience: record success for the provider that was used.
+                if resilience.is_enabled() && !stream_had_error {
+                    resilience.record_success(&used_provider_name).await;
+                    // Phase E3/E4: emit provider health as healthy after success.
+                    if !state.silent {
+                        render_sink.provider_health_update(&used_provider_name, "healthy", 0.0, 0);
+                    }
+                }
+
+                // Stream error: retry the round if retries remain, discarding partial output.
+                if stream_had_error {
+                    if let Some(db) = trace_db {
+                        let metric = InvocationMetric {
+                            provider: used_provider_name.clone(),
+                            model: request.model.clone(),
+                            latency_ms: round_start.elapsed().as_millis() as u64,
+                            input_tokens: round_usage.input_tokens,
+                            output_tokens: round_usage.output_tokens,
+                            estimated_cost_usd: 0.0,
+                            success: false,
+                            stop_reason: "stream_error".to_string(),
+                            session_id: Some(state.session_id.to_string()),
+                            created_at: Utc::now(),
+                        };
+                        if let Err(me) = db.inner().insert_metric(&metric) {
+                            tracing::warn!("Failed to persist stream error metric: {me}");
+                        }
+                    }
+                    if round_retry_count < MAX_ROUND_RETRIES {
+                        round_retry_count += 1;
+                        tracing::info!(
+                            retry = round_retry_count,
+                            "Retrying round after stream error"
+                        );
+                        if !state.silent {
+                            render_sink.warning("stream error, retrying...", None);
+                        }
+                        // Reset round-level accumulators for retry.
+                        accumulator = ToolUseAccumulator::new();
+                        if !state.silent {
+                            render_sink.stream_reset();
+                        }
+                        silent_text.clear();
+                        round_usage = TokenUsage::default();
+                        spinner_active = !state.silent;
+                        tokio::time::sleep(Duration::from_secs(2u64.pow(round_retry_count))).await;
+                        continue 'invoke_retry;
+                    }
+                    // Accept partial text on final stream error.
+                }
+            }
+            Err(e) => {
+                render_sink.spinner_stop();
+                let error_latency_ms = round_start.elapsed().as_millis() as u64;
+                // Trace: record error.
+                record_trace(
+                    trace_db,
+                    state.session_id,
+                    &mut state.trace_step_index,
+                    TraceStepType::Error,
+                    serde_json::json!({
+                        "round": round,
+                        "context": "provider_invoke",
+                        "message": format!("{e}"),
+                        "retry": round_retry_count,
+                    })
+                    .to_string(),
+                    error_latency_ms,
+                    exec_clock,
+                );
+                // Persist failed invocation metric for optimizer learning.
+                if let Some(db) = trace_db {
+                    let metric = InvocationMetric {
+                        provider: provider.name().to_string(),
+                        model: request.model.clone(),
+                        latency_ms: error_latency_ms,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        estimated_cost_usd: 0.0,
+                        success: false,
+                        stop_reason: "error".to_string(),
+                        session_id: Some(state.session_id.to_string()),
+                        created_at: Utc::now(),
+                    };
+                    if let Err(me) = db.inner().insert_metric(&metric) {
+                        tracing::warn!("Failed to persist error metric: {me}");
+                    }
+                }
+                // Retry on provider error if retries remain.
+                if round_retry_count < MAX_ROUND_RETRIES {
+                    round_retry_count += 1;
+                    tracing::info!(retry = round_retry_count, error = %e, "Retrying round after provider error");
+                    if !state.silent {
+                        render_sink.warning(&format!("provider error, retrying... ({e})"), None);
+                    }
                     spinner_active = !state.silent;
                     tokio::time::sleep(Duration::from_secs(2u64.pow(round_retry_count))).await;
                     continue 'invoke_retry;
                 }
-                // Accept partial text on final stream error.
-            }
-        }
-        Err(e) => {
-            render_sink.spinner_stop();
-            let error_latency_ms = round_start.elapsed().as_millis() as u64;
-            // Trace: record error.
-            record_trace(
-                trace_db,
-                state.session_id,
-                &mut state.trace_step_index,
-                TraceStepType::Error,
-                serde_json::json!({
-                    "round": round,
-                    "context": "provider_invoke",
-                    "message": format!("{e}"),
-                    "retry": round_retry_count,
-                })
-                .to_string(),
-                error_latency_ms,
-                exec_clock,
-            );
-            // Persist failed invocation metric for optimizer learning.
-            if let Some(db) = trace_db {
-                let metric = InvocationMetric {
-                    provider: provider.name().to_string(),
-                    model: request.model.clone(),
-                    latency_ms: error_latency_ms,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    estimated_cost_usd: 0.0,
-                    success: false,
-                    stop_reason: "error".to_string(),
-                    session_id: Some(state.session_id.to_string()),
-                    created_at: Utc::now(),
-                };
-                if let Err(me) = db.inner().insert_metric(&metric) {
-                    tracing::warn!("Failed to persist error metric: {me}");
-                }
-            }
-            // Retry on provider error if retries remain.
-            if round_retry_count < MAX_ROUND_RETRIES {
-                round_retry_count += 1;
-                tracing::info!(retry = round_retry_count, error = %e, "Retrying round after provider error");
                 if !state.silent {
-                    render_sink.warning(
-                        &format!("provider error, retrying... ({e})"),
-                        None,
-                    );
+                    render_sink.info("");
+                    let hint = classify_error_hint(&format!("{e}"));
+                    render_sink.error(&format!("provider request failed — {e}"), Some(hint));
                 }
-                spinner_active = !state.silent;
-                tokio::time::sleep(Duration::from_secs(2u64.pow(round_retry_count))).await;
-                continue 'invoke_retry;
+                // P3 FIX: Emit AgentCompleted on early return (provider request failure).
+                let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
+                    agent_type: AgentType::Chat,
+                    result: AgentResult {
+                        success: false,
+                        summary: format!("ProviderError: {e}"),
+                        files_modified: vec![],
+                        tools_used: vec![],
+                    },
+                }));
+                return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
+                    ProviderEarlyReturnData {
+                        full_text: state.full_text.clone(),
+                        rounds: state.rounds,
+                        stop_condition: StopCondition::ProviderError,
+                        call_input_tokens: state.tokens.call_input_tokens,
+                        call_output_tokens: state.tokens.call_output_tokens,
+                        call_cost: state.tokens.call_cost,
+                        latency_ms: state.loop_start.elapsed().as_millis() as u64,
+                        execution_fingerprint: compute_fingerprint(&round_request.messages),
+                        round_evaluations: state.convergence.round_evaluations.clone(),
+                        timeline_json: None,
+                        last_model_used: None,
+                        plan_completion_ratio: 0.0,
+                    },
+                )));
             }
-            if !state.silent {
-                render_sink.info("");
-                let hint = classify_error_hint(&format!("{e}"));
-                render_sink.error(
-                    &format!("provider request failed — {e}"),
-                    Some(hint),
-                );
-            }
-            // P3 FIX: Emit AgentCompleted on early return (provider request failure).
-            let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-                agent_type: AgentType::Chat,
-                result: AgentResult {
-                    success: false,
-                    summary: format!("ProviderError: {e}"),
-                    files_modified: vec![],
-                    tools_used: vec![],
-                },
-            }));
-            return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(ProviderEarlyReturnData {
-                full_text: state.full_text.clone(),
-                rounds: state.rounds,
-                stop_condition: StopCondition::ProviderError,
-                call_input_tokens: state.tokens.call_input_tokens,
-                call_output_tokens: state.tokens.call_output_tokens,
-                call_cost: state.tokens.call_cost,
-                latency_ms: state.loop_start.elapsed().as_millis() as u64,
-                execution_fingerprint: compute_fingerprint(&round_request.messages),
-                round_evaluations: state.convergence.round_evaluations.clone(),
-                timeline_json: None,
-                last_model_used: None,
-                plan_completion_ratio: 0.0,
-            })));
         }
-    }
 
-    break 'invoke_retry; // Successful invocation, exit retry loop.
+        break 'invoke_retry; // Successful invocation, exit retry loop.
     } // end 'invoke_retry
 
     // Emit ModelInvoked event with per-round metrics (uses actual provider/model, not request).
@@ -873,12 +897,15 @@ pub(super) async fn run(
 
         // Check token budget overflow
         if let Some(total_tokens) = prediction.total_tokens_mean() {
-            let projected_total = state.tokens.call_input_tokens + state.tokens.call_output_tokens + total_tokens as u64;
+            let projected_total = state.tokens.call_input_tokens
+                + state.tokens.call_output_tokens
+                + total_tokens as u64;
             let token_limit = limits.max_total_tokens;
             if token_limit > 0 && projected_total > token_limit as u64 {
                 tracing::warn!(
                     round = round + 1,
-                    current_tokens = state.tokens.call_input_tokens + state.tokens.call_output_tokens,
+                    current_tokens =
+                        state.tokens.call_input_tokens + state.tokens.call_output_tokens,
                     predicted_total = projected_total,
                     limit = token_limit,
                     "ARIMA: Token budget overflow predicted within 5 state.rounds"
@@ -1069,7 +1096,9 @@ pub(super) async fn run(
             }));
         }
         if halcon_security::has_blocking_violation(&violations) {
-            if !state.silent { render_sink.info("\n[response blocked by guardrail]"); }
+            if !state.silent {
+                render_sink.info("\n[response blocked by guardrail]");
+            }
             return Ok(ProviderRoundOutcome::BreakLoop);
         }
     }
@@ -1102,19 +1131,20 @@ pub(super) async fn run(
                 "output_tokens": round_usage.output_tokens,
             })
             .to_string();
-            cache.store(
-                &round_request,
-                &round_text,
-                stop_reason_str,
-                &usage_json,
-                None,
-            ).await;
+            cache
+                .store(
+                    &round_request,
+                    &round_text,
+                    stop_reason_str,
+                    &usage_json,
+                    None,
+                )
+                .await;
         }
     }
 
     // Note: state.messages Vec is preserved (not moved into round_request).
     // Pipeline manages L0-L4 context; state.messages Vec is full history for fingerprinting.
-
 
     // --- Budget guards (token / duration / cost) ---
     // Extracted to budget_guards.rs for clarity. Returns Some(StopCondition) on first breach.
@@ -1146,24 +1176,37 @@ pub(super) async fn run(
         );
         // RC-2: Capture actual plan progress on budget-forced exit.
         // The post-loop calculation is unreachable on early returns; compute inline.
-        let budget_exit_plan_ratio = state.execution_tracker.as_ref().map(|t| {
-            let (completed, total, _) = t.progress();
-            if total > 0 { completed as f32 / total as f32 } else { 0.0 }
-        }).unwrap_or(0.0);
-        return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(ProviderEarlyReturnData {
-            full_text: state.full_text.clone(),
-            rounds: state.rounds,
-            stop_condition: stop,
-            call_input_tokens: state.tokens.call_input_tokens,
-            call_output_tokens: state.tokens.call_output_tokens,
-            call_cost: state.tokens.call_cost,
-            latency_ms: state.loop_start.elapsed().as_millis() as u64,
-            execution_fingerprint: compute_fingerprint(&state.messages),
-            round_evaluations: state.convergence.round_evaluations.clone(),
-            timeline_json: state.execution_tracker.as_ref().map(|t| t.to_json().to_string()),
-            last_model_used: Some(state.last_round_model_name.clone()),
-            plan_completion_ratio: budget_exit_plan_ratio,
-        })));
+        let budget_exit_plan_ratio = state
+            .execution_tracker
+            .as_ref()
+            .map(|t| {
+                let (completed, total, _) = t.progress();
+                if total > 0 {
+                    completed as f32 / total as f32
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
+            ProviderEarlyReturnData {
+                full_text: state.full_text.clone(),
+                rounds: state.rounds,
+                stop_condition: stop,
+                call_input_tokens: state.tokens.call_input_tokens,
+                call_output_tokens: state.tokens.call_output_tokens,
+                call_cost: state.tokens.call_cost,
+                latency_ms: state.loop_start.elapsed().as_millis() as u64,
+                execution_fingerprint: compute_fingerprint(&state.messages),
+                round_evaluations: state.convergence.round_evaluations.clone(),
+                timeline_json: state
+                    .execution_tracker
+                    .as_ref()
+                    .map(|t| t.to_json().to_string()),
+                last_model_used: Some(state.last_round_model_name.clone()),
+                plan_completion_ratio: budget_exit_plan_ratio,
+            },
+        )));
     }
 
     // ── FASE 2: Alternative format recovery ────────────────────────────────
@@ -1178,20 +1221,27 @@ pub(super) async fn run(
     // Synthesizing→Executing transition (race condition: GovernanceRescue fired
     // just before the provider responded with XML tool calls). Let the round
     // fall through as EndTurn so synthesis can proceed uninterrupted.
-    let fsm_in_synthesizing = state.synthesis.phase() == super::loop_state::AgentPhase::Synthesizing;
+    let fsm_in_synthesizing =
+        state.synthesis.phase() == super::loop_state::AgentPhase::Synthesizing;
     if fsm_in_synthesizing {
         tracing::warn!(
             round,
             "FASE 2: format-recovery SUPPRESSED — FSM is Synthesizing; XML tool calls discarded to preserve FSM invariant"
         );
         if !state.silent {
-            render_sink.warning("[format-recovery] suppressed: synthesis in progress — tool calls deferred", None);
+            render_sink.warning(
+                "[format-recovery] suppressed: synthesis in progress — tool calls deferred",
+                None,
+            );
         }
     }
     if stop_reason != StopReason::ToolUse && !fsm_in_synthesizing {
-        if let Some(recovered) = super::super::model_quirks::try_recover_any_tool_call(&round_text) {
+        if let Some(recovered) = super::super::model_quirks::try_recover_any_tool_call(&round_text)
+        {
             // IMP-6 observability: distinguish recovery strategy for operator tracing.
-            let recovery_strategy = if round_text.contains("<\u{ff5c}DSML\u{ff5c}") || round_text.contains("<tool_call>") {
+            let recovery_strategy = if round_text.contains("<\u{ff5c}DSML\u{ff5c}")
+                || round_text.contains("<tool_call>")
+            {
                 "dsml"
             } else {
                 "json_text"
@@ -1229,8 +1279,11 @@ pub(super) async fn run(
             // When exactly one tool is allowed and the recovered name is wrong, remap to the
             // intended tool. This handles the common "model knows one allowed tool but generates
             // DSML for a different tool" hallucination pattern.
-            let allowed_tool_names: std::collections::HashSet<&str> =
-                round_request.tools.iter().map(|t| t.name.as_str()).collect();
+            let allowed_tool_names: std::collections::HashSet<&str> = round_request
+                .tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect();
             for tool in &mut synthetic_tools {
                 if !allowed_tool_names.contains(tool.name.as_str()) {
                     if round_request.tools.len() == 1 {
@@ -1264,7 +1317,8 @@ pub(super) async fn run(
             // `type: "array"`. Coerce string → [string] to prevent tool failures with score 0.00.
             for tool in &mut synthetic_tools {
                 if let Some(tool_def) = round_request.tools.iter().find(|t| t.name == tool.name) {
-                    let props = tool_def.input_schema
+                    let props = tool_def
+                        .input_schema
                         .get("properties")
                         .and_then(|p| p.as_object());
                     if let Some(props_map) = props {
@@ -1273,14 +1327,13 @@ pub(super) async fn run(
                             let to_coerce: Vec<String> = props_map
                                 .iter()
                                 .filter(|(prop_name, prop_schema)| {
-                                    let expects_array = prop_schema
-                                        .get("type")
-                                        .and_then(|t| t.as_str())
-                                        .map_or(false, |t| t == "array");
+                                    let expects_array =
+                                        prop_schema.get("type").and_then(|t| t.as_str())
+                                            == Some("array");
                                     expects_array
                                         && args
                                             .get(prop_name.as_str())
-                                            .map_or(false, |v| v.is_string())
+                                            .is_some_and(|v| v.is_string())
                                 })
                                 .map(|(k, _)| k.clone())
                                 .collect();
@@ -1291,10 +1344,7 @@ pub(super) async fn run(
                                         prop = %prop_name,
                                         "RP-1: DSML arg coercion — string → array (schema mismatch)"
                                     );
-                                    args.insert(
-                                        prop_name,
-                                        serde_json::Value::Array(vec![val]),
-                                    );
+                                    args.insert(prop_name, serde_json::Value::Array(vec![val]));
                                 }
                             }
                         }
@@ -1337,7 +1387,9 @@ pub(super) async fn run(
             // Build assistant message with tool use blocks.
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
             if !clean_round_text.is_empty() {
-                assistant_blocks.push(ContentBlock::Text { text: clean_round_text });
+                assistant_blocks.push(ContentBlock::Text {
+                    text: clean_round_text,
+                });
             }
             for tool in &synthetic_tools {
                 assistant_blocks.push(ContentBlock::ToolUse {
@@ -1406,7 +1458,10 @@ pub(super) async fn run(
         // RoundType::Text in the sliding window for cross-type oscillation detection.
         state.guards.loop_guard.record_text_round();
         if state.guards.loop_guard.detect_cross_type_oscillation() {
-            render_sink.warning("[loop-guard] cross-type Tool↔Text oscillation — forcing synthesis", None);
+            render_sink.warning(
+                "[loop-guard] cross-type Tool↔Text oscillation — forcing synthesis",
+                None,
+            );
             // Phase 2: route through governance gate (Tool↔Text oscillation detected).
             state.request_synthesis_with_gate(
                 SynthesisTrigger::LoopGuard,
@@ -1429,7 +1484,14 @@ pub(super) async fn run(
         }
 
         // Auto-checkpoint after non-tool-use round (crash protection).
-        auto_checkpoint(trace_db, state.session_id, state.rounds, &state.messages, session, state.trace_step_index);
+        auto_checkpoint(
+            trace_db,
+            state.session_id,
+            state.rounds,
+            &state.messages,
+            session,
+            state.trace_step_index,
+        );
         return Ok(ProviderRoundOutcome::BreakLoop);
     }
 

@@ -18,12 +18,12 @@ use halcon_tools::ToolRegistry;
 use halcon_core::types::ToolRetryConfig;
 
 use super::accumulator::CompletedToolUse;
-use super::conversational_permission::ConversationalPermissionHandler;
 use super::adaptive_prompt::RiskLevel as AdaptiveRiskLevel;
+use super::conversational_permission::ConversationalPermissionHandler;
 use super::idempotency::DryRunMode;
 use super::output_risk_scorer;
-use crate::render::sink::RenderSink;
 use crate::render::diff::{compute_ai_diff, render_file_diff};
+use crate::render::sink::RenderSink;
 
 /// Configuration for tool execution (dry-run + idempotency).
 ///
@@ -82,10 +82,7 @@ pub struct ToolExecutionPlan {
 }
 
 /// Partition completed tool uses into parallel and sequential batches.
-pub fn plan_execution(
-    tools: Vec<CompletedToolUse>,
-    registry: &ToolRegistry,
-) -> ToolExecutionPlan {
+pub fn plan_execution(tools: Vec<CompletedToolUse>, registry: &ToolRegistry) -> ToolExecutionPlan {
     let mut parallel = Vec::new();
     let mut sequential = Vec::new();
 
@@ -93,7 +90,9 @@ pub fn plan_execution(
         let can_parallel = if let Some(tool) = {
             // Resolve aliases so `run_command` → `bash` gets the correct permission level.
             let canonical = super::tool_aliases::canonicalize(&tool_call.name);
-            registry.get(&tool_call.name).or_else(|| registry.get(canonical))
+            registry
+                .get(&tool_call.name)
+                .or_else(|| registry.get(canonical))
         } {
             let level = tool.permission_level();
             // ReadOnly tools are always auto-allowed, safe to parallelize.
@@ -124,7 +123,8 @@ fn synthetic_dry_run_result(tool_call: &CompletedToolUse) -> ToolExecResult {
         tool_name: tool_call.name.clone(),
         content_block: ContentBlock::ToolResult {
             tool_use_id: tool_call.id.clone(),
-            content: format!("[dry-run] Tool '{}' skipped (would execute with: {})",
+            content: format!(
+                "[dry-run] Tool '{}' skipped (would execute with: {})",
                 tool_call.name,
                 serde_json::to_string(&tool_call.input).unwrap_or_default(),
             ),
@@ -225,7 +225,10 @@ fn mutate_args_for_retry(tool_name: &str, input: &serde_json::Value) -> Option<s
             if let Some(args) = mutated.get_mut("args").and_then(|a| a.as_array_mut()) {
                 if !args.iter().any(|v| v.as_str() == Some("--no-deps")) {
                     args.push(serde_json::Value::String("--no-deps".to_string()));
-                    tracing::debug!(tool = "lint_check", "IMP-1: adaptive retry — injected --no-deps");
+                    tracing::debug!(
+                        tool = "lint_check",
+                        "IMP-1: adaptive retry — injected --no-deps"
+                    );
                     return Some(mutated);
                 }
             }
@@ -239,7 +242,10 @@ fn mutate_args_for_retry(tool_name: &str, input: &serde_json::Value) -> Option<s
                 if cmd_str.contains("cargo clippy") && !cmd_str.contains("--no-deps") {
                     let new_cmd = cmd_str.replacen("cargo clippy", "cargo clippy --no-deps", 1);
                     mutated["command"] = serde_json::Value::String(new_cmd);
-                    tracing::debug!(tool = "bash", "IMP-1: adaptive retry — added --no-deps to cargo clippy");
+                    tracing::debug!(
+                        tool = "bash",
+                        "IMP-1: adaptive retry — added --no-deps to cargo clippy"
+                    );
                     return Some(mutated);
                 }
             }
@@ -259,7 +265,8 @@ fn generate_file_edit_preview(input: &serde_json::Value) -> Option<(String, usiz
     let path = input.get("path")?.as_str()?;
     let old_string = input.get("old_string")?.as_str()?;
     let new_string = input.get("new_string")?.as_str()?;
-    let replace_all = input.get("replace_all")
+    let replace_all = input
+        .get("replace_all")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
@@ -347,6 +354,7 @@ fn make_error_result(tool_call: &CompletedToolUse, content: String) -> ToolExecR
 /// Tries exact name first, then falls back to the canonical alias so models
 /// that emit `run_command`, `execute_bash`, `shell`, etc. still resolve to
 /// the registered `bash` tool.
+#[allow(clippy::result_large_err)]
 fn check_tool_known(
     tool_call: &CompletedToolUse,
     registry: &ToolRegistry,
@@ -354,7 +362,10 @@ fn check_tool_known(
 ) -> Result<std::sync::Arc<dyn halcon_core::traits::Tool>, ToolExecResult> {
     let canonical = super::tool_aliases::canonicalize(&tool_call.name);
     // Primary: registered tool registry.
-    if let Some(t) = registry.get(&tool_call.name).or_else(|| registry.get(canonical)) {
+    if let Some(t) = registry
+        .get(&tool_call.name)
+        .or_else(|| registry.get(canonical))
+    {
         return Ok(t.clone());
     }
     // Fallback: session-injected tools (e.g., search_memory).
@@ -365,7 +376,10 @@ fn check_tool_known(
     }
     Err(make_error_result(
         tool_call,
-        format!("Error: unknown tool '{}' (canonical: '{}')", tool_call.name, canonical),
+        format!(
+            "Error: unknown tool '{}' (canonical: '{}')",
+            tool_call.name, canonical
+        ),
     ))
 }
 
@@ -390,7 +404,9 @@ fn check_idempotency(
     tool_call: &CompletedToolUse,
     idempotency: Option<&super::idempotency::IdempotencyRegistry>,
 ) -> (Option<ToolExecResult>, Option<String>) {
-    let Some(reg) = idempotency else { return (None, None) };
+    let Some(reg) = idempotency else {
+        return (None, None);
+    };
     let id = super::idempotency::compute_execution_id(&tool_call.name, &tool_call.input, "");
     if let Some(cached) = reg.lookup(&id) {
         let result = ToolExecResult {
@@ -496,7 +512,10 @@ fn resolve_to_absolute(path: &str, working_dir: &str) -> String {
     if p.is_absolute() {
         path.to_string()
     } else {
-        std::path::Path::new(working_dir).join(path).to_string_lossy().into_owned()
+        std::path::Path::new(working_dir)
+            .join(path)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -625,7 +644,9 @@ async fn run_with_retry(
                 let err_str = format!("{e}");
                 if attempt + 1 < max_attempts && is_transient_error(&err_str) {
                     // IMP-3: attempt environment self-repair before sleeping.
-                    if let Some(repairs) = super::env_repair::run_repairs(&err_str, &tool_call.name, working_dir) {
+                    if let Some(repairs) =
+                        super::env_repair::run_repairs(&err_str, &tool_call.name, working_dir)
+                    {
                         for repair in &repairs {
                             tracing::info!(
                                 tool = %tool_call.name,
@@ -642,7 +663,12 @@ async fn run_with_retry(
                         retry_config.max_delay_ms,
                     ));
                     tracing::info!(tool = %tool_call.name, attempt = attempt + 1, delay_ms = delay, "Retrying transient tool error: {err_str}");
-                    render_sink.tool_retrying(&tool_call.name, (attempt + 1) as usize, max_attempts as usize, delay);
+                    render_sink.tool_retrying(
+                        &tool_call.name,
+                        (attempt + 1) as usize,
+                        max_attempts as usize,
+                        delay,
+                    );
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     continue;
                 }
@@ -659,14 +685,23 @@ async fn run_with_retry(
                 };
             }
             Err(_elapsed) => {
-                let err_str = format!("Error: tool '{}' timed out after {}s", tool_call.name, tool_timeout.as_secs());
+                let err_str = format!(
+                    "Error: tool '{}' timed out after {}s",
+                    tool_call.name,
+                    tool_timeout.as_secs()
+                );
                 if attempt + 1 < max_attempts {
                     let delay = std::cmp::min(
                         retry_config.base_delay_ms * 2u64.pow(std::cmp::min(attempt, 5)),
                         retry_config.max_delay_ms,
                     );
                     tracing::info!(tool = %tool_call.name, attempt = attempt + 1, delay_ms = delay, "Retrying timed out tool");
-                    render_sink.tool_retrying(&tool_call.name, (attempt + 1) as usize, max_attempts as usize, delay);
+                    render_sink.tool_retrying(
+                        &tool_call.name,
+                        (attempt + 1) as usize,
+                        max_attempts as usize,
+                        delay,
+                    );
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     continue;
                 }
@@ -694,9 +729,13 @@ fn record_idempotency(
     tool_call: &CompletedToolUse,
     result: &ToolExecResult,
 ) {
-    let (Some(registry), Some(id)) = (idempotency, exec_id) else { return };
+    let (Some(registry), Some(id)) = (idempotency, exec_id) else {
+        return;
+    };
     let (content, is_error) = match &result.content_block {
-        ContentBlock::ToolResult { content, is_error, .. } => (content.clone(), *is_error),
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => (content.clone(), *is_error),
         _ => (String::new(), false),
     };
     registry.record(super::idempotency::ExecutionRecord {
@@ -745,7 +784,10 @@ async fn execute_one_tool(
             }
             Err(_) => {
                 tracing::warn!(tool = %tool_call.name, "plugin gate lock contention — denying tool (fail-closed)");
-                return synthetic_plugin_denied_result(tool_call, "plugin service temporarily unavailable");
+                return synthetic_plugin_denied_result(
+                    tool_call,
+                    "plugin service temporarily unavailable",
+                );
             }
         }
     }
@@ -757,10 +799,14 @@ async fn execute_one_tool(
 
     // 4. Idempotency cache lookup.
     let (cached, exec_id) = check_idempotency(tool_call, idempotency);
-    if let Some(r) = cached { return r; }
+    if let Some(r) = cached {
+        return r;
+    }
 
     // 5. Argument validation (parse errors + risk scoring).
-    if let Some(r) = validate_tool_args(tool_call) { return r; }
+    if let Some(r) = validate_tool_args(tool_call) {
+        return r;
+    }
 
     // 5.5. Path existence pre-validation (FASE-2 structural gate).
     // Verifies that every path argument in ReadOnly tool calls points to an existing
@@ -810,7 +856,15 @@ async fn execute_one_tool(
     }
 
     // 6. Execute with exponential-backoff retry.
-    let exec_result = run_with_retry(tool_call, &tool, working_dir, tool_timeout, retry_config, render_sink).await;
+    let exec_result = run_with_retry(
+        tool_call,
+        &tool,
+        working_dir,
+        tool_timeout,
+        retry_config,
+        render_sink,
+    )
+    .await;
 
     // 6.5. PostToolUse / PostToolUseFailure lifecycle hook (Feature 2, best-effort).
     //
@@ -844,11 +898,16 @@ async fn execute_one_tool(
         match pr_mutex.try_lock() {
             Ok(mut pr) => {
                 if let Some(plugin_id) = pr.plugin_id_for_tool(&tool_call.name).map(str::to_owned) {
-                    let is_err = matches!(&exec_result.content_block, ContentBlock::ToolResult { is_error: true, .. });
+                    let is_err = matches!(
+                        &exec_result.content_block,
+                        ContentBlock::ToolResult { is_error: true, .. }
+                    );
                     pr.post_invoke(&plugin_id, &tool_call.name, 0, 0.0, !is_err, None);
                 }
             }
-            Err(_) => tracing::warn!(tool = %tool_call.name, "plugin post-invoke metrics skipped — lock contention"),
+            Err(_) => {
+                tracing::warn!(tool = %tool_call.name, "plugin post-invoke metrics skipped — lock contention")
+            }
         }
     }
 
@@ -965,7 +1024,20 @@ pub async fn execute_parallel_batch(
             let name = tool_call.name.clone();
             let input = tool_call.input.clone();
             render_sink.tool_start(&name, &input);
-            execute_one_tool(tool_call, registry, working_dir, tool_timeout, dry_run_mode, exec_config.idempotency, &exec_config.retry, render_sink, plugin_registry, exec_config.hook_runner.as_deref(), &exec_config.session_id_str, &exec_config.session_tools)
+            execute_one_tool(
+                tool_call,
+                registry,
+                working_dir,
+                tool_timeout,
+                dry_run_mode,
+                exec_config.idempotency,
+                &exec_config.retry,
+                render_sink,
+                plugin_registry,
+                exec_config.hook_runner.as_deref(),
+                &exec_config.session_id_str,
+                &exec_config.session_tools,
+            )
         })
         .collect();
 
@@ -1077,7 +1149,10 @@ pub async fn execute_sequential_tool(
     plugin_registry: Option<&std::sync::Mutex<super::plugins::PluginRegistry>>,
 ) -> ToolExecResult {
     let canonical_name = super::tool_aliases::canonicalize(&tool_call.name);
-    let Some(tool) = registry.get(&tool_call.name).or_else(|| registry.get(canonical_name)) else {
+    let Some(tool) = registry
+        .get(&tool_call.name)
+        .or_else(|| registry.get(canonical_name))
+    else {
         return ToolExecResult {
             tool_use_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
@@ -1296,7 +1371,8 @@ pub async fn execute_sequential_tool(
     #[cfg(feature = "tui")]
     {
         let is_sudo_bash = tool_call.name == "bash" && {
-            tool_call.input
+            tool_call
+                .input
                 .get("command")
                 .and_then(|v| v.as_str())
                 .map(|cmd| {
@@ -1307,7 +1383,8 @@ pub async fn execute_sequential_tool(
         };
 
         if is_sudo_bash {
-            let cmd_str = tool_call.input
+            let cmd_str = tool_call
+                .input
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -1324,7 +1401,8 @@ pub async fn execute_sequential_tool(
             if let Some(pw) = permissions.get_sudo_password(30).await {
                 // Rewrite command: printf '%s\n' 'PASSWORD' | sudo -S COMMAND_WITHOUT_SUDO
                 // Using printf (shell builtin) avoids the password appearing in `ps`.
-                let cmd_without_sudo = cmd_str.trim()
+                let cmd_without_sudo = cmd_str
+                    .trim()
                     .strip_prefix("sudo ")
                     .unwrap_or(cmd_str.trim());
                 // Escape single quotes in password for safe shell embedding.
@@ -1366,7 +1444,21 @@ pub async fn execute_sequential_tool(
 
     render_sink.tool_start(&tool_call.name, &tool_call.input);
 
-    let result = execute_one_tool(tool_call, registry, working_dir, tool_timeout, exec_config.dry_run_mode, exec_config.idempotency, &exec_config.retry, render_sink, plugin_registry, exec_config.hook_runner.as_deref(), &exec_config.session_id_str, &exec_config.session_tools).await;
+    let result = execute_one_tool(
+        tool_call,
+        registry,
+        working_dir,
+        tool_timeout,
+        exec_config.dry_run_mode,
+        exec_config.idempotency,
+        &exec_config.retry,
+        render_sink,
+        plugin_registry,
+        exec_config.hook_runner.as_deref(),
+        &exec_config.session_id_str,
+        &exec_config.session_tools,
+    )
+    .await;
     let is_error = matches!(&result.content_block,
         ContentBlock::ToolResult { is_error, .. } if *is_error);
 
@@ -1431,8 +1523,7 @@ mod tests {
     use super::*;
     use crate::render::sink::SilentSink;
 
-    static TEST_SINK: std::sync::LazyLock<SilentSink> =
-        std::sync::LazyLock::new(SilentSink::new);
+    static TEST_SINK: std::sync::LazyLock<SilentSink> = std::sync::LazyLock::new(SilentSink::new);
 
     fn make_completed(id: &str, name: &str) -> CompletedToolUse {
         CompletedToolUse {
@@ -1455,12 +1546,20 @@ mod tests {
         let plan = plan_execution(tools, &registry);
 
         // file_read and grep are ReadOnly -> parallel
-        let par_names: Vec<&str> = plan.parallel_batch.iter().map(|t| t.name.as_str()).collect();
+        let par_names: Vec<&str> = plan
+            .parallel_batch
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert!(par_names.contains(&"file_read"));
         assert!(par_names.contains(&"grep"));
 
         // bash is Destructive, file_write is Destructive -> sequential
-        let seq_names: Vec<&str> = plan.sequential_batch.iter().map(|t| t.name.as_str()).collect();
+        let seq_names: Vec<&str> = plan
+            .sequential_batch
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         assert!(seq_names.contains(&"bash"));
         assert!(seq_names.contains(&"file_write"));
     }
@@ -1468,7 +1567,6 @@ mod tests {
     #[test]
     fn plan_unknown_tool_goes_sequential() {
         let registry = ToolRegistry::new();
-
 
         let tools = vec![make_completed("t1", "nonexistent_tool")];
         let plan = plan_execution(tools, &registry);
@@ -1480,7 +1578,6 @@ mod tests {
     #[test]
     fn plan_all_readonly_all_parallel() {
         let registry = halcon_tools::default_registry(&Default::default());
-
 
         let tools = vec![
             make_completed("t1", "file_read"),
@@ -1497,7 +1594,6 @@ mod tests {
     fn plan_all_destructive_all_sequential() {
         let registry = halcon_tools::default_registry(&Default::default());
 
-
         let tools = vec![
             make_completed("t1", "bash"),
             make_completed("t2", "file_write"),
@@ -1512,7 +1608,6 @@ mod tests {
     #[test]
     fn plan_empty_input() {
         let registry = ToolRegistry::new();
-
 
         let plan = plan_execution(vec![], &registry);
         assert!(plan.parallel_batch.is_empty());
@@ -1569,7 +1664,9 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         match &results[0].content_block {
-            ContentBlock::ToolResult { is_error, content, .. } => {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
                 assert!(is_error);
                 assert!(content.contains("unknown tool"));
             }
@@ -1639,8 +1736,8 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_batch_with_trace_recording() {
-        use std::sync::Arc;
         use halcon_storage::Database;
+        use std::sync::Arc;
 
         let registry = halcon_tools::default_registry(&Default::default());
         let (event_tx, _rx) = halcon_core::event_bus(16);
@@ -1751,11 +1848,28 @@ mod tests {
     async fn dry_run_off_executes_normally() {
         let registry = halcon_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, None, &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         // file_read on non-existent path produces an error, but it DID execute (not a dry-run skip).
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(!content.contains("[dry-run]"), "Off mode should execute normally");
+                assert!(
+                    !content.contains("[dry-run]"),
+                    "Off mode should execute normally"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -1765,9 +1879,25 @@ mod tests {
     async fn dry_run_full_skips_all_tools() {
         let registry = halcon_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, None, &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Full,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         match &result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(content.contains("[dry-run]"));
                 assert!(content.contains("file_read"));
                 assert!(!is_error);
@@ -1780,7 +1910,21 @@ mod tests {
     async fn dry_run_full_returns_synthetic_result() {
         let registry = halcon_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "bash");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, None, &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Full,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(result.duration_ms, 0);
         assert_eq!(result.tool_name, "bash");
         match &result.content_block {
@@ -1795,10 +1939,27 @@ mod tests {
     async fn dry_run_destructive_only_skips_bash() {
         let registry = halcon_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "bash");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::DestructiveOnly, None, &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::DestructiveOnly,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(content.contains("[dry-run]"), "bash should be skipped in DestructiveOnly mode");
+                assert!(
+                    content.contains("[dry-run]"),
+                    "bash should be skipped in DestructiveOnly mode"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -1808,10 +1969,27 @@ mod tests {
     async fn dry_run_destructive_only_allows_read_file() {
         let registry = halcon_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::DestructiveOnly, None, &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::DestructiveOnly,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(!content.contains("[dry-run]"), "file_read should execute in DestructiveOnly mode");
+                assert!(
+                    !content.contains("[dry-run]"),
+                    "file_read should execute in DestructiveOnly mode"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -1924,7 +2102,9 @@ mod tests {
         .await;
 
         match &result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(content.contains("[dry-run]"));
                 assert!(!is_error);
             }
@@ -1998,16 +2178,50 @@ mod tests {
         };
 
         // First call: executes and records.
-        let r1 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let r1 = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(idem.len(), 1);
 
         // Second call with same args: returns cached result.
-        let r2 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let r2 = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(idem.len(), 1); // No new record.
 
         // Both should have the same content.
-        let c1 = match &r1.content_block { ContentBlock::ToolResult { content, .. } => content.clone(), _ => String::new() };
-        let c2 = match &r2.content_block { ContentBlock::ToolResult { content, .. } => content.clone(), _ => String::new() };
+        let c1 = match &r1.content_block {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            _ => String::new(),
+        };
+        let c2 = match &r2.content_block {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            _ => String::new(),
+        };
         assert_eq!(c1, c2);
     }
 
@@ -2029,14 +2243,42 @@ mod tests {
             input: serde_json::json!({"path": "/tmp/bbb"}),
         };
 
-        execute_one_tool(&tool1, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
-        execute_one_tool(&tool2, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        execute_one_tool(
+            &tool1,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
+        execute_one_tool(
+            &tool2,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(idem.len(), 2); // Two distinct entries.
     }
 
     #[tokio::test]
     async fn idempotency_records_after_execution() {
-        use crate::repl::idempotency::{IdempotencyRegistry, compute_execution_id};
+        use crate::repl::idempotency::{compute_execution_id, IdempotencyRegistry};
 
         let registry = halcon_tools::default_registry(&Default::default());
         let idem = IdempotencyRegistry::new();
@@ -2045,19 +2287,34 @@ mod tests {
         let exec_id = compute_execution_id("file_read", &serde_json::json!({}), "");
 
         assert!(idem.lookup(&exec_id).is_none());
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert!(idem.lookup(&exec_id).is_some());
     }
 
     #[tokio::test]
     async fn idempotency_returns_cached_content() {
-        use crate::repl::idempotency::{IdempotencyRegistry, ExecutionRecord};
+        use crate::repl::idempotency::{ExecutionRecord, IdempotencyRegistry};
 
         let registry = halcon_tools::default_registry(&Default::default());
         let idem = IdempotencyRegistry::new();
 
         // Pre-seed the registry with a fake cached result.
-        let exec_id = crate::repl::idempotency::compute_execution_id("file_read", &serde_json::json!({}), "");
+        let exec_id =
+            crate::repl::idempotency::compute_execution_id("file_read", &serde_json::json!({}), "");
         idem.record(ExecutionRecord {
             execution_id: exec_id,
             tool_name: "file_read".to_string(),
@@ -2067,7 +2324,21 @@ mod tests {
         });
 
         let tool = make_completed("t1", "file_read");
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
                 assert_eq!(content, "cached output");
@@ -2081,7 +2352,21 @@ mod tests {
         let registry = halcon_tools::default_registry(&Default::default());
         let tool = make_completed("t1", "file_read");
         // No idempotency (None) — should execute normally.
-        let result = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, None, &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let result = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(!content.contains("cached output"));
@@ -2099,11 +2384,53 @@ mod tests {
 
         let tool = make_completed("t1", "file_read");
         // Round 1.
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         // Round 2 (same tool).
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         // Round 3 (same tool).
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(idem.len(), 1); // Still just 1 entry.
     }
 
@@ -2116,8 +2443,25 @@ mod tests {
 
         let tool = make_completed("t1", "file_read");
         // Dry-run full: should NOT record to idempotency (tool didn't execute).
-        execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Full, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
-        assert!(idem.is_empty(), "dry-run should not record to idempotency registry");
+        execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Full,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
+        assert!(
+            idem.is_empty(),
+            "dry-run should not record to idempotency registry"
+        );
     }
 
     #[tokio::test]
@@ -2133,13 +2477,43 @@ mod tests {
             name: "file_read".to_string(),
             input: serde_json::json!({"path": "/tmp/nonexistent_xyz_987654"}),
         };
-        let r1 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
+        let r1 = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
         assert_eq!(idem.len(), 1);
 
         // Second call returns cached error.
-        let r2 = execute_one_tool(&tool, &registry, "/tmp", Duration::from_secs(10), DryRunMode::Off, Some(&idem), &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[]).await;
-        let e1 = matches!(&r1.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
-        let e2 = matches!(&r2.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
+        let r2 = execute_one_tool(
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            Some(&idem),
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
+        let e1 =
+            matches!(&r1.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
+        let e2 =
+            matches!(&r2.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
         assert_eq!(e1, e2);
     }
 
@@ -2162,8 +2536,16 @@ mod tests {
 
         // Two identical file_read calls in a parallel batch.
         let batch = vec![
-            CompletedToolUse { id: "t1".to_string(), name: "file_read".to_string(), input: serde_json::json!({"path": "/tmp"}) },
-            CompletedToolUse { id: "t2".to_string(), name: "file_read".to_string(), input: serde_json::json!({"path": "/tmp"}) },
+            CompletedToolUse {
+                id: "t1".to_string(),
+                name: "file_read".to_string(),
+                input: serde_json::json!({"path": "/tmp"}),
+            },
+            CompletedToolUse {
+                id: "t2".to_string(),
+                name: "file_read".to_string(),
+                input: serde_json::json!({"path": "/tmp"}),
+            },
         ];
 
         let config = ToolExecutionConfig {
@@ -2173,10 +2555,20 @@ mod tests {
         };
 
         let results = execute_parallel_batch(
-            &batch, &registry, "/tmp", Duration::from_secs(10),
-            &event_tx, None, uuid::Uuid::new_v4(), &mut idx, 10, &config, &*TEST_SINK,
+            &batch,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            &event_tx,
+            None,
+            uuid::Uuid::new_v4(),
+            &mut idx,
+            10,
+            &config,
+            &*TEST_SINK,
             None, // plugin_registry
-        ).await;
+        )
+        .await;
 
         assert_eq!(results.len(), 2);
         // Only 1 entry in idempotency (deduped by same args).
@@ -2198,14 +2590,22 @@ mod tests {
     #[test]
     fn transient_error_cargo_lock_patterns() {
         // IMP-3: cargo lock contention is transient and env-repairable
-        assert!(is_transient_error("error: failed to open: /project/target/debug/.cargo-lock"));
+        assert!(is_transient_error(
+            "error: failed to open: /project/target/debug/.cargo-lock"
+        ));
         assert!(is_transient_error("could not acquire package cache lock"));
-        assert!(is_transient_error("waiting for file lock on build directory"));
+        assert!(is_transient_error(
+            "waiting for file lock on build directory"
+        ));
         // EAGAIN / resource temporarily unavailable
-        assert!(is_transient_error("Resource temporarily unavailable (EAGAIN)"));
+        assert!(is_transient_error(
+            "Resource temporarily unavailable (EAGAIN)"
+        ));
         assert!(is_transient_error("resource temporarily unavailable"));
         // Non-transient errors must not be misclassified
-        assert!(!is_transient_error("permission denied: /project/target/debug/halcon"));
+        assert!(!is_transient_error(
+            "permission denied: /project/target/debug/halcon"
+        ));
         assert!(!is_transient_error("unknown tool: cargo_lock_remover"));
     }
 
@@ -2252,13 +2652,26 @@ mod tests {
         };
 
         let result = execute_one_tool(
-            &tool, &registry, "/tmp", Duration::from_secs(10),
-            DryRunMode::Off, None, &no_retry, &*TEST_SINK, None, None, "", &[],
-        ).await;
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &no_retry,
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
 
         // Unknown tool should return error (no retries attempted).
         match &result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(*is_error);
                 assert!(content.contains("unknown tool"));
             }
@@ -2331,14 +2744,28 @@ mod tests {
             );
 
             let result = execute_one_tool(
-                &tool_call, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             assert_eq!(result.tool_use_id, unique_id);
             match &result.content_block {
-                ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
                     assert_eq!(tool_use_id, unique_id);
                     assert!(!is_error);
                     assert!(content.contains("hello integration"));
@@ -2358,14 +2785,28 @@ mod tests {
             );
 
             let result = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             assert_eq!(result.tool_use_id, unique_id);
             match &result.content_block {
-                ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } => {
                     assert_eq!(tool_use_id, unique_id);
                     assert!(is_error);
                 }
@@ -2380,14 +2821,28 @@ mod tests {
             let tool_call = make_tool_call(unique_id, "nonexistent_tool", serde_json::json!({}));
 
             let result = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             assert_eq!(result.tool_use_id, unique_id);
             match &result.content_block {
-                ContentBlock::ToolResult { tool_use_id, is_error, content } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    content,
+                } => {
                     assert_eq!(tool_use_id, unique_id);
                     assert!(is_error);
                     assert!(content.contains("unknown tool"));
@@ -2408,14 +2863,28 @@ mod tests {
             };
 
             let result = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             assert_eq!(result.tool_use_id, "toolu_poisoned");
             match &result.content_block {
-                ContentBlock::ToolResult { tool_use_id, is_error, content } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    content,
+                } => {
                     assert_eq!(tool_use_id, "toolu_poisoned");
                     assert!(is_error);
                     assert!(content.contains("corrupted"));
@@ -2440,13 +2909,25 @@ mod tests {
             };
 
             let result = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             match &result.content_block {
-                ContentBlock::ToolResult { content, is_error, .. } => {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
                     assert!(is_error);
                     assert!(!content.contains("this_should_never_run"));
                     assert!(content.contains("corrupted"));
@@ -2468,17 +2949,33 @@ mod tests {
             let mut idx = 0u32;
 
             let batch = vec![
-                make_tool_call("t1", "file_read", serde_json::json!({"path": dir.path().join("a.txt").to_str().unwrap()})),
-                make_tool_call("t2", "file_read", serde_json::json!({"path": dir.path().join("b.txt").to_str().unwrap()})),
+                make_tool_call(
+                    "t1",
+                    "file_read",
+                    serde_json::json!({"path": dir.path().join("a.txt").to_str().unwrap()}),
+                ),
+                make_tool_call(
+                    "t2",
+                    "file_read",
+                    serde_json::json!({"path": dir.path().join("b.txt").to_str().unwrap()}),
+                ),
             ];
 
             let results = execute_parallel_batch(
-                &batch, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), &event_tx, None,
-                uuid::Uuid::new_v4(), &mut idx, 10,
-                &ToolExecutionConfig::default(), &*TEST_SINK,
+                &batch,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                &event_tx,
+                None,
+                uuid::Uuid::new_v4(),
+                &mut idx,
+                10,
+                &ToolExecutionConfig::default(),
+                &*TEST_SINK,
                 None, // plugin_registry
-            ).await;
+            )
+            .await;
 
             assert_eq!(results.len(), 2);
             // Results sorted by id.
@@ -2488,7 +2985,9 @@ mod tests {
             // Both should have actual file content.
             for result in &results {
                 match &result.content_block {
-                    ContentBlock::ToolResult { is_error, content, .. } => {
+                    ContentBlock::ToolResult {
+                        is_error, content, ..
+                    } => {
                         assert!(!is_error, "tool_use_id={}: {content}", result.tool_use_id);
                         assert!(content.contains("content_"));
                     }
@@ -2507,17 +3006,33 @@ mod tests {
             let mut idx = 0u32;
 
             let batch = vec![
-                make_tool_call("success", "file_read", serde_json::json!({"path": dir.path().join("exists.txt").to_str().unwrap()})),
-                make_tool_call("fail", "file_read", serde_json::json!({"path": "/nonexistent/file.txt"})),
+                make_tool_call(
+                    "success",
+                    "file_read",
+                    serde_json::json!({"path": dir.path().join("exists.txt").to_str().unwrap()}),
+                ),
+                make_tool_call(
+                    "fail",
+                    "file_read",
+                    serde_json::json!({"path": "/nonexistent/file.txt"}),
+                ),
             ];
 
             let results = execute_parallel_batch(
-                &batch, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), &event_tx, None,
-                uuid::Uuid::new_v4(), &mut idx, 10,
-                &ToolExecutionConfig::default(), &*TEST_SINK,
+                &batch,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                &event_tx,
+                None,
+                uuid::Uuid::new_v4(),
+                &mut idx,
+                10,
+                &ToolExecutionConfig::default(),
+                &*TEST_SINK,
                 None, // plugin_registry
-            ).await;
+            )
+            .await;
 
             assert_eq!(results.len(), 2);
 
@@ -2526,7 +3041,9 @@ mod tests {
             let fail_result = results.iter().find(|r| r.tool_use_id == "fail").unwrap();
 
             match &success_result.content_block {
-                ContentBlock::ToolResult { is_error, content, .. } => {
+                ContentBlock::ToolResult {
+                    is_error, content, ..
+                } => {
                     assert!(!is_error);
                     assert!(content.contains("ok"));
                 }
@@ -2549,17 +3066,27 @@ mod tests {
 
             // file_read is ReadOnly → parallel. But nonexistent goes sequential.
             // In a real plan, unknown would go sequential. Here we test parallel batch directly.
-            let batch = vec![
-                make_tool_call("valid", "glob", serde_json::json!({"pattern": "*.nonexistent_ext"})),
-            ];
+            let batch = vec![make_tool_call(
+                "valid",
+                "glob",
+                serde_json::json!({"pattern": "*.nonexistent_ext"}),
+            )];
 
             let results = execute_parallel_batch(
-                &batch, &registry, "/tmp",
-                Duration::from_secs(10), &event_tx, None,
-                uuid::Uuid::new_v4(), &mut idx, 10,
-                &ToolExecutionConfig::default(), &*TEST_SINK,
+                &batch,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                &event_tx,
+                None,
+                uuid::Uuid::new_v4(),
+                &mut idx,
+                10,
+                &ToolExecutionConfig::default(),
+                &*TEST_SINK,
                 None, // plugin_registry
-            ).await;
+            )
+            .await;
 
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].tool_use_id, "valid");
@@ -2577,26 +3104,45 @@ mod tests {
             );
 
             let result = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             assert_eq!(result.tool_name, "bash");
             match &result.content_block {
-                ContentBlock::ToolResult { content, is_error, .. } => {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
                     assert!(!is_error);
                     assert!(content.contains("integration_test_output"));
                 }
                 _ => panic!("expected ToolResult"),
             }
-            assert!(result.duration_ms > 0, "real execution should have non-zero duration");
+            assert!(
+                result.duration_ms > 0,
+                "real execution should have non-zero duration"
+            );
         }
 
         #[tokio::test]
         async fn real_grep_execution_through_executor() {
             let dir = tempfile::TempDir::new().unwrap();
-            std::fs::write(dir.path().join("search_target.txt"), "needle in haystack\nhaystack only\n").unwrap();
+            std::fs::write(
+                dir.path().join("search_target.txt"),
+                "needle in haystack\nhaystack only\n",
+            )
+            .unwrap();
 
             let registry = halcon_tools::default_registry(&Default::default());
             let tool_call = make_tool_call(
@@ -2606,13 +3152,25 @@ mod tests {
             );
 
             let result = execute_one_tool(
-                &tool_call, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             match &result.content_block {
-                ContentBlock::ToolResult { content, is_error, .. } => {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
                     assert!(!is_error);
                     assert!(content.contains("needle"));
                 }
@@ -2634,10 +3192,20 @@ mod tests {
                 serde_json::json!({"path": path.to_str().unwrap(), "content": "roundtrip_data"}),
             );
             let write_result = execute_one_tool(
-                &write_call, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &write_call,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             match &write_result.content_block {
                 ContentBlock::ToolResult { is_error, .. } => assert!(!is_error),
@@ -2651,13 +3219,25 @@ mod tests {
                 serde_json::json!({"path": path.to_str().unwrap()}),
             );
             let read_result = execute_one_tool(
-                &read_call, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &read_call,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             match &read_result.content_block {
-                ContentBlock::ToolResult { content, is_error, .. } => {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
                     assert!(!is_error);
                     assert!(content.contains("roundtrip_data"));
                 }
@@ -2677,18 +3257,38 @@ mod tests {
             let mut idx = 0u32;
 
             let batch = vec![
-                make_tool_call("r1", "file_read", serde_json::json!({"path": dir.path().join("f.txt").to_str().unwrap()})),
-                make_tool_call("r2", "glob", serde_json::json!({"pattern": "*.txt", "path": dir.path().to_str().unwrap()})),
-                make_tool_call("r3", "directory_tree", serde_json::json!({"path": dir.path().to_str().unwrap()})),
+                make_tool_call(
+                    "r1",
+                    "file_read",
+                    serde_json::json!({"path": dir.path().join("f.txt").to_str().unwrap()}),
+                ),
+                make_tool_call(
+                    "r2",
+                    "glob",
+                    serde_json::json!({"pattern": "*.txt", "path": dir.path().to_str().unwrap()}),
+                ),
+                make_tool_call(
+                    "r3",
+                    "directory_tree",
+                    serde_json::json!({"path": dir.path().to_str().unwrap()}),
+                ),
             ];
 
             let results = execute_parallel_batch(
-                &batch, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), &event_tx, None,
-                uuid::Uuid::new_v4(), &mut idx, 10,
-                &ToolExecutionConfig::default(), &*TEST_SINK,
+                &batch,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                &event_tx,
+                None,
+                uuid::Uuid::new_v4(),
+                &mut idx,
+                10,
+                &ToolExecutionConfig::default(),
+                &*TEST_SINK,
                 None, // plugin_registry
-            ).await;
+            )
+            .await;
 
             assert_eq!(results.len(), 3);
             for result in &results {
@@ -2717,17 +3317,32 @@ mod tests {
             let mut idx = 0u32;
 
             let input_ids = vec!["id_alpha", "id_beta", "id_gamma"];
-            let batch: Vec<CompletedToolUse> = input_ids.iter().map(|id| {
-                make_tool_call(id, "file_read", serde_json::json!({"path": dir.path().join("a.txt").to_str().unwrap()}))
-            }).collect();
+            let batch: Vec<CompletedToolUse> = input_ids
+                .iter()
+                .map(|id| {
+                    make_tool_call(
+                        id,
+                        "file_read",
+                        serde_json::json!({"path": dir.path().join("a.txt").to_str().unwrap()}),
+                    )
+                })
+                .collect();
 
             let results = execute_parallel_batch(
-                &batch, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), &event_tx, None,
-                uuid::Uuid::new_v4(), &mut idx, 10,
-                &ToolExecutionConfig::default(), &*TEST_SINK,
+                &batch,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                &event_tx,
+                None,
+                uuid::Uuid::new_v4(),
+                &mut idx,
+                10,
+                &ToolExecutionConfig::default(),
+                &*TEST_SINK,
                 None, // plugin_registry
-            ).await;
+            )
+            .await;
 
             // Every result ID must match an input ID.
             let result_ids: Vec<&str> = results.iter().map(|r| r.tool_use_id.as_str()).collect();
@@ -2749,32 +3364,49 @@ mod tests {
             let (event_tx, mut rx) = halcon_core::event_bus(64);
             let mut idx = 0u32;
 
-            let batch = vec![
-                make_tool_call("ev1", "file_read", serde_json::json!({"path": dir.path().join("f.txt").to_str().unwrap()})),
-            ];
+            let batch = vec![make_tool_call(
+                "ev1",
+                "file_read",
+                serde_json::json!({"path": dir.path().join("f.txt").to_str().unwrap()}),
+            )];
 
             execute_parallel_batch(
-                &batch, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), &event_tx, None,
-                uuid::Uuid::new_v4(), &mut idx, 10,
-                &ToolExecutionConfig::default(), &*TEST_SINK,
+                &batch,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                &event_tx,
+                None,
+                uuid::Uuid::new_v4(),
+                &mut idx,
+                10,
+                &ToolExecutionConfig::default(),
+                &*TEST_SINK,
                 None, // plugin_registry
-            ).await;
+            )
+            .await;
 
             // Should have received at least one event.
             let mut event_count = 0;
             while rx.try_recv().is_ok() {
                 event_count += 1;
             }
-            assert!(event_count >= 1, "expected at least 1 event, got {event_count}");
+            assert!(
+                event_count >= 1,
+                "expected at least 1 event, got {event_count}"
+            );
         }
 
         // === Phase 27 (RC-3 fix): is_deterministic_error tests ===
 
         #[test]
         fn deterministic_file_not_found() {
-            assert!(is_deterministic_error("No such file or directory: /tmp/missing.rs"));
-            assert!(is_deterministic_error("Error: File not found at /foo/bar.txt"));
+            assert!(is_deterministic_error(
+                "No such file or directory: /tmp/missing.rs"
+            ));
+            assert!(is_deterministic_error(
+                "Error: File not found at /foo/bar.txt"
+            ));
             assert!(is_deterministic_error("NOT FOUND"));
         }
 
@@ -2786,21 +3418,31 @@ mod tests {
 
         #[test]
         fn deterministic_path_type_errors() {
-            assert!(is_deterministic_error("Error: /tmp is a directory, expected a file"));
+            assert!(is_deterministic_error(
+                "Error: /tmp is a directory, expected a file"
+            ));
             assert!(is_deterministic_error("not a directory: /tmp/file.txt/sub"));
         }
 
         #[test]
         fn deterministic_security_errors() {
-            assert!(is_deterministic_error("path traversal detected in ../../etc/passwd"));
-            assert!(is_deterministic_error("Operation blocked by security policy"));
+            assert!(is_deterministic_error(
+                "path traversal detected in ../../etc/passwd"
+            ));
+            assert!(is_deterministic_error(
+                "Operation blocked by security policy"
+            ));
             assert!(is_deterministic_error("unknown tool: foo_bar"));
-            assert!(is_deterministic_error("Action denied by task context access control"));
+            assert!(is_deterministic_error(
+                "Action denied by task context access control"
+            ));
         }
 
         #[test]
         fn deterministic_schema_errors() {
-            assert!(is_deterministic_error("schema validation failed: invalid type"));
+            assert!(is_deterministic_error(
+                "schema validation failed: invalid type"
+            ));
             assert!(is_deterministic_error("missing required field 'path'"));
         }
 
@@ -2834,29 +3476,47 @@ mod tests {
             // TRANSIENT (pool/connection can recover within the session):
             // MCP pool call failures and transport errors are transient — the MCP server
             // process may still be alive; the stdio/socket dropped and can reconnect.
-            assert!(!is_deterministic_error("MCP pool call failed: connection refused to server"),
-                "mcp pool call failed is transient (server may recover)");
-            assert!(!is_deterministic_error("failed to call 'filesystem/read_file' after 5 attempts"),
-                "failed to call is transient — retrying via is_transient_error path");
-            assert!(!is_deterministic_error("connection reset by peer"),
-                "connection reset is transient");
-            assert!(!is_deterministic_error("transport error: channel closed"),
-                "transport/channel errors are transient");
+            assert!(
+                !is_deterministic_error("MCP pool call failed: connection refused to server"),
+                "mcp pool call failed is transient (server may recover)"
+            );
+            assert!(
+                !is_deterministic_error("failed to call 'filesystem/read_file' after 5 attempts"),
+                "failed to call is transient — retrying via is_transient_error path"
+            );
+            assert!(
+                !is_deterministic_error("connection reset by peer"),
+                "connection reset is transient"
+            );
+            assert!(
+                !is_deterministic_error("transport error: channel closed"),
+                "transport/channel errors are transient"
+            );
 
             // DETERMINISTIC (server/tool was never initialized; will never work):
-            assert!(is_deterministic_error("MCP server is not initialized"),
-                "server not initialized is deterministic");
-            assert!(is_deterministic_error("not initialized: call ensure_initialized first"),
-                "not initialized is deterministic");
-            assert!(is_deterministic_error("process start failed: no such executable"),
-                "process start failed is deterministic");
+            assert!(
+                is_deterministic_error("MCP server is not initialized"),
+                "server not initialized is deterministic"
+            );
+            assert!(
+                is_deterministic_error("not initialized: call ensure_initialized first"),
+                "not initialized is deterministic"
+            );
+            assert!(
+                is_deterministic_error("process start failed: no such executable"),
+                "process start failed is deterministic"
+            );
         }
 
         #[test]
         fn transient_mcp_connection_errors() {
             // MCP transport/connection errors can recover — classify as transient, NOT deterministic.
-            assert!(!is_deterministic_error("MCP pool call failed: connection refused to server"));
-            assert!(!is_deterministic_error("failed to call tool after 3 retries"));
+            assert!(!is_deterministic_error(
+                "MCP pool call failed: connection refused to server"
+            ));
+            assert!(!is_deterministic_error(
+                "failed to call tool after 3 retries"
+            ));
             assert!(!is_deterministic_error("channel closed unexpectedly"));
         }
 
@@ -2944,16 +3604,34 @@ mod tests {
         };
 
         let result = execute_one_tool(
-            &tool, &registry, "/tmp",
-            Duration::from_secs(10), DryRunMode::Off, None,
-            &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-        ).await;
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
 
         match &result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(*is_error, "rm -rf should be blocked as high-risk");
-                assert!(content.contains("[BLOCKED]"), "content should contain [BLOCKED]: {content}");
-                assert!(content.contains("risk"), "content should mention risk: {content}");
+                assert!(
+                    content.contains("[BLOCKED]"),
+                    "content should contain [BLOCKED]: {content}"
+                );
+                assert!(
+                    content.contains("risk"),
+                    "content should mention risk: {content}"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -2971,15 +3649,27 @@ mod tests {
         };
 
         let result = execute_one_tool(
-            &tool, &registry, "/tmp",
-            Duration::from_secs(10), DryRunMode::Off, None,
-            &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-        ).await;
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
 
         match &result.content_block {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(!content.contains("[BLOCKED]"),
-                    "echo hello should NOT be blocked by risk scorer: {content}");
+                assert!(
+                    !content.contains("[BLOCKED]"),
+                    "echo hello should NOT be blocked by risk scorer: {content}"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -2996,15 +3686,30 @@ mod tests {
         };
 
         let result = execute_one_tool(
-            &tool, &registry, "/tmp",
-            Duration::from_secs(10), DryRunMode::Off, None,
-            &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-        ).await;
+            &tool,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
 
         match &result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(*is_error, "rm -rf + exfil should be blocked (score >= 50)");
-                assert!(content.contains("[BLOCKED]"), "should contain [BLOCKED]: {content}");
+                assert!(
+                    content.contains("[BLOCKED]"),
+                    "should contain [BLOCKED]: {content}"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -3127,9 +3832,14 @@ mod tests {
             assert!(result.is_some(), "missing path should be blocked");
             let r = result.unwrap();
             match &r.content_block {
-                ContentBlock::ToolResult { is_error, content, .. } => {
+                ContentBlock::ToolResult {
+                    is_error, content, ..
+                } => {
                     assert!(*is_error, "gate result must be is_error=true");
-                    assert!(content.contains("do not exist"), "error must mention existence: {content}");
+                    assert!(
+                        content.contains("do not exist"),
+                        "error must mention existence: {content}"
+                    );
                 }
                 _ => panic!("expected ToolResult"),
             }
@@ -3172,7 +3882,10 @@ mod tests {
                 .expect("should be blocked");
             match &result.content_block {
                 ContentBlock::ToolResult { content, .. } => {
-                    assert!(content.contains("retry"), "error should advise model to retry: {content}");
+                    assert!(
+                        content.contains("retry"),
+                        "error should advise model to retry: {content}"
+                    );
                 }
                 _ => panic!("expected ToolResult"),
             }
@@ -3195,7 +3908,10 @@ mod tests {
             match &result.content_block {
                 ContentBlock::ToolResult { content, .. } => {
                     // Suggestion for "main.rs" should appear in the error
-                    assert!(content.contains("main"), "did-you-mean hint should mention similar file: {content}");
+                    assert!(
+                        content.contains("main"),
+                        "did-you-mean hint should mention similar file: {content}"
+                    );
                 }
                 _ => panic!("expected ToolResult"),
             }
@@ -3213,15 +3929,30 @@ mod tests {
             };
 
             let result = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             match &result.content_block {
-                ContentBlock::ToolResult { is_error, content, .. } => {
+                ContentBlock::ToolResult {
+                    is_error, content, ..
+                } => {
                     assert!(*is_error, "nonexistent file_read must be blocked");
-                    assert!(content.contains("do not exist"), "gate error message: {content}");
+                    assert!(
+                        content.contains("do not exist"),
+                        "gate error message: {content}"
+                    );
                 }
                 _ => panic!("expected ToolResult"),
             }
@@ -3242,13 +3973,25 @@ mod tests {
             };
 
             let result = execute_one_tool(
-                &tool_call, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             match &result.content_block {
-                ContentBlock::ToolResult { is_error, content, .. } => {
+                ContentBlock::ToolResult {
+                    is_error, content, ..
+                } => {
                     assert!(!is_error, "existing path must not be blocked by gate");
                     assert!(content.contains("gate_pass"), "tool output: {content}");
                 }
@@ -3270,22 +4013,48 @@ mod tests {
 
             // First call: gate fires, records error in idempotency.
             let r1 = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, Some(&idem),
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                Some(&idem),
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
             assert_eq!(idem.len(), 1, "gate should record error in idempotency");
 
             // Second call: cache hit (no gate re-execution).
             let r2 = execute_one_tool(
-                &tool_call, &registry, "/tmp",
-                Duration::from_secs(10), DryRunMode::Off, Some(&idem),
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
-            assert_eq!(idem.len(), 1, "second call should hit cache, not add new entry");
+                &tool_call,
+                &registry,
+                "/tmp",
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                Some(&idem),
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
+            assert_eq!(
+                idem.len(),
+                1,
+                "second call should hit cache, not add new entry"
+            );
 
-            let e1 = matches!(&r1.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
-            let e2 = matches!(&r2.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
+            let e1 =
+                matches!(&r1.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
+            let e2 =
+                matches!(&r2.content_block, ContentBlock::ToolResult { is_error, .. } if *is_error);
             assert!(e1 && e2, "both calls must produce is_error=true");
         }
 
@@ -3306,15 +4075,28 @@ mod tests {
             };
 
             let result = execute_one_tool(
-                &tool_call, &registry, dir.path().to_str().unwrap(),
-                Duration::from_secs(10), DryRunMode::Off, None,
-                &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-            ).await;
+                &tool_call,
+                &registry,
+                dir.path().to_str().unwrap(),
+                Duration::from_secs(10),
+                DryRunMode::Off,
+                None,
+                &ToolRetryConfig::default(),
+                &*TEST_SINK,
+                None,
+                None,
+                "",
+                &[],
+            )
+            .await;
 
             // Gate must not block; file_write should succeed.
             match &result.content_block {
                 ContentBlock::ToolResult { is_error, .. } => {
-                    assert!(!is_error, "file_write on new path must not be blocked by gate");
+                    assert!(
+                        !is_error,
+                        "file_write on new path must not be blocked by gate"
+                    );
                 }
                 _ => panic!("expected ToolResult"),
             }
@@ -3330,8 +4112,15 @@ mod tests {
         let tools = vec![make_completed("t1", "run_command")];
         let plan = plan_execution(tools, &registry);
         // run_command → bash (Destructive) → sequential
-        assert!(plan.parallel_batch.is_empty(), "run_command alias must not go to parallel batch");
-        assert_eq!(plan.sequential_batch.len(), 1, "run_command alias must route to sequential batch");
+        assert!(
+            plan.parallel_batch.is_empty(),
+            "run_command alias must not go to parallel batch"
+        );
+        assert_eq!(
+            plan.sequential_batch.len(),
+            1,
+            "run_command alias must route to sequential batch"
+        );
     }
 
     #[test]
@@ -3354,19 +4143,35 @@ mod tests {
         };
 
         let result = execute_one_tool(
-            &tool_call, &registry, "/tmp",
-            Duration::from_secs(10), DryRunMode::Off, None,
-            &ToolRetryConfig::default(), &*TEST_SINK, None, None, "", &[],
-        ).await;
+            &tool_call,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            DryRunMode::Off,
+            None,
+            &ToolRetryConfig::default(),
+            &*TEST_SINK,
+            None,
+            None,
+            "",
+            &[],
+        )
+        .await;
 
         // Must resolve to bash and execute — NOT return "unknown tool".
         match &result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
-                assert!(!content.contains("unknown tool"),
-                    "run_command should resolve via alias, not 'unknown tool': {content}");
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(
+                    !content.contains("unknown tool"),
+                    "run_command should resolve via alias, not 'unknown tool': {content}"
+                );
                 assert!(!is_error, "alias bash execution must succeed: {content}");
-                assert!(content.contains("alias_resolved"),
-                    "bash output must contain echo result: {content}");
+                assert!(
+                    content.contains("alias_resolved"),
+                    "bash output must contain echo result: {content}"
+                );
             }
             _ => panic!("expected ToolResult"),
         }
@@ -3382,26 +4187,37 @@ mod tests {
         let mut idx = 0u32;
 
         let batch = vec![
-            make_completed("safe", "file_read"),   // ReadOnly — allowed
-            make_completed("danger", "bash"),       // Destructive — must be blocked
+            make_completed("safe", "file_read"), // ReadOnly — allowed
+            make_completed("danger", "bash"),    // Destructive — must be blocked
         ];
 
         let results = execute_parallel_batch(
-            &batch, &registry, "/tmp",
-            Duration::from_secs(10), &event_tx, None,
-            uuid::Uuid::new_v4(), &mut idx, 10,
-            &ToolExecutionConfig::default(), &*TEST_SINK,
+            &batch,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            &event_tx,
             None,
-        ).await;
+            uuid::Uuid::new_v4(),
+            &mut idx,
+            10,
+            &ToolExecutionConfig::default(),
+            &*TEST_SINK,
+            None,
+        )
+        .await;
 
         assert_eq!(results.len(), 2, "both tools must produce a result");
 
         let bash_result = results.iter().find(|r| r.tool_use_id == "danger").unwrap();
         match &bash_result.content_block {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(*is_error, "bash in parallel batch must return error");
                 assert!(
-                    content.contains("cannot run in the parallel") || content.contains("routing bug"),
+                    content.contains("cannot run in the parallel")
+                        || content.contains("routing bug"),
                     "error must explain the routing violation: {content}"
                 );
             }
@@ -3412,8 +4228,10 @@ mod tests {
         let safe_result = results.iter().find(|r| r.tool_use_id == "safe").unwrap();
         match &safe_result.content_block {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(!content.contains("routing bug"),
-                    "file_read must not be blocked by PASO 5 guard");
+                assert!(
+                    !content.contains("routing bug"),
+                    "file_read must not be blocked by PASO 5 guard"
+                );
             }
             _ => panic!("expected ToolResult for file_read"),
         }
@@ -3427,19 +4245,31 @@ mod tests {
 
         let batch = vec![make_completed("fw", "file_write")];
         let results = execute_parallel_batch(
-            &batch, &registry, "/tmp",
-            Duration::from_secs(10), &event_tx, None,
-            uuid::Uuid::new_v4(), &mut idx, 10,
-            &ToolExecutionConfig::default(), &*TEST_SINK,
+            &batch,
+            &registry,
+            "/tmp",
+            Duration::from_secs(10),
+            &event_tx,
             None,
-        ).await;
+            uuid::Uuid::new_v4(),
+            &mut idx,
+            10,
+            &ToolExecutionConfig::default(),
+            &*TEST_SINK,
+            None,
+        )
+        .await;
 
         assert_eq!(results.len(), 1);
         match &results[0].content_block {
-            ContentBlock::ToolResult { is_error, content, .. } => {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
                 assert!(*is_error, "file_write must be blocked in parallel batch");
-                assert!(content.contains("cannot run in the parallel"),
-                    "error must cite parallel batch violation: {content}");
+                assert!(
+                    content.contains("cannot run in the parallel"),
+                    "error must cite parallel batch violation: {content}"
+                );
             }
             _ => panic!("expected ToolResult"),
         }

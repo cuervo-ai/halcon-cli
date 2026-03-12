@@ -13,23 +13,21 @@ use serde_json::json;
 
 use halcon_core::error::Result as HalconResult;
 use halcon_core::traits::ModelProvider;
+use halcon_core::types::ResilienceConfig;
 use halcon_core::types::{
     AgentLimits, ChatMessage, ContentBlock, MessageContent, ModelChunk, ModelInfo, ModelRequest,
     Role, RoutingConfig, Session, StopReason, TokenCost, TokenUsage, ToolsConfig,
 };
-use halcon_core::types::ResilienceConfig;
 use halcon_tools::ToolRegistry;
 
 use super::accumulator::CompletedToolUse;
-use halcon_core::types::Phase14Context;
 use super::agent::{run_agent_loop, AgentContext, StopCondition};
 use super::compaction::ContextCompactor;
-use super::executor::{
-    self, is_deterministic_error, plan_execution, ToolExecutionConfig,
-};
-use super::permissions::PermissionChecker;
+use super::executor::{self, is_deterministic_error, plan_execution, ToolExecutionConfig};
+use super::security::permissions::PermissionChecker;
 use super::resilience::ResilienceManager;
 use crate::render::sink::{RenderSink, SilentSink};
+use halcon_core::types::Phase14Context;
 
 // ── Mock provider: emits a tool call on first invoke, text on second ──
 
@@ -234,7 +232,11 @@ async fn multi_round_tool_conversation() {
     // NOTE: content must be >= MIN_EVIDENCE_BYTES (30) so the EBS gate does not fire.
     // EBS-B2 fires when text_bytes_extracted < 30 AND content-read tools were attempted,
     // which would incorrectly intercept the model's legitimate EndTurn response.
-    std::fs::write("/tmp/stress_test_31.txt", "stress content for the multi-round tool conversation test").unwrap();
+    std::fs::write(
+        "/tmp/stress_test_31.txt",
+        "stress content for the multi-round tool conversation test",
+    )
+    .unwrap();
 
     let provider: Arc<dyn ModelProvider> = Arc::new(ToolCallProvider::new());
     let mut session = Session::new("tool_test".into(), "tool-test".into(), "/tmp".into());
@@ -248,14 +250,25 @@ async fn multi_round_tool_conversation() {
     let routing_config = RoutingConfig::default();
 
     let result = run_agent_loop(test_ctx(
-        &provider, &mut session, &request, &tool_reg, &mut perms,
-        &event_tx, &limits, &mut resilience, &routing_config,
+        &provider,
+        &mut session,
+        &request,
+        &tool_reg,
+        &mut perms,
+        &event_tx,
+        &limits,
+        &mut resilience,
+        &routing_config,
     ))
     .await
     .unwrap();
 
     // rounds counts tool-use rounds. 1 tool-use round + final text round.
-    assert!(result.rounds >= 1, "Expected at least 1 tool-use round, got {}", result.rounds);
+    assert!(
+        result.rounds >= 1,
+        "Expected at least 1 tool-use round, got {}",
+        result.rounds
+    );
     assert_eq!(result.stop_condition, StopCondition::EndTurn);
     assert!(
         result.full_text.contains("Done with tool"),
@@ -312,7 +325,10 @@ async fn parallel_tool_batch_10_concurrent() {
 
     // Verify each result contains content.
     for (i, res) in results.iter().enumerate() {
-        if let ContentBlock::ToolResult { content, is_error, .. } = &res.content_block {
+        if let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &res.content_block
+        {
             assert!(!is_error, "file_read {i} should not error");
             assert!(
                 content.contains(&format!("content_{i}")) || content.contains("content_"),
@@ -400,8 +416,14 @@ fn context_pipeline_cascade_tight_budget() {
     // Push 50+ messages to force L0→L1→L2 cascade.
     for i in 0..60 {
         pipeline.add_message(ChatMessage {
-            role: if i % 2 == 0 { Role::User } else { Role::Assistant },
-            content: MessageContent::Text(format!("Message number {i} with some padding text here")),
+            role: if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            content: MessageContent::Text(format!(
+                "Message number {i} with some padding text here"
+            )),
         });
     }
 
@@ -450,17 +472,33 @@ async fn fallback_provider_cost_tracking() {
 
     #[async_trait]
     impl ModelProvider for CostProvider {
-        fn name(&self) -> &str { &self.provider_name }
-        fn supported_models(&self) -> &[ModelInfo] { self.inner.supported_models() }
-        async fn invoke(&self, request: &ModelRequest) -> HalconResult<BoxStream<'static, HalconResult<ModelChunk>>> {
+        fn name(&self) -> &str {
+            &self.provider_name
+        }
+        fn supported_models(&self) -> &[ModelInfo] {
+            self.inner.supported_models()
+        }
+        async fn invoke(
+            &self,
+            request: &ModelRequest,
+        ) -> HalconResult<BoxStream<'static, HalconResult<ModelChunk>>> {
             self.inner.invoke(request).await
         }
-        async fn is_available(&self) -> bool { true }
+        async fn is_available(&self) -> bool {
+            true
+        }
         fn estimate_cost(&self, _request: &ModelRequest) -> TokenCost {
-            TokenCost { estimated_input_tokens: 50, estimated_cost_usd: self.cost }
+            TokenCost {
+                estimated_input_tokens: 50,
+                estimated_cost_usd: self.cost,
+            }
         }
         fn validate_model(&self, model: &str) -> HalconResult<()> {
-            if model == "echo" { Ok(()) } else { self.inner.validate_model(model) }
+            if model == "echo" {
+                Ok(())
+            } else {
+                self.inner.validate_model(model)
+            }
         }
     }
 
@@ -492,8 +530,15 @@ async fn fallback_provider_cost_tracking() {
     let routing_config = RoutingConfig::default();
 
     let mut ctx = test_ctx(
-        &primary, &mut session, &request, &tool_reg, &mut perms,
-        &event_tx, &limits, &mut resilience, &routing_config,
+        &primary,
+        &mut session,
+        &request,
+        &tool_reg,
+        &mut perms,
+        &event_tx,
+        &limits,
+        &mut resilience,
+        &routing_config,
     );
     ctx.fallback_providers = &fallbacks;
 
@@ -629,12 +674,18 @@ fn planning_gate_unsupported_model() {
     let planner = LlmPlanner::new(provider, "nonexistent-model-xyz".into());
 
     // supports_model should return false.
-    assert!(!planner.supports_model(), "Planner should not support nonexistent model");
+    assert!(
+        !planner.supports_model(),
+        "Planner should not support nonexistent model"
+    );
 
     // With a valid model it should return true.
     let provider2: Arc<dyn ModelProvider> = Arc::new(halcon_providers::EchoProvider::new());
     let planner2 = LlmPlanner::new(provider2, "echo".into());
-    assert!(planner2.supports_model(), "Planner should support 'echo' model");
+    assert!(
+        planner2.supports_model(),
+        "Planner should support 'echo' model"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -647,26 +698,62 @@ fn mixed_permission_tools_partition() {
 
     let tools = vec![
         // ReadOnly tools (should go parallel).
-        CompletedToolUse { id: "t1".into(), name: "file_read".into(), input: json!({}) },
-        CompletedToolUse { id: "t2".into(), name: "grep".into(), input: json!({}) },
-        CompletedToolUse { id: "t3".into(), name: "glob".into(), input: json!({}) },
+        CompletedToolUse {
+            id: "t1".into(),
+            name: "file_read".into(),
+            input: json!({}),
+        },
+        CompletedToolUse {
+            id: "t2".into(),
+            name: "grep".into(),
+            input: json!({}),
+        },
+        CompletedToolUse {
+            id: "t3".into(),
+            name: "glob".into(),
+            input: json!({}),
+        },
         // Destructive tools (should go sequential).
-        CompletedToolUse { id: "t4".into(), name: "bash".into(), input: json!({}) },
-        CompletedToolUse { id: "t5".into(), name: "file_write".into(), input: json!({}) },
+        CompletedToolUse {
+            id: "t4".into(),
+            name: "bash".into(),
+            input: json!({}),
+        },
+        CompletedToolUse {
+            id: "t5".into(),
+            name: "file_write".into(),
+            input: json!({}),
+        },
     ];
 
     let plan = plan_execution(tools, &tool_reg);
 
     // ReadOnly tools should be in parallel batch.
-    assert_eq!(plan.parallel_batch.len(), 3, "3 ReadOnly tools should be parallel");
-    let parallel_names: Vec<&str> = plan.parallel_batch.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        plan.parallel_batch.len(),
+        3,
+        "3 ReadOnly tools should be parallel"
+    );
+    let parallel_names: Vec<&str> = plan
+        .parallel_batch
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     assert!(parallel_names.contains(&"file_read"));
     assert!(parallel_names.contains(&"grep"));
     assert!(parallel_names.contains(&"glob"));
 
     // Destructive/ReadWrite tools should be in sequential batch.
-    assert_eq!(plan.sequential_batch.len(), 2, "2 non-ReadOnly tools should be sequential");
-    let seq_names: Vec<&str> = plan.sequential_batch.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        plan.sequential_batch.len(),
+        2,
+        "2 non-ReadOnly tools should be sequential"
+    );
+    let seq_names: Vec<&str> = plan
+        .sequential_batch
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     assert!(seq_names.contains(&"bash"));
     assert!(seq_names.contains(&"file_write"));
 }
@@ -731,12 +818,19 @@ async fn empty_malformed_tool_results() {
 
     // All should be errors or contain error messages.
     for res in &results {
-        if let ContentBlock::ToolResult { content, is_error, .. } = &res.content_block {
+        if let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &res.content_block
+        {
             // These are all error cases — content should indicate failure.
             assert!(
-                *is_error || content.to_lowercase().contains("error") || content.contains("not found")
-                    || content.contains("unknown tool") || content.contains("_parse_error")
-                    || content.contains("empty") || content.contains("invalid"),
+                *is_error
+                    || content.to_lowercase().contains("error")
+                    || content.contains("not found")
+                    || content.contains("unknown tool")
+                    || content.contains("_parse_error")
+                    || content.contains("empty")
+                    || content.contains("invalid"),
                 "Expected error content for {}, got: {}",
                 res.tool_name,
                 &content[..content.len().min(200)]

@@ -3,14 +3,12 @@
 /// Provides context from product requirements documents, user stories, and roadmap.
 /// Phase: Discovery
 /// Priority: 95
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct RequirementsServer {
     db: AsyncDatabase,
@@ -173,6 +171,7 @@ impl ContextSource for RequirementsServer {
 mod tests {
     use super::*;
     use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_requirements_server_creation() {
@@ -259,7 +258,11 @@ mod tests {
 
         let chunks = server.gather(&query).await.unwrap();
         // FTS5 search may not work in all configurations, so we accept 0 or 1 results
-        assert!(chunks.len() <= 1, "Expected 0 or 1 results, got {}", chunks.len());
+        assert!(
+            chunks.len() <= 1,
+            "Expected 0 or 1 results, got {}",
+            chunks.len()
+        );
         if !chunks.is_empty() {
             assert!(chunks[0].content.contains("Auth System"));
         }

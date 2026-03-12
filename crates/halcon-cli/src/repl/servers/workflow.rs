@@ -4,14 +4,12 @@
 /// and workflow execution history.
 /// Phase: Testing / Deployment
 /// Priority: 80
-
 use async_trait::async_trait;
 use halcon_context::estimate_tokens;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::{ContextChunk, ContextQuery, ContextSource};
 use halcon_core::types::SdlcPhase;
-use halcon_storage::{AsyncDatabase, Database};
-use std::sync::Arc;
+use halcon_storage::AsyncDatabase;
 
 pub struct WorkflowServer {
     db: AsyncDatabase,
@@ -38,13 +36,15 @@ impl WorkflowServer {
 
         tokio::task::spawn_blocking(move || {
             let db_ref = db.inner();
-            let conn = db_ref.conn()
+            let conn = db_ref
+                .conn()
                 .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
             let workflows = if let Some(q) = query_opt {
                 // FTS5 search
-                let mut stmt = conn.prepare(
-                    "SELECT workflow_id, workflow_name, workflow_file, description,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT workflow_id, workflow_name, workflow_file, description,
                             trigger_events, last_run_status, last_run_at, last_run_duration_ms,
                             failure_count, success_count
                      FROM ci_workflows
@@ -52,53 +52,60 @@ impl WorkflowServer {
                        SELECT rowid FROM ci_workflows_fts WHERE ci_workflows_fts MATCH ?
                      )
                      ORDER BY last_run_at DESC NULLS LAST
-                     LIMIT 10"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 10",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([q], |row| {
-                    Ok(WorkflowInfo {
-                        workflow_id: row.get(0)?,
-                        workflow_name: row.get(1)?,
-                        workflow_file: row.get(2)?,
-                        description: row.get(3)?,
-                        trigger_events: row.get(4)?,
-                        last_run_status: row.get(5)?,
-                        last_run_at: row.get(6)?,
-                        last_run_duration_ms: row.get(7)?,
-                        failure_count: row.get(8)?,
-                        success_count: row.get(9)?,
+                let rows = stmt
+                    .query_map([q], |row| {
+                        Ok(WorkflowInfo {
+                            workflow_id: row.get(0)?,
+                            workflow_name: row.get(1)?,
+                            workflow_file: row.get(2)?,
+                            description: row.get(3)?,
+                            trigger_events: row.get(4)?,
+                            last_run_status: row.get(5)?,
+                            last_run_at: row.get(6)?,
+                            last_run_duration_ms: row.get(7)?,
+                            failure_count: row.get(8)?,
+                            success_count: row.get(9)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
             } else {
                 // No query → return recent workflows (failures first, then most recent)
-                let mut stmt = conn.prepare(
-                    "SELECT workflow_id, workflow_name, workflow_file, description,
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT workflow_id, workflow_name, workflow_file, description,
                             trigger_events, last_run_status, last_run_at, last_run_duration_ms,
                             failure_count, success_count
                      FROM ci_workflows
                      ORDER BY
                         CASE WHEN last_run_status = 'failure' THEN 0 ELSE 1 END,
                         last_run_at DESC NULLS LAST
-                     LIMIT 10"
-                ).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                     LIMIT 10",
+                    )
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
-                let rows = stmt.query_map([], |row| {
-                    Ok(WorkflowInfo {
-                        workflow_id: row.get(0)?,
-                        workflow_name: row.get(1)?,
-                        workflow_file: row.get(2)?,
-                        description: row.get(3)?,
-                        trigger_events: row.get(4)?,
-                        last_run_status: row.get(5)?,
-                        last_run_at: row.get(6)?,
-                        last_run_duration_ms: row.get(7)?,
-                        failure_count: row.get(8)?,
-                        success_count: row.get(9)?,
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok(WorkflowInfo {
+                            workflow_id: row.get(0)?,
+                            workflow_name: row.get(1)?,
+                            workflow_file: row.get(2)?,
+                            description: row.get(3)?,
+                            trigger_events: row.get(4)?,
+                            last_run_status: row.get(5)?,
+                            last_run_at: row.get(6)?,
+                            last_run_duration_ms: row.get(7)?,
+                            failure_count: row.get(8)?,
+                            success_count: row.get(9)?,
+                        })
                     })
-                }).map_err(|e| HalconError::DatabaseError(e.to_string()))?;
+                    .map_err(|e| HalconError::DatabaseError(e.to_string()))?;
 
                 rows.collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| HalconError::DatabaseError(e.to_string()))?
@@ -136,9 +143,7 @@ impl ContextSource for WorkflowServer {
     }
 
     async fn gather(&self, query: &ContextQuery) -> Result<Vec<ContextChunk>> {
-        let workflows = self
-            .fetch_workflows(query.user_message.as_deref())
-            .await?;
+        let workflows = self.fetch_workflows(query.user_message.as_deref()).await?;
 
         if workflows.is_empty() {
             return Ok(vec![]);
@@ -157,7 +162,9 @@ impl ContextSource for WorkflowServer {
 
             let status_info = if let Some(status) = workflow.last_run_status {
                 let success_rate = if workflow.success_count + workflow.failure_count > 0 {
-                    (workflow.success_count as f64 / (workflow.success_count + workflow.failure_count) as f64) * 100.0
+                    (workflow.success_count as f64
+                        / (workflow.success_count + workflow.failure_count) as f64)
+                        * 100.0
                 } else {
                     0.0
                 };
@@ -218,6 +225,8 @@ impl ContextSource for WorkflowServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halcon_storage::Database;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_workflow_server_creation() {

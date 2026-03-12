@@ -16,14 +16,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::ast_symbol_extractor::{extract_from_buffer, RegexExtractor, SymbolExtractor, SymbolKind};
+use super::ast_symbol_extractor::{
+    extract_from_buffer, RegexExtractor, SymbolExtractor, SymbolKind,
+};
 use super::ci_result_ingestor::{
     CiApiClient, CiEvent, CiIngestorConfig, CiResultIngestor, CiRunRecord, CiRunStatus,
 };
 use super::dev_gateway::DevGateway;
 use super::ide_protocol_handler::IdeProtocolHandler;
 use super::runtime_signal_ingestor::{metrics_to_markdown, RuntimeSignal, RuntimeSignalIngestor};
-use super::test_result_parsers::{parse_cargo_test, parse_junit_xml, TestStatus};
+use super::git_tools::test_results::{parse_cargo_test, parse_junit_xml, TestStatus};
 use super::unsaved_buffer_tracker::UnsavedBufferTracker;
 
 // ── Phase 1–2 invariants ──────────────────────────────────────────────────────
@@ -31,7 +33,7 @@ use super::unsaved_buffer_tracker::UnsavedBufferTracker;
 /// Phase 1: Safe edit manager should classify known risky patterns.
 #[test]
 fn safe_edit_risk_classifier_invariants() {
-    use super::risk_tier_classifier::RiskTierClassifier;
+    use super::security::risk_tier::RiskTierClassifier;
 
     // Deletions are always riskier than additions.
     // Unified diff: lines starting with '-' are deletions, '+' are additions.
@@ -51,7 +53,7 @@ fn safe_edit_risk_classifier_invariants() {
 /// Phase 2: CommitRewardTracker.flush_rewards() must produce rewards in [0, 1].
 #[test]
 fn commit_reward_tracker_invariant_reward_in_unit_interval() {
-    use super::commit_reward_tracker::CommitRewardTracker;
+    use super::git_tools::commit_rewards::CommitRewardTracker;
 
     let session_id = uuid::Uuid::new_v4();
     let mut tracker = CommitRewardTracker::new(session_id);
@@ -99,8 +101,7 @@ fn cargo_test_parser_all_passed_is_consistent() {
         let result = parse_cargo_test(output, "suite");
         let has_failure = result.cases.iter().any(|c| c.status == TestStatus::Failed);
         assert_eq!(
-            result.all_passed,
-            !has_failure,
+            result.all_passed, !has_failure,
             "all_passed mismatch for output: {output:?}"
         );
     }
@@ -133,7 +134,7 @@ fn junit_totals_are_consistent() {
 /// Phase 4: CiRunRecord::compute_reward is always in [0, 1].
 #[test]
 fn ci_reward_is_always_in_unit_interval() {
-    use super::test_result_parsers::{TestCase, TestResultFormat, TestSuiteResult};
+    use super::git_tools::test_results::{TestCase, TestResultFormat, TestSuiteResult};
 
     let statuses = [
         CiRunStatus::Success,
@@ -267,7 +268,8 @@ async fn dev_gateway_context_includes_open_buffers() {
             }
         }
     });
-    gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap()).await;
+    gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap())
+        .await;
 
     let ctx = gw.build_context().await;
     assert_eq!(ctx.open_buffers, 1);
@@ -326,7 +328,10 @@ pub trait Handle { fn handle(&self); }
     for sym in &idx.symbols {
         assert!(!sym.name.is_empty(), "symbol name must not be empty");
         assert!(
-            sym.name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_'),
+            sym.name
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_alphabetic() || c == '_'),
             "symbol name {:?} starts with non-alphabetic character",
             sym.name
         );
@@ -415,15 +420,24 @@ def create_pipeline() -> DataPipeline:
             }
         }
     });
-    gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap()).await;
+    gw.handle_lsp_message(&serde_json::to_vec(&open).unwrap())
+        .await;
 
     // Extract symbols from the buffer content.
     let content = gw.buffers.content("file:///pipeline.py").await.unwrap();
     let idx = extract_from_buffer("file:///pipeline.py", &content);
 
     // Should have found DataPipeline class and create_pipeline function.
-    let classes: Vec<_> = idx.symbols.iter().filter(|s| s.kind == SymbolKind::Class).collect();
-    let fns: Vec<_> = idx.symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method)).collect();
+    let classes: Vec<_> = idx
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Class)
+        .collect();
+    let fns: Vec<_> = idx
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+        .collect();
 
     assert!(!classes.is_empty(), "should extract DataPipeline class");
     assert!(!fns.is_empty(), "should extract at least one function");
@@ -456,19 +470,27 @@ async fn ci_and_runtime_signals_blended_reward() {
     // Set up runtime signals.
     let ingestor = RuntimeSignalIngestor::new(64);
     for _ in 0..10 {
-        ingestor.ingest(RuntimeSignal::span("agent.round", 80.0, false)).await;
+        ingestor
+            .ingest(RuntimeSignal::span("agent.round", 80.0, false))
+            .await;
     }
     let rt_metrics = ingestor.metrics().await;
     let rt_reward = rt_metrics.as_reward();
 
     // Both rewards must be in [0, 1].
     let ctx = gw.build_context().await;
-    assert!((0.0..=1.0).contains(&ctx.env_reward), "CI env reward out of range");
+    assert!(
+        (0.0..=1.0).contains(&ctx.env_reward),
+        "CI env reward out of range"
+    );
     assert!((0.0..=1.0).contains(&rt_reward), "RT reward out of range");
 
     // Blended reward (50/50) must also be in [0, 1].
     let blended = 0.5 * ctx.env_reward + 0.5 * rt_reward;
-    assert!((0.0..=1.0).contains(&blended), "blended reward out of range: {blended}");
+    assert!(
+        (0.0..=1.0).contains(&blended),
+        "blended reward out of range: {blended}"
+    );
 
     // Markdown summaries must be non-empty.
     let md = metrics_to_markdown(&rt_metrics);

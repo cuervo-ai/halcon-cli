@@ -135,10 +135,7 @@ pub enum CiEvent {
     /// A run reached a terminal state (success, failure, cancelled).
     RunCompleted(CiRunRecord),
     /// Poll cycle failed (network error, auth failure, rate limit).
-    PollError {
-        provider: String,
-        message: String,
-    },
+    PollError { provider: String, message: String },
     /// Ingestor has shut down cleanly.
     Shutdown,
 }
@@ -230,18 +227,9 @@ impl CiApiClient for GithubActionsClient {
                 arr.iter()
                     .map(|r| {
                         let run_id = r["id"].to_string();
-                        let sha = r["head_sha"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string();
-                        let name = r["name"]
-                            .as_str()
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let branch = r["head_branch"]
-                            .as_str()
-                            .unwrap_or("unknown")
-                            .to_string();
+                        let sha = r["head_sha"].as_str().unwrap_or_default().to_string();
+                        let name = r["name"].as_str().unwrap_or("unknown").to_string();
+                        let branch = r["head_branch"].as_str().unwrap_or("unknown").to_string();
                         // GitHub: use `conclusion` when available (terminal), else `status`
                         let status = r["conclusion"]
                             .as_str()
@@ -391,9 +379,7 @@ impl CiResultIngestor {
             }
 
             // Emit RunStarted when transitioning into Running for the first time.
-            if matches!(status, CiRunStatus::Running)
-                && !seen_guard.contains_key(&run_id)
-            {
+            if matches!(status, CiRunStatus::Running) && !seen_guard.contains_key(&run_id) {
                 let _ = tx.send(CiEvent::RunStarted {
                     run_id: run_id.clone(),
                     workflow: workflow_name.clone(),
@@ -482,25 +468,43 @@ mod tests {
 
     #[test]
     fn parse_github_success_conclusion() {
-        assert_eq!(CiRunStatus::from_github_str("success"), CiRunStatus::Success);
-        assert_eq!(CiRunStatus::from_github_str("completed"), CiRunStatus::Success);
+        assert_eq!(
+            CiRunStatus::from_github_str("success"),
+            CiRunStatus::Success
+        );
+        assert_eq!(
+            CiRunStatus::from_github_str("completed"),
+            CiRunStatus::Success
+        );
     }
 
     #[test]
     fn parse_github_failure_conclusion() {
-        assert_eq!(CiRunStatus::from_github_str("failure"), CiRunStatus::Failure);
-        assert_eq!(CiRunStatus::from_github_str("timed_out"), CiRunStatus::Failure);
+        assert_eq!(
+            CiRunStatus::from_github_str("failure"),
+            CiRunStatus::Failure
+        );
+        assert_eq!(
+            CiRunStatus::from_github_str("timed_out"),
+            CiRunStatus::Failure
+        );
     }
 
     #[test]
     fn parse_github_in_progress() {
-        assert_eq!(CiRunStatus::from_github_str("in_progress"), CiRunStatus::Running);
+        assert_eq!(
+            CiRunStatus::from_github_str("in_progress"),
+            CiRunStatus::Running
+        );
         assert!(!CiRunStatus::Running.is_terminal());
     }
 
     #[test]
     fn parse_github_cancelled() {
-        assert_eq!(CiRunStatus::from_github_str("cancelled"), CiRunStatus::Cancelled);
+        assert_eq!(
+            CiRunStatus::from_github_str("cancelled"),
+            CiRunStatus::Cancelled
+        );
         assert!(CiRunStatus::Cancelled.is_terminal());
     }
 
@@ -532,7 +536,10 @@ mod tests {
         ];
         for s in &all {
             let r = s.as_reward();
-            assert!((0.0..=1.0).contains(&r), "reward out of range for {s:?}: {r}");
+            assert!(
+                (0.0..=1.0).contains(&r),
+                "reward out of range for {s:?}: {r}"
+            );
         }
     }
 
@@ -574,7 +581,7 @@ mod tests {
             ],
             all_passed: false,
             total_duration_ms: None,
-            format: crate::repl::test_result_parsers::TestResultFormat::JunitXml,
+            format: crate::repl::git_tools::test_results::TestResultFormat::JunitXml,
         };
 
         // Success CI + 50% pass rate → 0.6*1.0 + 0.4*0.5 = 0.8
@@ -729,9 +736,16 @@ mod tests {
 
         match rx.try_recv().expect("event expected") {
             CiEvent::RunCompleted(rec) => {
-                assert!(rec.test_results.is_some(), "JUnit results should be attached");
+                assert!(
+                    rec.test_results.is_some(),
+                    "JUnit results should be attached"
+                );
                 // 4/4 pass → pass_rate = 1.0 → reward = 1.0
-                assert!((rec.reward - 1.0).abs() < 1e-6, "expected 1.0, got {}", rec.reward);
+                assert!(
+                    (rec.reward - 1.0).abs() < 1e-6,
+                    "expected 1.0, got {}",
+                    rec.reward
+                );
             }
             other => panic!("expected RunCompleted, got {other:?}"),
         }
