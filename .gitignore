@@ -175,8 +175,7 @@ scripts/seed_search_index.sh
 # Cache directories
 .fastembed_cache/
 
-# Workers directory (root-level only — crates/*/src/workers/ are committed)
-/workers/
+# crates/*/src/workers/ are committed; root /workers/ is now tracked too
 img/hero.mov
 img/*.mov
 img/*.mp4

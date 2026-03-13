@@ -494,15 +494,22 @@ jobs:
           npm run build
         continue-on-error: true  # Don't fail release if website build fails
 
-      - name: Deploy website (Cloudflare Pages)
-        uses: cloudflare/pages-action@v1
+      - name: Deploy website to Cloudflare Pages (halcon-website)
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: halcon-website
-          directory: website/dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          command: pages deploy website/dist --project-name=halcon-website --commit-dirty=true
         continue-on-error: true  # Don't fail release if pages deploy fails
+
+      - name: Deploy releases Worker (halcon-releases)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          workingDirectory: workers/releases
+          command: deploy
+        continue-on-error: true  # Don't fail release if worker deploy fails
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Smoke tests post-release
@@ -535,11 +542,25 @@ jobs:
           fi
         continue-on-error: true
 
-      - name: Test install script syntax
+      - name: Test install script syntax and reachability
         run: |
-          # Download and syntax-check install.sh
-          curl -sSfL https://cli.cuervo.cloud/install.sh -o /tmp/install.sh 2>/dev/null || true
-          if [ -f /tmp/install.sh ]; then
-            bash -n /tmp/install.sh && echo "✓ install.sh syntax OK" || echo "WARN: install.sh syntax error"
+          # Syntax-check local copy (always available)
+          bash -n website/public/install.sh && echo "✓ install.sh syntax OK"
+
+          # Verify install script is reachable over HTTPS (allow CDN propagation)
+          sleep 15
+          HTTP_CODE=$(curl -sSo /dev/null -w '%{http_code}' https://cli.cuervo.cloud/install.sh 2>/dev/null || echo '000')
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✓ cli.cuervo.cloud/install.sh: HTTP 200"
+          else
+            echo "WARN: cli.cuervo.cloud/install.sh returned HTTP ${HTTP_CODE}"
+          fi
+
+          # Verify releases Worker health
+          HTTP_WORKER=$(curl -sSo /dev/null -w '%{http_code}' https://releases.cli.cuervo.cloud/health 2>/dev/null || echo '000')
+          if [ "$HTTP_WORKER" = "200" ]; then
+            echo "✓ releases.cli.cuervo.cloud/health: HTTP 200"
+          else
+            echo "WARN: releases Worker returned HTTP ${HTTP_WORKER}"
           fi
         continue-on-error: true
