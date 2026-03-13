@@ -451,12 +451,12 @@ jobs:
 
             **Linux / macOS:**
             ```bash
-            curl -sSfL https://cli.cuervo.cloud/install.sh | sh
+            curl -sSfL https://halcon.cuervo.cloud/install.sh | sh
             ```
 
             **Windows (PowerShell):**
             ```powershell
-            iwr -useb https://cli.cuervo.cloud/install.ps1 | iex
+            iwr -useb https://halcon.cuervo.cloud/install.ps1 | iex
             ```
 
             **Homebrew:**
@@ -549,11 +549,11 @@ jobs:
 
           # Verify install script is reachable over HTTPS (allow CDN propagation)
           sleep 15
-          HTTP_CODE=$(curl -sSo /dev/null -w '%{http_code}' https://cli.cuervo.cloud/install.sh 2>/dev/null || echo '000')
+          HTTP_CODE=$(curl -sSo /dev/null -w '%{http_code}' https://halcon.cuervo.cloud/install.sh 2>/dev/null || echo '000')
           if [ "$HTTP_CODE" = "200" ]; then
-            echo "✓ cli.cuervo.cloud/install.sh: HTTP 200"
+            echo "✓ halcon.cuervo.cloud/install.sh: HTTP 200"
           else
-            echo "WARN: cli.cuervo.cloud/install.sh returned HTTP ${HTTP_CODE}"
+            echo "WARN: halcon.cuervo.cloud/install.sh returned HTTP ${HTTP_CODE}"
           fi
 
           # Verify releases Worker health

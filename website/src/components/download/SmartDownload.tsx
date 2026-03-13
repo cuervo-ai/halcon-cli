@@ -158,8 +158,8 @@ export default function SmartDownload({ releasesUrl }: SmartDownloadProps) {
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
   ${artifactName}`,
     script: os === 'windows'
-      ? `iwr -useb https://cli.cuervo.cloud/install.ps1 | iex`
-      : `curl -sSfL https://cli.cuervo.cloud/install.sh | sh`,
+      ? `iwr -useb https://halcon.cuervo.cloud/install.ps1 | iex`
+      : `curl -sSfL https://halcon.cuervo.cloud/install.sh | sh`,
   };
 
   // ── Main render ──────────────────────────────────────────────────────────────

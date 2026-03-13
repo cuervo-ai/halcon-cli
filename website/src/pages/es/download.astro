@@ -16,8 +16,8 @@ const platforms = [
 ];
 
 const installMethods = [
-  { label: "macOS / Linux",      color: "emerald", lang_: "bash",       code: "curl -sSfL https://cli.cuervo.cloud/install.sh | sh",       note: "Verificado con SHA-256. Instala en ~/.local/bin/" },
-  { label: "Windows (PowerShell)", color: "blue",  lang_: "powershell", code: "iwr -useb https://cli.cuervo.cloud/install.ps1 | iex",      note: "Instala en %LOCALAPPDATA%\\halcon\\bin" },
+  { label: "macOS / Linux",      color: "emerald", lang_: "bash",       code: "curl -sSfL https://halcon.cuervo.cloud/install.sh | sh",       note: "Verificado con SHA-256. Instala en ~/.local/bin/" },
+  { label: "Windows (PowerShell)", color: "blue",  lang_: "powershell", code: "iwr -useb https://halcon.cuervo.cloud/install.ps1 | iex",      note: "Instala en %LOCALAPPDATA%\\halcon\\bin" },
   { label: "Homebrew",           color: "amber",   lang_: "bash",       code: "brew tap cuervo-ai/tap && brew install halcon",          note: "macOS y Linux — se actualiza con brew upgrade" },
 ];
 ---

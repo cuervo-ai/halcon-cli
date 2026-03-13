@@ -1,6 +1,6 @@
 # Halcón CLI Windows Installer (PowerShell)
-# Usage: iwr -useb https://cli.cuervo.cloud/install.ps1 | iex
-# Or:    & ([scriptblock]::Create((iwr -useb https://cli.cuervo.cloud/install.ps1))) -Version v0.3.0
+# Usage: iwr -useb https://halcon.cuervo.cloud/install.ps1 | iex
+# Or:    & ([scriptblock]::Create((iwr -useb https://halcon.cuervo.cloud/install.ps1))) -Version v0.3.0
 [CmdletBinding()]
 param(
     [string]$Version = "latest",
