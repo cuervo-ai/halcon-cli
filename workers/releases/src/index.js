@@ -1,17 +1,18 @@
 /**
  * Halcon CLI — Releases Worker
  *
- * Domain: releases.cli.cuervo.cloud
+ * Domains:
+ *   cli.cuervo.cloud              → install scripts (proxied from halcon-website Pages)
+ *   releases.cli.cuervo.cloud     → binary manifests, checksums, artifact proxy
  *
  * Routes:
- *   /health                         → status JSON
- *   /latest/manifest.json           → build manifest from GitHub API (KV-cached)
- *   /latest/checksums.txt           → proxy from GitHub Release asset
- *   /latest/<artifact>              → proxy binary from GitHub Release
- *   /v<version>/<artifact>          → proxy binary from GitHub Release (versioned)
- *
- * Note: cli.cuervo.cloud (install.sh / install.ps1) is served by the
- *       Cloudflare Pages project "halcon-website" — not this Worker.
+ *   cli.cuervo.cloud/install.sh           → proxy from halcon.cuervo.cloud/install.sh
+ *   cli.cuervo.cloud/install.ps1          → proxy from halcon.cuervo.cloud/install.ps1
+ *   cli.cuervo.cloud/*                    → redirect to halcon.cuervo.cloud (website)
+ *   releases.cli.cuervo.cloud/health      → status JSON
+ *   releases.cli.cuervo.cloud/latest/manifest.json → build manifest (KV-cached)
+ *   releases.cli.cuervo.cloud/latest/<artifact>    → proxy from GitHub Release
+ *   releases.cli.cuervo.cloud/v<version>/<artifact> → proxy from GitHub Release
  *
  * Required bindings (wrangler.toml / dashboard):
  *   RELEASES_KV  — KV namespace for manifest caching
@@ -73,6 +74,14 @@ export default {
       ? { "Authorization": `Bearer ${env.GITHUB_TOKEN}` }
       : {};
 
+    // ── cli.cuervo.cloud — install script delivery ───────────────────────────
+    // This domain hosts install.sh and install.ps1 for `curl | sh` installs.
+    // Scripts are proxied live from the halcon-website Pages project so they
+    // stay in sync with every Pages deploy — no Worker redeploy needed.
+    if (url.hostname === "cli.cuervo.cloud") {
+      return await handleInstallDomain(path, secHeaders);
+    }
+
     try {
       // ── /health ─────────────────────────────────────────────────────────────
       if (path === "/" || path === "/health") {
@@ -129,6 +138,53 @@ export default {
     }
   }
 };
+
+// ─── cli.cuervo.cloud — install script delivery ──────────────────────────────
+// Proxies install.sh / install.ps1 from halcon.cuervo.cloud (Pages).
+// All other paths redirect to the main website.
+async function handleInstallDomain(path, headers) {
+  const PAGES_ORIGIN = "https://halcon.cuervo.cloud";
+
+  // Direct script delivery — proxy so the URL stays cli.cuervo.cloud
+  if (path === "/install.sh" || path === "/install" || path === "/get" || path === "/get.sh") {
+    const upstream = await fetch(`${PAGES_ORIGIN}/install.sh`, {
+      headers: { "User-Agent": "halcon-install-worker/1.0" },
+    });
+    if (!upstream.ok) {
+      return new Response("install.sh temporarily unavailable", { status: 502, headers });
+    }
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        ...headers,
+        "Content-Type":  "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",          // Always serve latest script
+        "X-Source":      "halcon-website-pages",
+      },
+    });
+  }
+
+  if (path === "/install.ps1") {
+    const upstream = await fetch(`${PAGES_ORIGIN}/install.ps1`, {
+      headers: { "User-Agent": "halcon-install-worker/1.0" },
+    });
+    if (!upstream.ok) {
+      return new Response("install.ps1 temporarily unavailable", { status: 502, headers });
+    }
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        ...headers,
+        "Content-Type":  "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Source":      "halcon-website-pages",
+      },
+    });
+  }
+
+  // Everything else → redirect to main website
+  return Response.redirect(`${PAGES_ORIGIN}${path}`, 302);
+}
 
 // ─── Serve manifest.json (KV-cached) ────────────────────────────────────────
 async function serveManifest(env, ctx, headers, githubAuth, repo, cacheTtl) {

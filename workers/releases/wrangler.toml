@@ -19,11 +19,14 @@ id      = "d1ff7daf831c453bb57d214a87d6566e"
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 # releases.cli.cuervo.cloud → binary manifests, checksums, artifact proxy
-# Cloudflare manages DNS + TLS for this custom domain automatically.
+# cli.cuervo.cloud          → install.sh / install.ps1 (proxied from Pages)
 #
-# NOTE: cli.cuervo.cloud is intentionally NOT listed here.
-#   It is served by the Cloudflare Pages project "halcon-website"
-#   (halcon.cuervo.cloud / cli.cuervo.cloud) which serves install.sh.
+# Both custom domains are managed by this Worker.
+# Cloudflare automatically creates DNS records when custom domains are attached.
 [[routes]]
 pattern   = "releases.cli.cuervo.cloud/*"
+zone_name = "cuervo.cloud"
+
+[[routes]]
+pattern   = "cli.cuervo.cloud/*"
 zone_name = "cuervo.cloud"
