@@ -7,7 +7,7 @@ set -e
 HALCON_VERSION="${HALCON_VERSION:-latest}"
 RELEASES_URL="${HALCON_RELEASES_URL:-https://releases.cli.cuervo.cloud}"
 MANIFEST_URL="${RELEASES_URL}/latest/manifest.json"
-INSTALL_DIR="${HALCON_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${HALCON_INSTALL_DIR:-}"
 BINARY_NAME="halcon"
 
 # ─── Colors ────────────────────────────────────────────────────────────────
@@ -37,10 +37,11 @@ parse_args() {
                 printf "Halcon CLI Installer\n\n"
                 printf "Options:\n"
                 printf "  --version VERSION   Install specific version (default: latest)\n"
-                printf "  --dir DIR           Install directory (default: ~/.local/bin)\n"
+                printf "  --dir DIR           Install directory (default: auto-detected)\n"
                 printf "\nExamples:\n"
                 printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh\n"
                 printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh -s -- --version v0.3.0\n"
+                printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh -s -- --dir /usr/local/bin\n"
                 exit 0 ;;
             *) error "Unknown argument: $1" ;;
         esac
@@ -76,6 +77,78 @@ detect_platform() {
     info "Platform: ${OS} ${ARCH} → ${TARGET}"
 }
 
+# ─── Install directory resolution ──────────────────────────────────────────
+# Finds a writable install directory, fixing ownership if needed.
+# Priority: user-specified > ~/.local/bin > ~/bin > /usr/local/bin
+resolve_install_dir() {
+    # If user explicitly specified --dir, honor it (create + fail loudly if unwritable)
+    if [ -n "$INSTALL_DIR" ]; then
+        _ensure_writable_dir "$INSTALL_DIR" || \
+            error "Cannot write to --dir '${INSTALL_DIR}'. Check permissions."
+        return
+    fi
+
+    # Candidates in preference order
+    for candidate in \
+        "$HOME/.local/bin" \
+        "$HOME/bin" \
+        "/usr/local/bin"
+    do
+        if _ensure_writable_dir "$candidate" 2>/dev/null; then
+            INSTALL_DIR="$candidate"
+            return
+        fi
+    done
+
+    error "No writable install directory found. Try: --dir \$HOME/bin"
+}
+
+# Returns 0 if dir is (or can be made) writable by the current user.
+# Fixes root-owned directories under $HOME by reclaiming ownership.
+_ensure_writable_dir() {
+    local dir="$1"
+
+    # Does it exist?
+    if [ -d "$dir" ]; then
+        # Writable already → done
+        if [ -w "$dir" ]; then
+            return 0
+        fi
+
+        # Under $HOME and owned by root? Reclaim it.
+        case "$dir" in
+            "$HOME"*)
+                _dir_owner="$(ls -ld "$dir" 2>/dev/null | awk '{print $3}')"
+                if [ "$_dir_owner" = "root" ]; then
+                    warn "Fixing ownership of ${dir} (was owned by root from a previous sudo install)"
+                    if command -v sudo >/dev/null 2>&1; then
+                        sudo chown "$(id -un)" "$dir" 2>/dev/null && return 0
+                    fi
+                fi
+                ;;
+        esac
+        return 1
+    fi
+
+    # Does not exist — try to create it
+    if mkdir -p "$dir" 2>/dev/null; then
+        return 0
+    fi
+
+    # Under $HOME it might need a sudo mkdir if a parent is root-owned
+    case "$dir" in
+        "$HOME"*)
+            if command -v sudo >/dev/null 2>&1; then
+                sudo mkdir -p "$dir" 2>/dev/null && \
+                sudo chown "$(id -un)" "$dir" 2>/dev/null && \
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
 # ─── Download helpers ───────────────────────────────────────────────────────
 download() {
     local url="$1"
@@ -109,6 +182,52 @@ verify_sha256() {
     ok "SHA-256 verified"
 }
 
+# ─── PATH configuration ──────────────────────────────────────────────────────
+configure_path() {
+    local dir="$1"
+
+    # Already in PATH
+    case ":${PATH}:" in
+        *":${dir}:"*)
+            ok "Already in PATH — no shell config change needed"
+            return
+            ;;
+    esac
+
+    local export_line="export PATH=\"\$PATH:${dir}\""
+    local rc_file=""
+
+    SHELL_NAME="$(basename "${SHELL:-sh}")"
+    case "$SHELL_NAME" in
+        zsh)  rc_file="$HOME/.zshrc" ;;
+        bash) rc_file="$HOME/.bashrc" ;;
+        fish)
+            rc_file="$HOME/.config/fish/config.fish"
+            export_line="fish_add_path ${dir}"
+            ;;
+        *)    rc_file="$HOME/.profile" ;;
+    esac
+
+    # Create rc file if it doesn't exist
+    if [ ! -f "$rc_file" ]; then
+        mkdir -p "$(dirname "$rc_file")" 2>/dev/null || true
+        touch "$rc_file" 2>/dev/null || true
+    fi
+
+    if [ -f "$rc_file" ] && grep -qF "$dir" "$rc_file" 2>/dev/null; then
+        ok "PATH already in ${rc_file}"
+    elif [ -w "$rc_file" ] || [ -w "$(dirname "$rc_file")" ]; then
+        printf '\n# Halcon CLI\n%s\n' "$export_line" >> "$rc_file"
+        ok "PATH added to ${rc_file}"
+    else
+        warn "Could not update ${rc_file} — add manually:"
+        warn "  ${export_line}"
+    fi
+
+    printf "\n${YELLOW}  To use halcon in this terminal session:${RESET}\n"
+    printf "    ${BOLD}export PATH=\"\$PATH:${dir}\"${RESET}\n"
+}
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
@@ -121,29 +240,31 @@ main() {
     trap 'rm -rf "$TMPDIR_WORK"' EXIT
 
     # ─── Resolve version ────────────────────────────────────────────────────
-    # Strip leading 'v' for consistency
-    REQUESTED_VERSION="$(echo "$HALCON_VERSION" | sed 's/^v//')"
+    REQUESTED_VERSION="$(printf '%s' "$HALCON_VERSION" | sed 's/^v//')"
 
     if [ "$REQUESTED_VERSION" = "latest" ]; then
         info "Fetching release manifest..."
         MANIFEST_FILE="$TMPDIR_WORK/manifest.json"
         download "$MANIFEST_URL" "$MANIFEST_FILE"
 
-        # Check for error response
-        if grep -q '"error"' "$MANIFEST_FILE"; then
+        if grep -q '"error"' "$MANIFEST_FILE" 2>/dev/null; then
             ERR="$(grep -o '"error": *"[^"]*"' "$MANIFEST_FILE" | sed 's/.*"\([^"]*\)".*/\1/')"
             error "Release API error: ${ERR}. Check https://releases.cli.cuervo.cloud/health"
         fi
 
         VERSION="$(grep -o '"version": *"[^"]*"' "$MANIFEST_FILE" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
         if [ -z "$VERSION" ]; then
-            error "Failed to parse version from manifest. Manifest content: $(cat "$MANIFEST_FILE" | head -5)"
+            error "Failed to parse version from manifest"
         fi
         info "Latest version: ${VERSION}"
     else
         VERSION="$REQUESTED_VERSION"
         info "Installing version: ${VERSION}"
     fi
+
+    # ─── Resolve install directory ───────────────────────────────────────────
+    resolve_install_dir
+    info "Install directory: ${INSTALL_DIR}"
 
     # ─── Build artifact URL ─────────────────────────────────────────────────
     ARTIFACT_NAME="halcon-${VERSION}-${TARGET}.${EXT}"
@@ -153,7 +274,7 @@ main() {
         DOWNLOAD_URL="${RELEASES_URL}/v${VERSION}/${ARTIFACT_NAME}"
     fi
 
-    # ─── Fetch SHA-256 from checksums.txt ───────────────────────────────────
+    # ─── Fetch SHA-256 ──────────────────────────────────────────────────────
     EXPECTED_SHA=""
     if [ "$REQUESTED_VERSION" = "latest" ]; then
         CS_URL="${RELEASES_URL}/latest/checksums.txt"
@@ -169,15 +290,15 @@ main() {
     info "Downloading ${ARTIFACT_NAME}..."
     ARCHIVE_FILE="$TMPDIR_WORK/${ARTIFACT_NAME}"
     download "$DOWNLOAD_URL" "$ARCHIVE_FILE" || \
-        error "Download failed. Artifact '${ARTIFACT_NAME}' may not exist for version ${VERSION}.\nCheck: ${RELEASES_URL}/latest/manifest.json"
-    ok "Download complete ($(du -sh "$ARCHIVE_FILE" | cut -f1))"
+        error "Download failed. Check: ${RELEASES_URL}/latest/manifest.json"
+    ok "Downloaded ($(du -sh "$ARCHIVE_FILE" | cut -f1))"
 
     # ─── Verify SHA-256 ─────────────────────────────────────────────────────
     if [ -n "$EXPECTED_SHA" ]; then
         info "Verifying SHA-256..."
         verify_sha256 "$ARCHIVE_FILE" "$EXPECTED_SHA"
     else
-        warn "SHA-256 not in checksums.txt, skipping verification"
+        warn "SHA-256 not available, skipping verification"
     fi
 
     # ─── Extract binary ─────────────────────────────────────────────────────
@@ -186,7 +307,6 @@ main() {
     mkdir -p "$EXTRACT_DIR"
     tar xzf "$ARCHIVE_FILE" -C "$EXTRACT_DIR"
 
-    # Find binary: may be at top-level or inside a subdirectory
     BINARY_SRC=""
     for candidate in \
         "$EXTRACT_DIR/${BINARY_NAME}" \
@@ -199,7 +319,6 @@ main() {
         fi
     done
 
-    # Fallback: find any executable named 'cuervo' in the extracted tree
     if [ -z "$BINARY_SRC" ]; then
         BINARY_SRC="$(find "$EXTRACT_DIR" -name "${BINARY_NAME}" -type f 2>/dev/null | head -1)"
     fi
@@ -209,51 +328,49 @@ main() {
     fi
 
     # ─── Install ─────────────────────────────────────────────────────────────
-    mkdir -p "$INSTALL_DIR"
+    DEST="${INSTALL_DIR}/${BINARY_NAME}"
     chmod +x "$BINARY_SRC"
-    mv "$BINARY_SRC" "${INSTALL_DIR}/${BINARY_NAME}"
-    ok "Installed to ${INSTALL_DIR}/${BINARY_NAME}"
 
-    # ─── Verify ──────────────────────────────────────────────────────────────
-    if "${INSTALL_DIR}/${BINARY_NAME}" --version >/dev/null 2>&1; then
-        ok "Halcon CLI ${VERSION} installed successfully!"
+    # Remove existing binary first — if it's root-owned the cp would fail,
+    # but rm succeeds as long as the parent directory is user-writable.
+    rm -f "$DEST" 2>/dev/null || true
+
+    # Use cp instead of mv — avoids cross-device and permission edge cases
+    if cp "$BINARY_SRC" "$DEST" 2>/dev/null; then
+        ok "Installed to ${DEST}"
     else
-        warn "Binary installed but could not verify execution"
+        # Last resort: try with sudo (only for system dirs like /usr/local/bin)
+        case "$INSTALL_DIR" in
+            /usr/local/bin|/usr/bin|/opt/*)
+                if command -v sudo >/dev/null 2>&1; then
+                    warn "Using sudo to install to ${INSTALL_DIR}"
+                    sudo cp "$BINARY_SRC" "$DEST" && sudo chmod +x "$DEST" || \
+                        error "Installation failed — try: --dir \$HOME/bin"
+                    ok "Installed to ${DEST} (via sudo)"
+                else
+                    error "Cannot write to ${INSTALL_DIR} and sudo not available. Try: --dir \$HOME/bin"
+                fi
+                ;;
+            *)
+                error "Cannot write to ${INSTALL_DIR}. Try: curl ... | sh -s -- --dir \$HOME/bin"
+                ;;
+        esac
     fi
 
-    # ─── PATH — write to shell config automatically ──────────────────────────
-    case ":${PATH}:" in
-        *":${INSTALL_DIR}:"*)
-            # Already in PATH — nothing to do
-            ;;
-        *)
-            EXPORT_LINE="export PATH=\"\$PATH:${INSTALL_DIR}\""
+    # ─── Verify installation ─────────────────────────────────────────────────
+    if "${DEST}" --version >/dev/null 2>&1; then
+        ok "Halcon CLI ${VERSION} ready"
+    else
+        warn "Binary installed but could not verify — may need PATH update"
+    fi
 
-            # Detect the user's shell and pick the right rc file
-            SHELL_NAME="$(basename "${SHELL:-sh}")"
-            case "$SHELL_NAME" in
-                zsh)  RC_FILE="$HOME/.zshrc" ;;
-                bash) RC_FILE="$HOME/.bashrc" ;;
-                fish) RC_FILE="$HOME/.config/fish/config.fish"
-                      EXPORT_LINE="fish_add_path ${INSTALL_DIR}" ;;
-                *)    RC_FILE="$HOME/.profile" ;;
-            esac
+    # ─── PATH configuration ──────────────────────────────────────────────────
+    configure_path "$INSTALL_DIR"
 
-            # Append only if not already present in the file
-            if [ -f "$RC_FILE" ] && grep -qF "$INSTALL_DIR" "$RC_FILE" 2>/dev/null; then
-                ok "PATH already configured in ${RC_FILE}"
-            else
-                printf '\n# Halcon CLI\n%s\n' "$EXPORT_LINE" >> "$RC_FILE"
-                ok "PATH added to ${RC_FILE}"
-                printf "\n${YELLOW}  Run this to use halcon in the current session:${RESET}\n"
-                printf "    ${BOLD}export PATH=\"\$PATH:${INSTALL_DIR}\"${RESET}\n"
-            fi
-            ;;
-    esac
-
-    printf "\n${GREEN}${BOLD}  Get started:${RESET}\n"
-    printf "    halcon --help\n"
-    printf "    halcon chat \"Hello, Halcón!\"\n\n"
+    printf "\n${GREEN}${BOLD}  Installation complete!${RESET}\n"
+    printf "\n  Get started:\n"
+    printf "    ${BOLD}halcon --help${RESET}\n"
+    printf "    ${BOLD}halcon chat \"Hello, Halcón!\"${RESET}\n\n"
 }
 
 main "$@"
