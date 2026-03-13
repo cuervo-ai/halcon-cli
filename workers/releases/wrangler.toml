@@ -23,6 +23,8 @@ id      = "d1ff7daf831c453bb57d214a87d6566e"
 #
 # Both custom domains are managed by this Worker.
 # Cloudflare automatically creates DNS records when custom domains are attached.
+# Routes require a pre-existing DNS record — do NOT use for cli.cuervo.cloud
+# Custom domains tell Cloudflare to auto-create the DNS record + TLS cert.
 [[routes]]
 pattern   = "releases.cli.cuervo.cloud/*"
 zone_name = "cuervo.cloud"
