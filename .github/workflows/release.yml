@@ -213,7 +213,8 @@ jobs:
         if: matrix.use-zigbuild == true
         shell: bash
         env:
-          ORT_STRATEGY: download
+          # ORT has no prebuilt binaries for windows-gnu; compile from source
+          ORT_STRATEGY: compile
           LIBGIT2_SYS_USE_PKG_CONFIG: "0"
           LIBGIT2_STATIC: "1"
         run: |
