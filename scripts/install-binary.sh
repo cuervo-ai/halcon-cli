@@ -412,6 +412,327 @@ try_cargo_install() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Frontier Tools Setup
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Is the script running interactively (TTY)?
+is_interactive() { [ -t 0 ]; }
+
+# Prompt helper — 0=yes, 1=no. Non-interactive returns default.
+ask() {
+    local prompt="$1" default="${2:-y}"
+    if ! is_interactive; then [ "$default" = "y" ] && return 0 || return 1; fi
+    local yn_hint; [ "$default" = "y" ] && yn_hint="[Y/n]" || yn_hint="[y/N]"
+    read -r -p "  ${BOLD}${CYAN}?${NC} ${prompt} ${yn_hint} " answer
+    answer="${answer:-$default}"
+    case "$answer" in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
+
+setup_frontier_tools() {
+    local install_dir="$1"
+    local config_dir="$HOME/.halcon"
+    local config_file="$config_dir/config.toml"
+
+    header "Frontier tools"
+
+    echo ""
+    echo -e "  Halcón includes a suite of ${BOLD}frontier capabilities${NC}:"
+    echo -e "    • ${CYAN}Agent Registry${NC}     — declarative sub-agents (.md frontmatter)"
+    echo -e "    • ${CYAN}Semantic Memory${NC}    — TF-IDF vector search over session memory"
+    echo -e "    • ${CYAN}MCP Ecosystem${NC}      — GitHub, Slack, Linear via Model Context Protocol"
+    echo -e "    • ${CYAN}Hooks System${NC}       — PreToolUse/PostToolUse lifecycle hooks"
+    echo -e "    • ${CYAN}Audit & Compliance${NC} — SOC2 JSONL/CSV/PDF + HMAC chain verification"
+    echo -e "    • ${CYAN}Cenzontle SSO${NC}      — Zuclubit OAuth 2.1 PKCE enterprise login"
+    echo -e "    • ${CYAN}VS Code Extension${NC}  — JSON-RPC bridge for IDE integration"
+    echo -e "    • ${CYAN}Full Tool Suite${NC}    — 50+ tools: semantic_grep, native_search..."
+    echo ""
+
+    if is_interactive; then
+        if ! ask "Set up frontier tools now?" "y"; then
+            warn "Skipping. Edit $config_file manually or re-run installer."
+            return 0
+        fi
+    fi
+
+    mkdir -p "$config_dir"
+
+    # ── Base config ──────────────────────────────────────────────────────────
+    if [ ! -f "$config_file" ]; then
+        cat > "$config_file" << 'TOML'
+[general]
+default_provider = "deepseek"
+default_model = "deepseek-chat"
+max_tokens = 8192
+temperature = 0.0
+
+[models.providers.anthropic]
+enabled = true
+api_key_env = "ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-4-6"
+
+[models.providers.deepseek]
+enabled = true
+api_base = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+default_model = "deepseek-chat"
+
+[models.providers.openai]
+enabled = true
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+default_model = "gpt-4o-mini"
+
+[models.providers.gemini]
+enabled = true
+api_key_env = "GEMINI_API_KEY"
+default_model = "gemini-1.5-pro"
+
+[models.providers.ollama]
+enabled = true
+api_base = "http://localhost:11434"
+default_model = "llama3.2"
+
+[tools]
+confirm_destructive = true
+timeout_secs = 120
+
+[security]
+pii_detection = true
+audit_enabled = true
+TOML
+        success "Base config written to $config_file"
+    fi
+
+    # ── Policy + frontier config block ───────────────────────────────────────
+    if ! grep -q '\[policy\]' "$config_file" 2>/dev/null; then
+        cat >> "$config_file" << 'TOML'
+
+[policy]
+enable_agent_registry  = true
+enable_semantic_memory = true
+semantic_memory_top_k  = 5
+enable_hooks           = true
+enable_audit_trail     = true
+
+[tools.advanced]
+enable_native_search = true
+enable_background    = true
+enable_semantic_grep = true
+enable_docker        = false
+enable_sql_query     = true
+enable_secret_scan   = true
+enable_web_fetch     = true
+enable_code_metrics  = true
+
+[mcp_server]
+transport    = "stdio"
+port         = 7777
+require_auth = false
+
+[context]
+max_tokens           = 180000
+compaction_threshold = 0.80
+enable_repo_map      = true
+
+[agent]
+enable_registry        = true
+enable_lifecycle_hooks = true
+enable_planner         = true
+enable_convergence     = true
+max_rounds             = 50
+TOML
+        success "Frontier policy config added"
+    fi
+
+    # ── Agent registry ───────────────────────────────────────────────────────
+    local agents_dir="$config_dir/agents"
+    mkdir -p "$agents_dir"
+    if [ ! -f "$agents_dir/code-reviewer.md" ]; then
+        cat > "$agents_dir/code-reviewer.md" << 'MD'
+---
+name: code-reviewer
+description: |
+  Expert code reviewer for correctness, security, and architecture.
+  Use when asked to review, audit, or assess code quality.
+tools: [Read, Grep, Glob]
+model: claude-sonnet-4-6
+max_turns: 20
+---
+
+Focus on correctness, security vulnerabilities, and readability.
+Always provide specific line references and actionable suggestions.
+MD
+        success "Created $agents_dir/code-reviewer.md"
+    fi
+    if [ ! -f "$agents_dir/test-writer.md" ]; then
+        cat > "$agents_dir/test-writer.md" << 'MD'
+---
+name: test-writer
+description: |
+  Writes comprehensive test suites (unit, integration, e2e).
+  Use when asked to add tests or increase test coverage.
+tools: [Read, Grep, Glob, file_write, bash]
+model: claude-sonnet-4-6
+max_turns: 30
+---
+
+Write thorough, non-flaky tests. Prefer integration tests over mocks where possible.
+MD
+        success "Created $agents_dir/test-writer.md"
+    fi
+
+    # ── HALCON.md instruction persistence ───────────────────────────────────
+    local halcon_md="$config_dir/HALCON.md"
+    if [ ! -f "$halcon_md" ]; then
+        cat > "$halcon_md" << 'MD'
+# Halcón — Personal Instructions
+
+<!-- Loaded at the start of every session. Keep under 200 lines. -->
+
+## Preferences
+
+- Prefer concise, direct answers
+- Show file paths with line numbers when referencing code
+- Use audit trail for destructive operations
+
+## Project Conventions
+
+<!-- Add project-specific rules, e.g. language, test runner, commit style -->
+
+## Memory
+
+<!-- Semantic memory: ~/.halcon/memory/ -->
+<!-- Use `search_memory` tool to retrieve past context -->
+MD
+        success "Created $halcon_md"
+    fi
+
+    # ── MCP config ───────────────────────────────────────────────────────────
+    local mcp_file="$config_dir/mcp.toml"
+    if [ ! -f "$mcp_file" ]; then
+        cat > "$mcp_file" << 'TOML'
+# Halcón MCP — Model Context Protocol servers
+# Run `halcon mcp list` to see configured servers
+# Run `halcon mcp add <name> -- <command>` to add new servers
+
+# [servers.filesystem]
+# transport = "stdio"
+# command   = "npx"
+# args      = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
+
+# [servers.github]
+# transport = "http"
+# url       = "https://api.githubcopilot.com/mcp/"
+# auth      = "oauth"
+
+[options]
+tool_search_threshold = 0.10
+oauth_port            = 9876
+session_ttl_secs      = 3600
+TOML
+        success "Created $mcp_file"
+    fi
+
+    # ── Hooks config ─────────────────────────────────────────────────────────
+    local hooks_file="$config_dir/hooks.toml"
+    if [ ! -f "$hooks_file" ]; then
+        mkdir -p "$config_dir/audit"
+        cat > "$hooks_file" << 'TOML'
+[[hooks]]
+event   = "PreToolUse"
+tool    = "bash"
+command = """
+#!/usr/bin/env bash
+input="$(cat)"
+if echo "$input" | grep -qE 'rm\s+-rf\s+/|git push.*--force.*main'; then
+  echo '{"permissionDecision":"deny","permissionDecisionReason":"Blocked by hook"}'
+  exit 2
+fi
+"""
+
+[[hooks]]
+event   = "PostToolUse"
+command = """
+#!/usr/bin/env bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $(cat | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("tool_name","unknown"))' 2>/dev/null)" \
+  >> ~/.halcon/audit/hooks.log 2>/dev/null || true
+"""
+TOML
+        success "Created $hooks_file"
+    fi
+
+    # ── Semantic memory directory ─────────────────────────────────────────────
+    local memory_dir="$config_dir/memory"
+    mkdir -p "$memory_dir"
+    if [ ! -f "$memory_dir/MEMORY.md" ]; then
+        cat > "$memory_dir/MEMORY.md" << 'MD'
+# Halcón — Session Memory Index
+
+> Auto-managed by the semantic memory system.
+> Add manual notes here; they will be indexed and retrieved automatically.
+
+## Notes
+
+<!-- project notes, team preferences, recurring context -->
+MD
+        success "Created $memory_dir/MEMORY.md"
+    fi
+
+    # ── Docker detection ──────────────────────────────────────────────────────
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        success "Docker detected — enabling docker tool"
+        sed -i.bak 's/enable_docker.*=.*false/enable_docker = true/' "$config_file" 2>/dev/null || true
+        rm -f "${config_file}.bak"
+    fi
+
+    # ── VS Code / Cursor ──────────────────────────────────────────────────────
+    local editor_cmd="" editor_name=""
+    command -v code   &>/dev/null && { editor_cmd="code";   editor_name="VS Code"; }
+    command -v cursor &>/dev/null && { editor_cmd="cursor"; editor_name="Cursor"; }
+
+    if [ -n "$editor_cmd" ]; then
+        info "$editor_name detected"
+        local do_vscode=true
+        is_interactive && { ask "Configure $editor_name integration?" "y" || do_vscode=false; }
+        if [ "$do_vscode" = true ]; then
+            local vs_dir="$HOME/.config/Code/User"
+            [ "$(uname -s)" = "Darwin" ] && vs_dir="$HOME/Library/Application Support/Code/User"
+            mkdir -p "$vs_dir"
+            cat > "$vs_dir/halcon.settings.json" << VSJSON
+{
+  "halcon.binaryPath": "${install_dir}/halcon",
+  "halcon.defaultProvider": "anthropic",
+  "halcon.maxTurns": 50,
+  "halcon.jsonRpcMode": true
+}
+VSJSON
+            success "$editor_name settings written to $vs_dir/halcon.settings.json"
+        fi
+    fi
+
+    # ── Cenzontle SSO ─────────────────────────────────────────────────────────
+    if is_interactive; then
+        echo ""
+        echo -e "  ${BOLD}Cenzontle AI${NC} — enterprise AI platform (Zuclubit SSO)"
+        if ask "Log in to Cenzontle AI? (requires Zuclubit SSO account)" "n"; then
+            local halcon_bin="$install_dir/halcon"
+            if [ -x "$halcon_bin" ]; then
+                "$halcon_bin" login cenzontle || warn "SSO login failed — run 'halcon login cenzontle' later"
+            fi
+        fi
+    fi
+
+    echo ""
+    success "Frontier tools ready:"
+    echo -e "    ${GREEN}✓${NC} Agents   → $agents_dir/"
+    echo -e "    ${GREEN}✓${NC} HALCON.md → $halcon_md"
+    echo -e "    ${GREEN}✓${NC} Hooks    → $hooks_file"
+    echo -e "    ${GREEN}✓${NC} MCP      → $mcp_file"
+    echo -e "    ${GREEN}✓${NC} Memory   → $memory_dir/"
+    [ -n "$editor_name" ] && echo -e "    ${GREEN}✓${NC} $editor_name  → $vs_dir/halcon.settings.json"
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Main Installation Flow
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -509,34 +830,51 @@ EOF
 
     add_to_path "$INSTALL_DIR"
 
+    # macOS: re-sign to satisfy Gatekeeper (exit 137 without signature)
+    if [ "$os" = "darwin" ] && command -v codesign &>/dev/null; then
+        codesign --force --sign - "$INSTALL_DIR/${BINARY_NAME}" 2>/dev/null || true
+        success "macOS Gatekeeper signature applied"
+    fi
+
     header "Verification"
 
     local installed_binary="$INSTALL_DIR/${BINARY_NAME}"
     if [ -x "$installed_binary" ]; then
-        local version
-        version="$("$installed_binary" --version 2>&1 || echo "unknown")"
-        success "Installation verified: $version"
+        local installed_version
+        installed_version="$("$installed_binary" --version 2>&1 || echo "unknown")"
+        success "Installation verified: $installed_version"
     else
         error "Binary not executable at $installed_binary"
     fi
 
+    # ── Frontier tools ────────────────────────────────────────────────────────
+    setup_frontier_tools "$INSTALL_DIR"
+
     echo ""
-    echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}${BOLD}   Installation complete! 🎉${NC}"
-    echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}${BOLD}   Installation complete!${NC}"
+    echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "  ${BOLD}Next steps:${NC}"
     echo ""
     echo -e "  ${CYAN}1.${NC} Reload your shell:"
     echo -e "     ${BOLD}source $(detect_shell_profile)${NC}"
     echo ""
-    echo -e "  ${CYAN}2.${NC} Verify installation:"
-    echo -e "     ${BOLD}halcon --version${NC}"
+    echo -e "  ${CYAN}2.${NC} Set an API key:"
+    echo -e "     ${BOLD}export ANTHROPIC_API_KEY=sk-ant-...${NC}"
+    echo -e "     ${BOLD}export DEEPSEEK_API_KEY=sk-...${NC}"
     echo ""
-    echo -e "  ${CYAN}3.${NC} Get started:"
-    echo -e "     ${BOLD}halcon --help${NC}"
+    echo -e "  ${CYAN}3.${NC} Start using Halcón:"
+    echo -e "     ${BOLD}halcon${NC}                           — interactive REPL"
+    echo -e "     ${BOLD}halcon chat \"explain this\"${NC}        — single-shot"
+    echo -e "     ${BOLD}halcon agents list${NC}               — frontier sub-agents"
+    echo -e "     ${BOLD}halcon mcp list${NC}                  — MCP servers"
+    echo -e "     ${BOLD}halcon tools list${NC}                — all 50+ tools"
+    echo -e "     ${BOLD}halcon login cenzontle${NC}           — Cenzontle SSO"
     echo ""
-    echo -e "  ${BLUE}Documentation:${NC} https://github.com/${REPO_OWNER}/${REPO_NAME}"
+    echo -e "  ${BLUE}Config:${NC}   $HOME/.halcon/config.toml"
+    echo -e "  ${BLUE}Agents:${NC}   $HOME/.halcon/agents/"
+    echo -e "  ${BLUE}Docs:${NC}     https://github.com/${REPO_OWNER}/${REPO_NAME}"
     echo ""
 }
 
