@@ -27,10 +27,21 @@ use super::loader::split_frontmatter;
 /// Project skills (`.halcon/skills/`) take priority over user skills
 /// (`~/.halcon/skills/`).  Returns a map from skill name → definition.
 pub fn load_all_skills(working_dir: &Path) -> HashMap<String, SkillDefinition> {
+    load_all_skills_with_home(working_dir, dirs::home_dir().as_deref())
+}
+
+/// Like `load_all_skills` but with an explicit user home directory.
+///
+/// Used by `AgentRegistry::load_impl` to support isolated test environments
+/// that must not read from the real `~/.halcon/skills/` directory.
+pub fn load_all_skills_with_home(
+    working_dir: &Path,
+    user_home: Option<&Path>,
+) -> HashMap<String, SkillDefinition> {
     let mut map: HashMap<String, SkillDefinition> = HashMap::new();
 
     // Load user skills first (lowest priority).
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = user_home {
         let user_dir = home.join(".halcon").join("skills");
         load_skills_from_dir(&user_dir, &mut map);
     }

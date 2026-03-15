@@ -313,11 +313,24 @@ mod tests {
     }
 
     /// A task that ran <60s ago should NOT be due for "every minute".
+    ///
+    /// NOTE: `now` is anchored to second :30 of the current minute so this test
+    /// never runs within ±5 s of a minute boundary, which would make the cron
+    /// fire even though last_run was only 5 s ago (flaky at :55–:00).
     #[test]
     fn test_is_not_due_just_ran() {
-        let now = Utc::now();
+        use chrono::Timelike;
+        let base = Utc::now();
+        // Pin `now` to :30 of the current minute — guarantees 30 s to next fire.
+        let now = base
+            .with_second(30)
+            .and_then(|t| t.with_nanosecond(0))
+            .unwrap_or(base);
         let last_run = now - chrono::Duration::seconds(5);
-        assert!(!AgentScheduler::is_due("* * * * *", Some(last_run), now).unwrap());
+        assert!(
+            !AgentScheduler::is_due("* * * * *", Some(last_run), now).unwrap(),
+            "task ran 5 s ago should not be due (now anchored at :30)"
+        );
     }
 
     /// A task that has never run ("0 2 * * 1" weekly Monday 2am) should not error.

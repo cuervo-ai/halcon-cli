@@ -33,6 +33,8 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use dirs;
+
 pub use schema::{AgentDefinition, AgentScope, SkillDefinition};
 pub use validator::Diagnostic;
 
@@ -62,14 +64,29 @@ impl AgentRegistry {
     /// `session_paths` — agent files explicitly provided at session start.
     /// `working_dir`   — project root for `.halcon/agents/` discovery.
     pub fn load(session_paths: &[PathBuf], working_dir: &Path) -> Self {
+        Self::load_impl(session_paths, working_dir, dirs::home_dir().as_deref())
+    }
+
+    /// Like `load` but with an explicit user home directory.
+    ///
+    /// Used in tests to prevent reading from the real `~/.halcon/agents/`
+    /// directory, which varies per developer machine.
+    #[cfg(test)]
+    pub(crate) fn load_isolated(session_paths: &[PathBuf], working_dir: &Path) -> Self {
+        // Pass `working_dir` as user home — it won't have `.halcon/agents/`
+        // unless the test explicitly creates it, giving full isolation.
+        Self::load_impl(session_paths, working_dir, Some(working_dir))
+    }
+
+    fn load_impl(session_paths: &[PathBuf], working_dir: &Path, user_home: Option<&Path>) -> Self {
         // 1. Load skills first (needed for validation).
-        let skills = skills::load_all_skills(working_dir);
+        let skills = skills::load_all_skills_with_home(working_dir, user_home);
 
         // 2. Collect raw definitions from all three scopes.
         let mut raw: Vec<AgentDefinition> = Vec::new();
         raw.extend(loader::load_session_files(session_paths));
         raw.extend(loader::load_scope(AgentScope::Project, working_dir));
-        raw.extend(loader::load_scope(AgentScope::User, working_dir));
+        raw.extend(loader::load_scope_user(user_home));
 
         // 3. Resolve name collisions (higher scope wins).
         let (candidates, collision_diags) = validator::resolve_collisions(raw);

@@ -76,6 +76,20 @@ pub fn load_scope(scope: AgentScope, working_dir: &Path) -> Vec<AgentDefinition>
     load_agents_from_dir(&dir, scope)
 }
 
+/// Load agents from the User scope given an explicit home directory.
+///
+/// This variant is used internally by `AgentRegistry::load_impl` so that
+/// tests can supply an isolated directory instead of the real `~/.halcon`.
+pub fn load_scope_user(user_home: Option<&std::path::Path>) -> Vec<super::schema::AgentDefinition> {
+    match user_home {
+        Some(home) => {
+            let dir = home.join(".halcon").join("agents");
+            load_agents_from_dir(&dir, super::schema::AgentScope::User)
+        }
+        None => vec![],
+    }
+}
+
 /// Load agents from explicitly-supplied file paths (Session scope).
 pub fn load_session_files(paths: &[PathBuf]) -> Vec<AgentDefinition> {
     paths

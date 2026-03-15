@@ -198,6 +198,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires libonnxruntime.dylib — install ONNX Runtime to run"]
     async fn test_embed_single_text() {
         let engine = EmbeddingEngine::new().expect("Failed to init engine");
 
@@ -213,6 +214,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires libonnxruntime.dylib — install ONNX Runtime to run"]
     async fn test_embed_batch() {
         let engine = EmbeddingEngine::new().expect("Failed to init engine");
 
@@ -231,6 +233,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires libonnxruntime.dylib — install ONNX Runtime to run"]
     async fn test_cosine_similarity() {
         let engine = EmbeddingEngine::new().expect("Failed to init engine");
 
@@ -328,6 +331,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires libonnxruntime.dylib — install ONNX Runtime to run"]
     async fn test_semantic_similarity_examples() {
         let engine = EmbeddingEngine::new().expect("Failed to init engine");
 

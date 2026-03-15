@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 
 /// Background watcher that detects instruction file changes.
 pub struct InstructionWatcher {
@@ -56,8 +56,20 @@ impl InstructionWatcher {
         let changed_clone = changed.clone();
 
         let mut watcher = recommended_watcher(move |result: notify::Result<Event>| {
-            if result.is_ok() {
-                changed_clone.store(true, Ordering::Release);
+            if let Ok(event) = result {
+                // Only mark changed for events that represent genuine file-content
+                // modifications.  Ignoring Create/Access prevents spurious reloads
+                // caused by:
+                //   - Parallel test threads creating files in the same temp dir.
+                //   - inotify queue overflow (IN_Q_OVERFLOW) delivering synthetic events.
+                //   - Editor-side metadata writes (chmod, xattr) on macOS.
+                let is_content_change = matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Remove(_)
+                );
+                if is_content_change {
+                    changed_clone.store(true, Ordering::Release);
+                }
             }
         })
         .ok()?;
