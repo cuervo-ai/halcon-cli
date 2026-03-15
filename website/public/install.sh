@@ -674,6 +674,12 @@ configure_halcon() {
     else
         _write_mcp_config "$MCP_FILE"
     fi
+
+    # ── Agent registry directories ────────────────────────────────────────────
+    _setup_agent_registry "$HALCON_DIR"
+
+    # ── Classifier rules ─────────────────────────────────────────────────────
+    _write_classifier_rules "$HALCON_DIR/classifier_rules.toml"
 }
 
 _write_config() {
@@ -1087,7 +1093,7 @@ ${_SYS_CLAUDE_SECTION}
 use_intent_pipeline          = true
 use_boundary_decision_engine = true
 use_halcon_md                = true
-enable_hooks                 = false
+enable_hooks                 = true
 enable_auto_memory           = true
 memory_importance_threshold  = 0.30
 enable_agent_registry        = true
@@ -1096,7 +1102,188 @@ semantic_memory_top_k        = 5
 success_threshold            = 0.6
 halt_confidence_threshold    = 0.8
 max_round_iterations         = 12
+
+# ── SSO / Cenzontle ───────────────────────────────────────────────────────────
+# Uncomment and fill in to enable enterprise SSO via Cenzontle OAuth 2.1 PKCE.
+# [sso]
+# enabled       = false
+# provider      = "cenzontle"
+# issuer_url    = "https://auth.your-domain.com"
+# client_id     = "halcon"
+# scopes        = ["openid", "profile", "email", "halcon:chat"]
+# redirect_port = 9876
 HALCON_CONFIG
+}
+
+_setup_agent_registry() {
+    local halcon_dir="$1"
+    local agents_dir="${halcon_dir}/agents"
+    local skills_dir="${halcon_dir}/skills"
+
+    mkdir -p "$agents_dir" "$skills_dir" 2>/dev/null || true
+
+    # Write a README so users know where to put agent definitions
+    if [ ! -f "${agents_dir}/README.md" ]; then
+        cat > "${agents_dir}/README.md" << 'AGENTS_README'
+# Halcon Sub-Agent Definitions
+
+Place agent definition files here (`*.md`) to register custom sub-agents.
+
+## Format
+
+```markdown
+---
+name: my-agent          # kebab-case, required
+description: What this agent does  # shown in routing manifest
+model: sonnet           # haiku | sonnet | opus | inherit (default)
+max_turns: 10           # 1–100
+tools: [file_read, grep]  # empty = inherit all
+skills: [my-skill]        # skills from ~/.halcon/skills/
+---
+
+You are a specialized agent that...
+```
+
+## Usage
+
+Agents are discovered automatically. Reference them in conversation:
+  "Use the code-reviewer agent to check this PR"
+
+Run `halcon agents list` to see all loaded agents.
+AGENTS_README
+    fi
+
+    # Write a README for skills
+    if [ ! -f "${skills_dir}/README.md" ]; then
+        cat > "${skills_dir}/README.md" << 'SKILLS_README'
+# Halcon Skill Definitions
+
+Place skill files here (`*.md`) to create reusable capability bundles.
+Skills are injected into agent system prompts via the `skills:` frontmatter key.
+
+## Format
+
+```markdown
+---
+name: security-rules
+description: Security analysis guidelines
+---
+
+Always check for:
+- SQL injection via parameterized queries
+- XSS via output encoding
+- SSRF via URL allowlists
+```
+SKILLS_README
+    fi
+
+    ok "Agent registry directories ready: ${agents_dir}"
+}
+
+_write_classifier_rules() {
+    local dest="$1"
+    [ -f "$dest" ] && { ok "Classifier rules already exist — skipping"; return; }
+
+    cat > "$dest" << 'RULES_EOF'
+# Halcon Classifier Rules — User Configuration
+# Edit to customize intent classification without recompiling.
+#
+# Load order (first found wins):
+#   1. $HALCON_CLASSIFIER_RULES  (env var)
+#   2. .halcon/classifier_rules.toml  (project)
+#   3. ~/.halcon/classifier_rules.toml  (user) ← this file
+#   4. Built-in defaults
+#
+# Scores: 5.0=exact multi-word | 3.0=domain noun | 2.0=strong verb | 0.4=weak signal
+
+[[rule]]
+task_type  = "git_operation"
+base_score = 5.0
+keywords   = [
+  "git commit", "git status", "git diff", "git log",
+  "git add", "git push", "git pull", "git fetch",
+  "git branch", "git merge", "git rebase", "git stash",
+  "git checkout", "git cherry-pick",
+  "commit changes", "stage files", "push changes",
+  "pull request", "merge request",
+]
+
+[[rule]]
+task_type  = "file_management"
+base_score = 5.0
+keywords   = [
+  "delete file", "remove file", "rename file",
+  "move file", "copy file", "create directory",
+  "create folder", "list files", "show files",
+  "find files", "search files", "file permissions",
+]
+
+[[rule]]
+task_type  = "debugging"
+base_score = 3.0
+keywords   = [
+  "stacktrace", "stack trace", "traceback",
+  "segfault", "segmentation fault",
+  "null pointer", "deadlock", "race condition",
+  "memory leak", "buffer overflow",
+  "panic at", "thread panicked", "core dump",
+]
+
+[[rule]]
+task_type  = "debugging"
+base_score = 2.0
+keywords   = [
+  "fix", "debug", "diagnose", "troubleshoot", "resolve",
+  "not working", "broken", "crash",
+  "arregla", "corrige", "depura", "soluciona", "no funciona",
+]
+
+[[rule]]
+task_type  = "code_generation"
+base_score = 2.0
+keywords   = [
+  "implement", "scaffold", "generate code", "bootstrap",
+  "add function", "add method", "write a function",
+  "write a class", "create a function", "build a",
+]
+
+[[rule]]
+task_type  = "explanation"
+base_score = 2.0
+keywords   = [
+  "explain", "describe", "walk me through", "how does",
+  "what is", "what are", "why does", "clarify",
+  "explica", "como funciona", "que es", "por que",
+]
+
+[[rule]]
+task_type  = "code_modification"
+base_score = 2.0
+keywords   = [
+  "modify", "change", "update", "edit", "refactor",
+  "rename", "replace", "rewrite", "optimize",
+  "modifica", "cambia", "actualiza", "refactoriza",
+]
+
+[[rule]]
+task_type  = "research"
+base_score = 2.0
+keywords   = [
+  "analyze", "investigate", "compare", "review", "assess",
+  "audit", "benchmark", "profile",
+  "analiza", "investiga", "revisa", "evalua",
+]
+
+[[rule]]
+task_type  = "configuration"
+base_score = 2.0
+keywords   = [
+  "configure", "setup", "set up", "install",
+  "enable", "disable", "settings",
+  "configura", "instala", "habilita",
+]
+RULES_EOF
+    ok "Classifier rules installed: ${dest}"
 }
 
 _write_mcp_config() {

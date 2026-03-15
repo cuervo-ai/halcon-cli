@@ -279,10 +279,15 @@ fn check_and_reload_returns_none_when_unchanged() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("HALCON.local.md"), "unchanged content").unwrap();
 
+    // On macOS FSEvents buffers Modify events from recent writes.  Sleep 300 ms
+    // so those events are flushed to the kernel queue *before* the watcher registers,
+    // preventing the watcher from seeing them as new changes.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
     let mut store = InstructionStore::new(dir.path());
     let _ = store.load();
 
-    // No change has occurred — poll should return None.
+    // No change has occurred since the watcher started — poll should return None.
     let result = store.check_and_reload();
     assert!(
         result.is_none(),

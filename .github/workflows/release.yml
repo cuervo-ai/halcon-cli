@@ -574,6 +574,22 @@ jobs:
 
             ---
 
+            ### What's New in v0.3.0
+
+            - **Declarative Sub-Agent Registry** — define specialized agents in `.halcon/agents/*.md`, discovered across session/project/user scopes
+            - **Lifecycle Hooks** — pre/post tool execution hooks via `.halcon/hooks/` for audit, telemetry, and custom workflows
+            - **Semantic Memory Vector Store** — TF-IDF based local vector search over MEMORY.md for long-term context retrieval
+            - **Halcon as MCP Server** — expose Halcon's agent capabilities to Claude Code and other MCP clients (`halcon mcp serve`)
+            - **MCP OAuth 2.1** — PKCE-based OAuth flow for authenticated MCP server connections
+            - **Compliance Audit Export** — export session audit logs as JSONL, CSV, or PDF with HMAC-SHA256 integrity chains (`halcon audit export`)
+            - **HybridIntentClassifier** — 6-layer intent classification with embedding, LLM deliberation, and adaptive learning
+            - **VS Code Extension** — JSON-RPC subprocess bridge for editor integration
+            - **Agent Scheduler** — cron-based scheduled agent tasks (`halcon schedule add`)
+            - **Cenzontle SSO** — OAuth 2.1 PKCE enterprise SSO integration
+            - **Runtime Events** — structured `RuntimeEvent` bus for IDE observability and replay
+
+            ---
+
             ### Verify
 
             All artifacts are signed with [cosign](https://sigstore.dev) keyless signing.
