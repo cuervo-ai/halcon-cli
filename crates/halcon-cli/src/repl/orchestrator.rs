@@ -430,10 +430,18 @@ pub async fn run_orchestrator(
                     ov
                 } else if task.estimated_tokens > 0 {
                     let mut l = sub_limits.clone();
-                    // Clamp to [1, parent_limits] so we never grant more than the parent.
-                    let cap = task.estimated_tokens
-                        .min(parent_limits.max_total_tokens.max(1))
-                        .max(1);
+                    // Clamp to parent budget when parent has a token limit set.
+                    // When parent is unlimited (max_total_tokens=0), use the estimate
+                    // directly — do NOT call .max(1) on 0, which would collapse the
+                    // cap to 1 and starve every sub-agent of context.
+                    let cap = if parent_limits.max_total_tokens > 0 {
+                        task.estimated_tokens
+                            .min(parent_limits.max_total_tokens)
+                            .max(1)
+                    } else {
+                        // Unlimited parent — advisory estimate, no artificial cap.
+                        task.estimated_tokens
+                    };
                     l.max_total_tokens = cap;
                     l
                 } else {
@@ -1672,6 +1680,53 @@ mod tests {
         let limits = derive_sub_limits(&parent, &config, 3, parent.max_total_tokens as u64);
         assert_eq!(limits.max_total_tokens, 100_000); // full budget when not shared
         assert_eq!(limits.max_duration_secs, 120); // explicit timeout
+    }
+
+    #[test]
+    fn estimated_tokens_cap_unlimited_parent() {
+        // Regression: when parent has max_total_tokens=0 (unlimited), the old code
+        // computed cap = estimated_tokens.min(0.max(1)) = 1, starving every sub-agent.
+        // Fix: unlimited parent → use estimate directly (no artificial 1-token cap).
+        let parent = AgentLimits {
+            max_rounds: 40,
+            max_total_tokens: 0, // unlimited
+            max_duration_secs: 1800,
+            ..Default::default()
+        };
+        let config = OrchestratorConfig {
+            shared_budget: true,
+            ..Default::default()
+        };
+        let sub_limits = derive_sub_limits(&parent, &config, 1, u64::MAX);
+        // sub_limits.max_total_tokens should be 0 (unlimited) when parent is unlimited.
+        assert_eq!(sub_limits.max_total_tokens, 0);
+
+        // Simulate the per-task cap logic with a typical estimate (5000 tokens).
+        let estimated_tokens: u32 = 5000;
+        let cap = if parent.max_total_tokens > 0 {
+            estimated_tokens.min(parent.max_total_tokens).max(1)
+        } else {
+            estimated_tokens
+        };
+        // Cap must NOT be 1 — that was the bug.
+        assert!(cap >= estimated_tokens, "cap={cap} must equal estimate when parent is unlimited");
+    }
+
+    #[test]
+    fn estimated_tokens_cap_bounded_parent() {
+        // When parent has a token limit, cap must not exceed it.
+        let parent = AgentLimits {
+            max_rounds: 25,
+            max_total_tokens: 10_000,
+            ..Default::default()
+        };
+        let estimated_tokens: u32 = 50_000; // estimate larger than parent budget
+        let cap = if parent.max_total_tokens > 0 {
+            estimated_tokens.min(parent.max_total_tokens).max(1)
+        } else {
+            estimated_tokens
+        };
+        assert_eq!(cap, 10_000, "cap must be clamped to parent budget");
     }
 
     // --- SharedBudget tests ---

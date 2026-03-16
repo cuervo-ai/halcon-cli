@@ -2545,14 +2545,23 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
     // The synthesis step is tool-less (tool_name == None) and is never matched by
     // record_tool_results (which matches by tool_name). Without this, the plan tracker
     // reports the last step as Pending even after the coordinator finishes synthesis.
+    //
+    // Guard: only mark synthesis complete when ALL prior tool-requiring steps have a
+    // terminal outcome. Without this guard, if step 0 (file_inspect) never ran because
+    // the tool failed or returned empty, step 1 (synthesis) would be falsely marked ✓.
     if let Some(ref mut tracker) = state.execution_tracker {
         let plan = tracker.plan();
         let last_idx = plan.steps.len().saturating_sub(1);
-        if plan
+        let last_step_is_synthesis = plan
             .steps
             .get(last_idx)
-            .is_some_and(|s| s.tool_name.is_none())
-        {
+            .is_some_and(|s| s.tool_name.is_none());
+        // All prior steps that require a tool must have a non-None outcome.
+        let all_prior_tool_steps_terminal = last_idx == 0
+            || plan.steps[..last_idx]
+                .iter()
+                .all(|s| s.tool_name.is_none() || s.outcome.is_some());
+        if last_step_is_synthesis && all_prior_tool_steps_terminal {
             tracker.mark_synthesis_complete(last_idx, state.rounds);
         }
     }

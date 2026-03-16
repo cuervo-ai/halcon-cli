@@ -102,6 +102,18 @@ pub(super) async fn run(
             had_errors,
         );
         round_convergence_action = ca.clone();
+        // Phase 1: emit ConvergenceDecided for every round so offline analysis
+        // can correlate controller decisions with oracle outcomes.
+        super::loop_events::emit(
+            &state.session_id.to_string(),
+            round as u32,
+            super::loop_events::LoopEvent::ConvergenceDecided {
+                round,
+                action: format!("{:?}", round_convergence_action),
+                coverage: state.convergence.mid_loop_critic.evidence_rate() as f32,
+            },
+            trace_db,
+        );
         match ca {
             ConvergenceAction::Synthesize => {
                 // P0-2: Do NOT early-return here — oracle adjudicates after all signals
@@ -603,6 +615,18 @@ pub(super) async fn run(
                 "TerminationOracle: authoritative decision"
             );
             oracle_decision = Some(termination.clone());
+            // Phase 1: emit OracleDecided so every adjudication is persisted for offline analysis.
+            super::loop_events::emit(
+                &state.session_id.to_string(),
+                round as u32,
+                super::loop_events::LoopEvent::OracleDecided {
+                    round,
+                    decision: format!("{:?}", termination),
+                    combined_score: round_feedback.combined_score,
+                    evidence_coverage: evidence_coverage as f32,
+                },
+                trace_db,
+            );
 
             // B2: RoutingAdaptor — mid-session escalation check.
             // Fires after TerminationOracle so oracle retains final say on loop termination.

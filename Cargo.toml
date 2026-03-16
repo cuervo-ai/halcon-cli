@@ -157,7 +157,7 @@ halcon-storage = { path = "crates/halcon-storage" }
 halcon-security = { path = "crates/halcon-security" }
 halcon-context = { path = "crates/halcon-context" }
 halcon-mcp = { path = "crates/halcon-mcp" }
-halcon-files = { path = "crates/halcon-files" }
+halcon-files = { path = "crates/halcon-files", features = ["pdf", "csv", "xml", "yaml", "markdown"] }
 halcon-runtime = { path = "crates/halcon-runtime" }
 halcon-api = { path = "crates/halcon-api", default-features = false }
 halcon-client = { path = "crates/halcon-client" }
