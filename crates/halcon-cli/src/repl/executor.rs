@@ -151,18 +151,33 @@ fn is_transient_error(error: &str) -> bool {
         || lower.contains("rate limit")
         || lower.contains("rate_limit")
         || lower.contains("429")
-        // HTTP 5xx transient server errors: gateway/proxy/overload codes that can
-        // recover on retry. 400/401/403/404 are permanent client errors — not here.
+        // HTTP 5xx transient server errors.  All of 500/502/503/504/529 can recover
+        // on retry.  HTTP 500 is "Internal Server Error" — frequently a transient
+        // overload spike, not a permanent failure.  HTTP 529 is Anthropic-specific
+        // ("Overloaded") and is always transient.
+        // NOTE: `http::is_retryable_status()` uses the same set {429,500,502,503,529}
+        // — keep these two classifications in sync.
+        || lower.contains("http 500")
         || lower.contains("http 502")
         || lower.contains("http 503")
         || lower.contains("http 504")
+        || lower.contains("http 529")
+        || lower.contains("500 internal")
         || lower.contains("502 bad gateway")
         || lower.contains("503 service unavailable")
         || lower.contains("504 gateway timeout")
+        // Anthropic-specific patterns: "overloaded_error" is the error_type field
+        // returned in Anthropic's JSON body when the cluster is at capacity.
+        // "retryable error:" is the warn! prefix Anthropic's own retry loop emits —
+        // if it reaches the tool layer it means the provider's internal retries
+        // were exhausted but the condition may still be transient.
+        || lower.contains("overloaded")
+        || lower.contains("retryable error:")
         || lower.contains("connection reset")
         || lower.contains("connection refused")
         || lower.contains("broken pipe")
         || lower.contains("temporary")
+        || lower.contains("network error")
         // MCP pool/transport errors: the MCP server process is alive but the
         // stdio/socket connection dropped transiently. Can recover in next round.
         || lower.contains("mcp pool call failed")
@@ -636,6 +651,52 @@ async fn run_with_retry(
 
         match tokio::time::timeout(tool_timeout, tool.execute(tool_input)).await {
             Ok(Ok(output)) => {
+                // S1: Unified is_error retry contract.
+                //
+                // Tools that succeed at the Rust level (Ok) but report a runtime failure
+                // via `is_error=true` are subject to the same transient-retry + env-repair
+                // logic as `Err(e)` paths.  Without this, connection timeouts and rate-limit
+                // responses returned through ToolOutput silently bypass the entire retry system.
+                if output.is_error
+                    && attempt + 1 < max_attempts
+                    && is_transient_error(&output.content)
+                {
+                    if let Some(repairs) = super::env_repair::run_repairs(
+                        &output.content,
+                        &tool_call.name,
+                        working_dir,
+                    ) {
+                        for repair in &repairs {
+                            tracing::info!(
+                                tool = %tool_call.name,
+                                attempt = attempt + 1,
+                                env_repair.action = %repair.action,
+                                env_repair.repaired = repair.repaired,
+                                "env-repair (is_error path): {}",
+                                repair.description
+                            );
+                        }
+                    }
+                    let delay = jittered_delay(std::cmp::min(
+                        retry_config.base_delay_ms * 2u64.pow(std::cmp::min(attempt, 5)),
+                        retry_config.max_delay_ms,
+                    ));
+                    tracing::info!(
+                        tool = %tool_call.name,
+                        attempt = attempt + 1,
+                        delay_ms = delay,
+                        "Retrying transient is_error=true output: {}",
+                        output.content
+                    );
+                    render_sink.tool_retrying(
+                        &tool_call.name,
+                        (attempt + 1) as usize,
+                        max_attempts as usize,
+                        delay,
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    continue;
+                }
                 return ToolExecResult {
                     tool_use_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
@@ -2655,6 +2716,320 @@ mod tests {
         // Permanent errors should not be classified as transient.
         assert!(!is_transient_error("Error: unknown tool 'foo'"));
         assert!(!is_transient_error("Error: invalid JSON input"));
+    }
+
+    // ── Multi-provider transient error coverage ───────────────────────────────
+    //
+    // Verifies that is_transient_error() correctly classifies provider-specific
+    // error strings as defined by each provider's HTTP layer:
+    //   - Anthropic: HTTP 429/500/529, overloaded_error, retryable error:
+    //   - Cenzontle: connection errors, timeout patterns, provider-internal errors
+    //   - OpenAI-compatible: HTTP 429, HTTP 500, rate limit / overloaded patterns
+
+    #[test]
+    fn anthropic_provider_transient_errors() {
+        // HTTP 429 — rate limited
+        assert!(is_transient_error(
+            "HTTP 429: rate limit exceeded — retry after 30s"
+        ));
+        // HTTP 500 — internal server error
+        assert!(is_transient_error(
+            "HTTP 500: internal server error at https://api.anthropic.com/v1/messages"
+        ));
+        assert!(is_transient_error("500 Internal Server Error"));
+        // HTTP 529 — Anthropic overloaded (non-standard status)
+        assert!(is_transient_error(
+            "HTTP 529: service temporarily overloaded"
+        ));
+        // overloaded_error type (returned in error.type JSON field)
+        assert!(is_transient_error(
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+        ));
+        assert!(is_transient_error("Anthropic API error: overloaded"));
+        // retryable error: prefix emitted by the Anthropic SDK wrapper
+        assert!(is_transient_error(
+            "retryable error: upstream connection dropped mid-stream"
+        ));
+        // Non-transient Anthropic errors must NOT be misclassified
+        assert!(!is_transient_error(
+            "HTTP 401: invalid API key — check ANTHROPIC_API_KEY"
+        ));
+        assert!(!is_transient_error(
+            "HTTP 400: invalid request — max_tokens exceeds model limit"
+        ));
+    }
+
+    #[test]
+    fn cenzontle_provider_transient_errors() {
+        // Connection-level transient errors
+        assert!(is_transient_error(
+            "connection refused: cenzontle-api.internal:8443"
+        ));
+        assert!(is_transient_error(
+            "network error: failed to connect to Cenzontle endpoint"
+        ));
+        assert!(is_transient_error(
+            "transport error: TLS handshake timed out"
+        ));
+        // Timeout patterns from the Cenzontle internal proxy
+        assert!(is_transient_error(
+            "request timed out after 30000ms — Cenzontle inference gateway"
+        ));
+        // Broken pipe (e.g., server closed keep-alive connection)
+        assert!(is_transient_error("broken pipe: Cenzontle event stream"));
+        // Channel-closed pattern from EventBus bridge (Cenzontle provider)
+        assert!(is_transient_error(
+            "channel closed: Cenzontle EventBus receiver dropped"
+        ));
+        // Non-transient Cenzontle errors
+        assert!(!is_transient_error(
+            "Cenzontle API error 403: access denied to model scope"
+        ));
+        assert!(!is_transient_error(
+            "Cenzontle API error: invalid model identifier 'unknown-v99'"
+        ));
+    }
+
+    #[test]
+    fn openai_compatible_provider_transient_errors() {
+        // OpenAI HTTP 429
+        assert!(is_transient_error(
+            "HTTP 429: You exceeded your current quota — rate limit"
+        ));
+        // OpenAI HTTP 500
+        assert!(is_transient_error(
+            "HTTP 500: The server had an error processing your request"
+        ));
+        // OpenAI HTTP 502/503 (via load balancer)
+        assert!(is_transient_error("502 Bad Gateway"));
+        assert!(is_transient_error("503 Service Unavailable — try again later"));
+        // OpenAI overloaded / capacity
+        assert!(is_transient_error(
+            "openai: overloaded — model capacity exceeded, retry recommended"
+        ));
+        // Timeout on streaming response
+        assert!(is_transient_error(
+            "timeout: OpenAI stream read timed out after 60s"
+        ));
+        // Non-transient OpenAI errors
+        assert!(!is_transient_error(
+            "HTTP 400: invalid_request_error — model 'gpt-99' does not exist"
+        ));
+        assert!(!is_transient_error(
+            "HTTP 401: Incorrect API key provided"
+        ));
+    }
+
+    // ── S1: Unified is_error retry contract ─────────────────────────────────
+    //
+    // Verify that Ok(ToolOutput { is_error: true }) with transient content is
+    // retried, while Ok(ToolOutput { is_error: true }) with deterministic content
+    // and Ok(ToolOutput { is_error: false }) are returned immediately.
+
+    mod s1_is_error_retry_contract {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        use async_trait::async_trait;
+        use halcon_core::error::Result;
+        use halcon_core::traits::Tool;
+        use halcon_core::types::{PermissionLevel, ToolInput, ToolOutput};
+
+        use super::*;
+
+        /// Mock tool that returns `Ok(ToolOutput { is_error, content })` on every call.
+        /// Counts the number of times `execute()` is called so tests can assert retry count.
+        struct CountingIsErrorTool {
+            call_count: Arc<AtomicUsize>,
+            is_error: bool,
+            content: &'static str,
+        }
+
+        #[async_trait]
+        impl Tool for CountingIsErrorTool {
+            fn name(&self) -> &str {
+                "counting_is_error_tool"
+            }
+            fn description(&self) -> &str {
+                "mock"
+            }
+            fn permission_level(&self) -> PermissionLevel {
+                PermissionLevel::ReadOnly
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolOutput {
+                    tool_use_id: input.tool_use_id,
+                    content: self.content.to_string(),
+                    is_error: self.is_error,
+                    metadata: None,
+                })
+            }
+        }
+
+        fn instant_retry() -> ToolRetryConfig {
+            ToolRetryConfig {
+                max_retries: 2,
+                base_delay_ms: 0,
+                max_delay_ms: 0,
+            }
+        }
+
+        #[tokio::test]
+        async fn transient_is_error_true_is_retried() {
+            // A transient error returned as Ok(is_error=true) must be retried up to
+            // max_retries times, exhausting all attempts before returning.
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let tool: Arc<dyn Tool> = Arc::new(CountingIsErrorTool {
+                call_count: call_count.clone(),
+                is_error: true,
+                content: "Error: connection timed out after 30s",
+            });
+
+            let tool_call = CompletedToolUse {
+                id: "t1".to_string(),
+                name: "counting_is_error_tool".to_string(),
+                input: serde_json::json!({}),
+            };
+
+            let result = run_with_retry(
+                &tool_call,
+                &tool,
+                "/tmp",
+                Duration::from_secs(5),
+                &instant_retry(),
+                &*TEST_SINK,
+            )
+            .await;
+
+            // All 3 attempts (1 initial + 2 retries) must have fired.
+            assert_eq!(
+                call_count.load(Ordering::SeqCst),
+                3,
+                "transient is_error=true should exhaust all retries"
+            );
+            // Final result must still carry is_error=true.
+            match &result.content_block {
+                ContentBlock::ToolResult { is_error, .. } => {
+                    assert!(*is_error, "final result must still be is_error=true");
+                }
+                _ => panic!("expected ToolResult"),
+            }
+        }
+
+        #[tokio::test]
+        async fn deterministic_is_error_true_not_retried() {
+            // A deterministic error returned as Ok(is_error=true) must NOT be retried.
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let tool: Arc<dyn Tool> = Arc::new(CountingIsErrorTool {
+                call_count: call_count.clone(),
+                is_error: true,
+                content: "Error: no such file or directory: /missing.rs",
+            });
+
+            let tool_call = CompletedToolUse {
+                id: "t1".to_string(),
+                name: "counting_is_error_tool".to_string(),
+                input: serde_json::json!({}),
+            };
+
+            run_with_retry(
+                &tool_call,
+                &tool,
+                "/tmp",
+                Duration::from_secs(5),
+                &instant_retry(),
+                &*TEST_SINK,
+            )
+            .await;
+
+            assert_eq!(
+                call_count.load(Ordering::SeqCst),
+                1,
+                "deterministic is_error=true must not be retried"
+            );
+        }
+
+        #[tokio::test]
+        async fn successful_output_not_retried() {
+            // Ok(is_error=false) must always be returned immediately — never retried.
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let tool: Arc<dyn Tool> = Arc::new(CountingIsErrorTool {
+                call_count: call_count.clone(),
+                is_error: false,
+                content: "success output",
+            });
+
+            let tool_call = CompletedToolUse {
+                id: "t1".to_string(),
+                name: "counting_is_error_tool".to_string(),
+                input: serde_json::json!({}),
+            };
+
+            let result = run_with_retry(
+                &tool_call,
+                &tool,
+                "/tmp",
+                Duration::from_secs(5),
+                &instant_retry(),
+                &*TEST_SINK,
+            )
+            .await;
+
+            assert_eq!(
+                call_count.load(Ordering::SeqCst),
+                1,
+                "successful output must not trigger retry"
+            );
+            match &result.content_block {
+                ContentBlock::ToolResult { is_error, .. } => {
+                    assert!(!is_error);
+                }
+                _ => panic!("expected ToolResult"),
+            }
+        }
+
+        #[tokio::test]
+        async fn transient_is_error_respects_max_retries_zero() {
+            // Even for transient is_error=true, max_retries=0 means exactly one attempt.
+            let call_count = Arc::new(AtomicUsize::new(0));
+            let tool: Arc<dyn Tool> = Arc::new(CountingIsErrorTool {
+                call_count: call_count.clone(),
+                is_error: true,
+                content: "rate_limit_exceeded",
+            });
+
+            let tool_call = CompletedToolUse {
+                id: "t1".to_string(),
+                name: "counting_is_error_tool".to_string(),
+                input: serde_json::json!({}),
+            };
+
+            run_with_retry(
+                &tool_call,
+                &tool,
+                "/tmp",
+                Duration::from_secs(5),
+                &ToolRetryConfig {
+                    max_retries: 0,
+                    base_delay_ms: 0,
+                    max_delay_ms: 0,
+                },
+                &*TEST_SINK,
+            )
+            .await;
+
+            assert_eq!(
+                call_count.load(Ordering::SeqCst),
+                1,
+                "max_retries=0 must prevent retry even for transient is_error"
+            );
+        }
     }
 
     #[tokio::test]

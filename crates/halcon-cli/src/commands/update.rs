@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 const RELEASES_URL: &str = "https://releases.cli.cuervo.cloud";
 const SITE_URL: &str = "https://cli.cuervo.cloud";
 
+/// Maximum number of versioned backups to keep on disk (oldest pruned first).
+const MAX_BACKUPS: usize = 3;
+
 /// Current binary's cargo version
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -55,6 +58,15 @@ fn binary_name() -> &'static str {
 struct Manifest {
     version: String,
     artifacts: Vec<ManifestArtifact>,
+    /// Optional release notes / changelog excerpt (markdown)
+    #[serde(default)]
+    release_notes: Option<String>,
+    /// Channel this manifest was published on (stable / beta / nightly)
+    #[serde(default)]
+    channel: Option<String>,
+    /// ISO-8601 publish timestamp
+    #[serde(default)]
+    published_at: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -71,6 +83,8 @@ pub struct UpdateArgs {
     pub check: bool,
     pub force: bool,
     pub version: Option<String>,
+    /// Release channel: "stable" (default), "beta", or "nightly"
+    pub channel: Option<String>,
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
@@ -79,14 +93,31 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     let target_version = args.version.as_deref().map(|v| v.trim_start_matches('v'));
 
-    // Pick manifest URL: versioned or latest
+    // Resolve channel: CLI arg > env var > "stable"
+    let channel = args.channel
+        .as_deref()
+        .or_else(|| std::env::var("HALCON_CHANNEL").ok().as_deref().map(|_| ""))
+        .unwrap_or("stable");
+    let channel = if channel.is_empty() {
+        std::env::var("HALCON_CHANNEL").unwrap_or_else(|_| "stable".to_string())
+    } else {
+        channel.to_string()
+    };
+
+    // Pick manifest URL: versioned > channel > stable/latest
     let manifest_url = if let Some(v) = target_version {
         format!("{releases_url}/v{v}/manifest.json")
     } else {
-        format!("{releases_url}/latest/manifest.json")
+        match channel.as_str() {
+            "stable" | "" => format!("{releases_url}/latest/manifest.json"),
+            ch => format!("{releases_url}/{ch}/manifest.json"),
+        }
     };
 
-    println!("  Checking for updates...");
+    let channel_label = if channel == "stable" { String::new() } else {
+        format!(" [{channel}]")
+    };
+    println!("  Checking for updates{channel_label}...");
 
     let manifest = fetch_manifest(&manifest_url)
         .context("Failed to fetch release manifest")?;
@@ -94,11 +125,17 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     let remote_version = manifest.version.trim_start_matches('v').to_string();
 
     println!("  Current:  v{CURRENT_VERSION}");
-    println!("  Latest:   v{remote_version}");
+    print!("  Latest:   v{remote_version}");
+    if let Some(ref ts) = manifest.published_at {
+        // Show only the date portion (first 10 chars of ISO-8601)
+        let date = ts.get(..10).unwrap_or(ts.as_str());
+        print!("  (released {date})");
+    }
+    println!();
 
     // Version comparison
     let needs_update = if args.force {
-        println!("  --force: reinstalling");
+        println!("  --force: reinstalling v{remote_version}");
         true
     } else if remote_version == CURRENT_VERSION {
         println!("  Already up to date.");
@@ -116,7 +153,15 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     if args.check {
         println!("\n  New version available: v{remote_version}");
-        println!("  Run `halcon update` to install.");
+        if let Some(ref notes) = manifest.release_notes {
+            if !notes.is_empty() {
+                println!("\n  Release notes:");
+                for line in notes.lines().take(10) {
+                    println!("    {line}");
+                }
+            }
+        }
+        println!("\n  Run `halcon update` to install.");
         return Ok(());
     }
 
@@ -184,16 +229,27 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Unix: backup current → replace atomically
-    let backup_path = current_exe.with_extension("bak");
+    // Unix: versioned backup → replace atomically
+    // Backup name: halcon.bak.v{current_version} — keeps up to MAX_BACKUPS old binaries.
+    let backup_name = format!("{}.bak.v{CURRENT_VERSION}",
+        current_exe.file_name().unwrap_or_default().to_string_lossy());
+    let backup_path = current_exe.with_file_name(&backup_name);
     print!("  Replacing binary... ");
     std::io::stdout().flush().ok();
     atomic_replace(&current_exe, &new_binary, &backup_path)
         .context("Failed to replace binary")?;
     println!("OK");
 
+    // Prune old backups — keep at most MAX_BACKUPS files matching *.bak.v*
+    if let Some(parent) = current_exe.parent() {
+        let bin_stem = current_exe.file_name()
+            .unwrap_or_default().to_string_lossy().into_owned();
+        prune_backups(parent, &bin_stem, MAX_BACKUPS);
+    }
+
     println!("\n  Halcon CLI updated to v{remote_version}.");
-    println!("  Backup of previous version: {}", backup_path.display());
+    println!("  Backup saved: {}", backup_path.display());
+    println!("  To rollback: halcon update --version {CURRENT_VERSION}");
 
     // Verify new binary
     if let Ok(output) = std::process::Command::new(&current_exe)
@@ -371,6 +427,114 @@ fn atomic_replace(current: &Path, new: &Path, backup: &Path) -> Result<()> {
 
 fn canonicalize_best_effort(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Remove oldest versioned backups so at most `keep` remain.
+/// Backups match the pattern `{bin_stem}.bak.v*` in `dir`.
+fn prune_backups(dir: &Path, bin_stem: &str, keep: usize) {
+    let prefix = format!("{bin_stem}.bak.v");
+    let mut backups: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    // Sort by modification time ascending (oldest first)
+    backups.sort_by_key(|p| {
+        p.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+    // Remove oldest until we're within the keep limit
+    let excess = backups.len().saturating_sub(keep);
+    for old in backups.into_iter().take(excess) {
+        let _ = std::fs::remove_file(&old);
+        tracing::debug!(path = %old.display(), "Pruned old backup");
+    }
+}
+
+/// Check for updates silently in the background (best-effort, non-blocking).
+///
+/// Spawns a short-lived thread that fetches the manifest and writes a
+/// notification file (`~/.halcon/.update-available`) if a newer version
+/// is available.  Main process reads this file on next invocation to
+/// show a one-line hint without slowing the startup path.
+pub fn notify_if_update_available() {
+    // Only check once per day — gate on a stamp file
+    let stamp_path = dirs_next();
+    let stamp_stale = stamp_path.as_ref().map(|p| {
+        let max_age = std::time::Duration::from_secs(86_400); // 24h
+        p.join(".update-check")
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().unwrap_or(max_age + max_age) > max_age)
+            .unwrap_or(true)
+    }).unwrap_or(false);
+
+    if !stamp_stale {
+        return;
+    }
+
+    let releases_url = std::env::var("HALCON_RELEASES_URL")
+        .unwrap_or_else(|_| RELEASES_URL.to_string());
+
+    let _ = std::thread::Builder::new()
+        .name("halcon-update-check".into())
+        .spawn(move || {
+            let url = format!("{releases_url}/latest/manifest.json");
+            let Ok(client) = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .user_agent(format!("halcon-cli/{CURRENT_VERSION}"))
+                .build()
+            else { return; };
+
+            let Ok(resp) = client.get(&url).send() else { return; };
+            if !resp.status().is_success() { return; }
+            let Ok(manifest) = resp.json::<Manifest>() else { return; };
+
+            let remote = manifest.version.trim_start_matches('v');
+            if version_gt(remote, CURRENT_VERSION) {
+                if let Some(halcon_dir) = dirs_next() {
+                    let note = halcon_dir.join(".update-available");
+                    let _ = std::fs::write(&note, remote);
+                    // Touch the stamp to avoid re-checking for 24h
+                    let _ = std::fs::write(halcon_dir.join(".update-check"), "");
+                }
+            } else {
+                // Up to date — clear the notification and touch stamp
+                if let Some(halcon_dir) = dirs_next() {
+                    let _ = std::fs::remove_file(halcon_dir.join(".update-available"));
+                    let _ = std::fs::write(halcon_dir.join(".update-check"), "");
+                }
+            }
+        });
+}
+
+/// Read the pending update notification (if any) and print a one-line hint.
+/// Called from the REPL startup path — total cost ≤ one file read.
+pub fn print_update_hint() {
+    let Some(halcon_dir) = dirs_next() else { return; };
+    let note = halcon_dir.join(".update-available");
+    if let Ok(ver) = std::fs::read_to_string(&note) {
+        let ver = ver.trim();
+        if !ver.is_empty() && version_gt(ver, CURRENT_VERSION) {
+            eprintln!(
+                "  \x1b[33m⚡ Update available:\x1b[0m v{CURRENT_VERSION} → v{ver}  \
+                 Run \x1b[1mhalcon update\x1b[0m"
+            );
+        }
+    }
+}
+
+fn dirs_next() -> Option<std::path::PathBuf> {
+    std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".halcon"))
 }
 
 /// Returns true if `a` > `b` using simple semver comparison.

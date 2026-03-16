@@ -279,6 +279,10 @@ enum Commands {
         /// Install a specific version (e.g., "v0.3.0")
         #[arg(long, short = 'V', value_name = "VERSION")]
         version: Option<String>,
+
+        /// Release channel: stable (default), beta, or nightly
+        #[arg(long, value_name = "CHANNEL", env = "HALCON_CHANNEL")]
+        channel: Option<String>,
     },
 
     /// Manage V3 plugins
@@ -855,6 +859,12 @@ async fn main() -> Result<()> {
         ).await;
     }
 
+    // Background update check + one-line hint (non-TUI, non-CI, non-JSON mode only).
+    if !is_tui_mode && !cli.no_banner && cli.output_format != OutputFormat::Json {
+        commands::update::notify_if_update_available();
+        commands::update::print_update_hint();
+    }
+
     match cli.command {
         Some(Commands::Chat { prompt, resume, tui, orchestrate, tasks, reflexion, metrics, timeline, full, expert, trace_out, trace_in }) => {
             commands::chat::run(
@@ -984,9 +994,9 @@ async fn main() -> Result<()> {
         Some(Commands::Theme(args)) => {
             commands::theme::run(args)
         }
-        Some(Commands::Update { check, force, version }) => {
+        Some(Commands::Update { check, force, version, channel }) => {
             tokio::task::spawn_blocking(move || {
-                commands::update::run(commands::update::UpdateArgs { check, force, version })
+                commands::update::run(commands::update::UpdateArgs { check, force, version, channel })
             })
             .await
             .context("update task panicked")?

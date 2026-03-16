@@ -191,15 +191,29 @@ pub struct OrchestratorResult {
     pub total_latency_ms: u64,
     /// Number of sub-agents that succeeded.
     pub success_count: usize,
-    /// Total number of sub-agents.
+    /// Total number of sub-agents (includes skipped).
     pub total_count: usize,
+    /// True when the shared token budget was exhausted before all tasks completed.
+    /// When true, `skipped_count` indicates how many tasks were not started.
+    #[serde(default)]
+    pub budget_exceeded: bool,
+    /// Number of tasks that were dropped due to budget exhaustion (intra-wave or
+    /// pre-wave). Does not include dependency-cascade skips.
+    #[serde(default)]
+    pub skipped_count: usize,
 }
 
 impl OrchestratorResult {
     /// Build an aggregated result from sub-agent results.
-    pub fn from_results(orchestrator_id: Uuid, sub_results: Vec<SubAgentResult>, total_latency_ms: u64) -> Self {
+    pub fn from_results(
+        orchestrator_id: Uuid,
+        sub_results: Vec<SubAgentResult>,
+        total_latency_ms: u64,
+        budget_exceeded: bool,
+        skipped_count: usize,
+    ) -> Self {
         let success_count = sub_results.iter().filter(|r| r.success).count();
-        let total_count = sub_results.len();
+        let total_count = sub_results.len() + skipped_count;
         let total_input_tokens = sub_results.iter().map(|r| r.input_tokens).sum();
         let total_output_tokens = sub_results.iter().map(|r| r.output_tokens).sum();
         let total_cost_usd = sub_results.iter().map(|r| r.cost_usd).sum();
@@ -213,6 +227,8 @@ impl OrchestratorResult {
             total_latency_ms,
             success_count,
             total_count,
+            budget_exceeded,
+            skipped_count,
         }
     }
 }
@@ -457,10 +473,12 @@ mod tests {
             },
         ];
 
-        let agg = OrchestratorResult::from_results(orch_id, results, 1200);
+        let agg = OrchestratorResult::from_results(orch_id, results, 1200, false, 0);
         assert_eq!(agg.orchestrator_id, orch_id);
         assert_eq!(agg.success_count, 1);
         assert_eq!(agg.total_count, 2);
+        assert!(!agg.budget_exceeded);
+        assert_eq!(agg.skipped_count, 0);
         assert_eq!(agg.total_input_tokens, 300);
         assert_eq!(agg.total_output_tokens, 150);
         assert!((agg.total_cost_usd - 0.003).abs() < 0.0001);
@@ -478,6 +496,8 @@ mod tests {
             total_latency_ms: 0,
             success_count: 0,
             total_count: 0,
+            budget_exceeded: false,
+            skipped_count: 0,
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: OrchestratorResult = serde_json::from_str(&json).unwrap();

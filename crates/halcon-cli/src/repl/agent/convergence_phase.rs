@@ -416,6 +416,12 @@ pub(super) async fn run(
                     round, ?cp.action, deficit = %cp.progress_deficit,
                     "Phase3 MidLoopCritic checkpoint"
                 );
+                // Surface structured checkpoint summary to the user (skip on Continue — no noise).
+                if cp.action != super::super::domain::mid_loop_critic::CriticAction::Continue
+                    && !state.silent
+                {
+                    render_sink.info(&cp.format_summary());
+                }
                 Some(cp.action)
             } else {
                 None
@@ -1133,7 +1139,8 @@ pub(super) async fn run(
                     return Ok(PhaseOutcome::BreakLoop);
                 }
                 SynthesisReason::LoopGuardInjectSynthesis
-                | SynthesisReason::RoundScorerConsecutiveRegression => {
+                | SynthesisReason::RoundScorerConsecutiveRegression
+                | SynthesisReason::MidLoopCriticForceSynthesis => {
                     // Soft hint: inject synthesis directive, continue to next round.
                     // Suppress if convergence directive was already injected this round
                     // (ConvergenceController::Replan injects a conflicting directive).
@@ -1307,7 +1314,8 @@ pub(super) async fn run(
                     );
                 }
                 ReplanReason::LoopGuardStagnationDetected
-                | ReplanReason::RoundScorerLowTrajectory => {
+                | ReplanReason::RoundScorerLowTrajectory
+                | ReplanReason::MidLoopCriticReplan => {
                     // Full stagnation replan: enforce budget then attempt replan.
                     state.convergence.replan_attempts += 1;
                     if state.convergence.replan_attempts > state.policy.max_replan_attempts {

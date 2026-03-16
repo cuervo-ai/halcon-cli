@@ -497,14 +497,44 @@ jobs:
                   "url": f"https://releases.cli.cuervo.cloud/latest/{f.name}"
               })
 
+          # Determine channel from tag: alpha/beta/rc → beta; else stable
+          is_prerelease = os.environ.get("IS_PRERELEASE", "false").lower() == "true"
+          channel = "beta" if is_prerelease else "stable"
+
+          # Extract release notes from GITHUB_RELEASE_NOTES env var (set by GH action)
+          # or from CHANGELOG.md if it exists — first ## vX.Y.Z section
+          release_notes = os.environ.get("RELEASE_NOTES", "")
+          if not release_notes:
+              changelog = Path("CHANGELOG.md")
+              if changelog.exists():
+                  import re
+                  text = changelog.read_text()
+                  # Match from `## v{version}` to the next `## v` header
+                  pattern = rf"(?s)##\s+v?{re.escape(version)}[^\n]*\n(.*?)(?=\n##\s+v|\Z)"
+                  m = re.search(pattern, text)
+                  if m:
+                      release_notes = m.group(1).strip()[:2000]  # cap at 2000 chars
+
+          # Minimum OS versions (informational, enforced by installer)
+          MIN_OS = {
+              "macos": "12.0",   # Monterey — required for arm64 native
+              "linux": "glibc-2.17",
+              "windows": "10",
+          }
+
           manifest = {
               "version": version,
+              "channel": channel,
               "published_at": datetime.now(timezone.utc).isoformat(),
               "artifacts": artifacts,
               "checksums_url": "https://releases.cli.cuervo.cloud/latest/checksums.txt",
               "sbom_url": f"https://releases.cli.cuervo.cloud/latest/halcon-{version}.sbom.spdx.json",
               "github_url": f"https://github.com/cuervo-ai/halcon-cli/releases/tag/v{version}",
+              "release_notes": release_notes or None,
+              "min_os": MIN_OS,
           }
+          # Strip None values for a cleaner manifest
+          manifest = {k: v for k, v in manifest.items() if v is not None}
 
           out = dist / "manifest.json"
           out.write_text(json.dumps(manifest, indent=2))
@@ -512,6 +542,7 @@ jobs:
           EOF
         env:
           VERSION: ${{ needs.preflight.outputs.version_bare }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
 
       - name: Upload to Cloudflare R2 (versioned)
         uses: cloudflare/wrangler-action@v3

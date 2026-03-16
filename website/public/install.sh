@@ -9,6 +9,9 @@ RELEASES_URL="${HALCON_RELEASES_URL:-https://releases.cli.cuervo.cloud}"
 MANIFEST_URL="${RELEASES_URL}/latest/manifest.json"
 INSTALL_DIR="${HALCON_INSTALL_DIR:-}"
 BINARY_NAME="halcon"
+FORCE="${HALCON_FORCE:-0}"
+NO_MODIFY_PATH="${HALCON_NO_MODIFY_PATH:-0}"
+CHANNEL="${HALCON_CHANNEL:-stable}"
 
 # ─── Colors ────────────────────────────────────────────────────────────────
 if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
@@ -31,17 +34,30 @@ error() { printf "${RED}  ✗${RESET} %s\n" "$*" >&2; exit 1; }
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --version) HALCON_VERSION="$2"; shift 2 ;;
-            --dir)     INSTALL_DIR="$2";    shift 2 ;;
+            --version)        HALCON_VERSION="$2"; shift 2 ;;
+            --dir)            INSTALL_DIR="$2";    shift 2 ;;
+            --channel)        CHANNEL="$2";        shift 2 ;;
+            --force|-f)       FORCE=1;             shift ;;
+            --no-modify-path) NO_MODIFY_PATH=1;    shift ;;
             --help|-h)
                 printf "Halcon CLI Installer\n\n"
                 printf "Options:\n"
-                printf "  --version VERSION   Install specific version (default: latest)\n"
-                printf "  --dir DIR           Install directory (default: auto-detected)\n"
+                printf "  --version VERSION     Install specific version (default: latest)\n"
+                printf "  --dir DIR             Install directory (default: auto-detected)\n"
+                printf "  --channel CHANNEL     Release channel: stable|beta|nightly (default: stable)\n"
+                printf "  --force, -f           Reinstall even if already at target version\n"
+                printf "  --no-modify-path      Skip shell RC file modification\n"
+                printf "\nEnv vars:\n"
+                printf "  HALCON_VERSION        Version to install\n"
+                printf "  HALCON_INSTALL_DIR    Install directory override\n"
+                printf "  HALCON_CHANNEL        Release channel\n"
+                printf "  HALCON_FORCE=1        Force reinstall\n"
                 printf "\nExamples:\n"
                 printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh\n"
                 printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh -s -- --version v0.3.0\n"
                 printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh -s -- --dir /usr/local/bin\n"
+                printf "  curl -sSfL https://halcon.cuervo.cloud/install.sh | sh -s -- --force\n"
+                printf "  HALCON_CHANNEL=beta curl -sSfL https://halcon.cuervo.cloud/install.sh | sh\n"
                 exit 0 ;;
             *) error "Unknown argument: $1" ;;
         esac
@@ -78,6 +94,15 @@ detect_platform() {
             EXT="tar.gz"
             ;;
         Darwin)
+            # Rosetta 2 detection: a shell running under x86_64 emulation on
+            # arm64 hardware will report ARCH=x86_64 via uname -m.  Use sysctl
+            # to check the real hardware capability and prefer the native binary.
+            if [ "$ARCH" = "x86_64" ]; then
+                if (sysctl hw.optional.arm64 2>/dev/null || true) | grep -q ': 1'; then
+                    ARCH="arm64"
+                    info "Rosetta 2 detected — selecting native arm64 binary"
+                fi
+            fi
             case "$ARCH" in
                 x86_64)  TARGET="x86_64-apple-darwin" ;;
                 arm64)   TARGET="aarch64-apple-darwin" ;;
@@ -89,6 +114,60 @@ detect_platform() {
     esac
 
     info "Platform: ${OS} ${ARCH} → ${TARGET}"
+}
+
+# ─── Semver comparison helper ────────────────────────────────────────────────
+# Returns 0 (true) if $1 is strictly greater than $2.
+# Handles "X.Y.Z" format, strips leading 'v'.
+_version_gt() {
+    _va="$(printf '%s' "$1" | sed 's/^v//')"
+    _vb="$(printf '%s' "$2" | sed 's/^v//')"
+    [ "$_va" = "$_vb" ] && return 1
+    # Use sort -V (GNU coreutils) when available — handles pre-release suffixes
+    if sort --version 2>&1 | grep -q "GNU coreutils" 2>/dev/null; then
+        _higher="$(printf '%s\n%s' "$_va" "$_vb" | sort -V | tail -1)"
+        [ "$_higher" = "$_va" ] && return 0 || return 1
+    fi
+    # Manual split: X.Y.Z — strip pre-release suffix after '-'
+    _va="$(printf '%s' "$_va" | cut -d'-' -f1)"
+    _vb="$(printf '%s' "$_vb" | cut -d'-' -f1)"
+    _a1="$(printf '%s' "$_va" | cut -d. -f1)"
+    _a2="$(printf '%s' "$_va" | cut -d. -f2)"
+    _a3="$(printf '%s' "$_va" | cut -d. -f3)"
+    _b1="$(printf '%s' "$_vb" | cut -d. -f1)"
+    _b2="$(printf '%s' "$_vb" | cut -d. -f2)"
+    _b3="$(printf '%s' "$_vb" | cut -d. -f3)"
+    # Ensure integers (default 0)
+    _a1="${_a1:-0}"; _a2="${_a2:-0}"; _a3="${_a3:-0}"
+    _b1="${_b1:-0}"; _b2="${_b2:-0}"; _b3="${_b3:-0}"
+    [ "$_a1" -gt "$_b1" ] && return 0
+    [ "$_a1" -lt "$_b1" ] && return 1
+    [ "$_a2" -gt "$_b2" ] && return 0
+    [ "$_a2" -lt "$_b2" ] && return 1
+    [ "$_a3" -gt "$_b3" ] && return 0
+    return 1
+}
+
+# ─── Existing installation probe ──────────────────────────────────────────────
+# Sets EXISTING_VERSION and EXISTING_PATH if halcon is already installed.
+_probe_existing() {
+    EXISTING_VERSION=""
+    EXISTING_PATH=""
+    for _cand in \
+        "${INSTALL_DIR}/${BINARY_NAME}" \
+        "$(command -v "${BINARY_NAME}" 2>/dev/null)" \
+        "$HOME/.local/bin/${BINARY_NAME}" \
+        "$HOME/bin/${BINARY_NAME}" \
+        "/usr/local/bin/${BINARY_NAME}"
+    do
+        [ -x "$_cand" ] || continue
+        _v="$("$_cand" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        if [ -n "$_v" ]; then
+            EXISTING_VERSION="$_v"
+            EXISTING_PATH="$_cand"
+            return
+        fi
+    done
 }
 
 # ─── Install directory resolution ──────────────────────────────────────────
@@ -253,11 +332,22 @@ main() {
     TMPDIR_WORK="$(mktemp -d)"
     trap 'rm -rf "$TMPDIR_WORK"' EXIT
 
+    # ─── Channel-aware manifest URL ──────────────────────────────────────────
+    case "$CHANNEL" in
+        beta|nightly)
+            MANIFEST_URL="${RELEASES_URL}/${CHANNEL}/manifest.json" ;;
+        stable|"")
+            MANIFEST_URL="${RELEASES_URL}/latest/manifest.json" ;;
+        *)
+            warn "Unknown channel '${CHANNEL}', defaulting to stable"
+            MANIFEST_URL="${RELEASES_URL}/latest/manifest.json" ;;
+    esac
+
     # ─── Resolve version ────────────────────────────────────────────────────
     REQUESTED_VERSION="$(printf '%s' "$HALCON_VERSION" | sed 's/^v//')"
 
     if [ "$REQUESTED_VERSION" = "latest" ]; then
-        info "Fetching release manifest..."
+        info "Fetching release manifest (channel: ${CHANNEL})..."
         MANIFEST_FILE="$TMPDIR_WORK/manifest.json"
         download "$MANIFEST_URL" "$MANIFEST_FILE"
 
@@ -284,8 +374,29 @@ main() {
         info "Installing version: ${VERSION}"
     fi
 
-    # ─── Resolve install directory ───────────────────────────────────────────
+    # ─── Detect existing installation ────────────────────────────────────────
     resolve_install_dir
+    _probe_existing
+
+    if [ -n "$EXISTING_VERSION" ]; then
+        if [ "$EXISTING_VERSION" = "$VERSION" ] && [ "$FORCE" = "0" ]; then
+            ok "Already at latest (v${VERSION}) — ${EXISTING_PATH}"
+            info "To reinstall: re-run with --force"
+            configure_path "$INSTALL_DIR"
+            exit 0
+        elif _version_gt "$VERSION" "$EXISTING_VERSION"; then
+            printf "\n${BOLD}  Upgrading${RESET}: v${EXISTING_VERSION} → v${VERSION}\n\n"
+        elif _version_gt "$EXISTING_VERSION" "$VERSION"; then
+            if [ "$FORCE" = "0" ]; then
+                warn "Installed v${EXISTING_VERSION} is newer than v${VERSION}. Skipping."
+                warn "Use --force to downgrade."
+                exit 0
+            fi
+            printf "\n${YELLOW}${BOLD}  Downgrading${RESET}: v${EXISTING_VERSION} → v${VERSION} (--force)\n\n"
+        fi
+    else
+        printf "\n${BOLD}  Fresh install${RESET}: v${VERSION}\n\n"
+    fi
     info "Install directory: ${INSTALL_DIR}"
 
     # ─── Build artifact name & URLs ──────────────────────────────────────────
@@ -405,7 +516,12 @@ main() {
     fi
 
     # ─── PATH configuration ──────────────────────────────────────────────────
-    configure_path "$INSTALL_DIR"
+    if [ "$NO_MODIFY_PATH" = "0" ]; then
+        configure_path "$INSTALL_DIR"
+    else
+        info "Skipping shell config (--no-modify-path)"
+        printf "  Add to PATH manually: ${BOLD}export PATH=\"\$PATH:${INSTALL_DIR}\"${RESET}\n"
+    fi
 
     # ─── Full-capacity configuration ─────────────────────────────────────────
     configure_halcon

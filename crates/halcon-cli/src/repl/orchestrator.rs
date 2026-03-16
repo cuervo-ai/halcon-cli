@@ -166,24 +166,31 @@ pub fn estimate_task_tokens(instruction: &str, tool_count: usize) -> u32 {
 
 /// Derive sub-agent execution limits from parent limits, orchestrator config, and wave size.
 ///
-/// When `shared_budget` is true, the parent token budget is divided by the actual number of
-/// tasks in the current wave (`wave_size`), not by `max_concurrent_agents`.  Using the
-/// concurrent-agent cap as the divisor caused severe token starvation: a wave with 11 tasks
-/// but concurrency=3 would give each sub-agent budget/3 tokens — 3.7× too many — leading to
-/// the model truncating mid-output when the shared pool was exhausted.
+/// When `shared_budget` is true, the token budget is divided by `wave_size` using the
+/// REMAINING tokens (not the initial parent budget).  This prevents later waves from
+/// over-allocating when earlier waves already consumed a portion of the budget.
 ///
-/// The wave size is the correct divisor because every task in the wave needs a share of the
-/// total budget, regardless of how many run concurrently at any given moment.
+/// Example: initial budget=100k, wave 1 consumed 30k → wave 2 tasks should each receive
+/// 70k / wave2_size, not 100k / wave2_size.
+///
+/// `remaining_tokens` is obtained via `SharedBudget::remaining_tokens()`.  Pass
+/// `parent.max_total_tokens as u64` if no shared budget is active (i.e., when
+/// `shared_budget=false` or `max_total_tokens=0`).
 pub fn derive_sub_limits(
     parent: &AgentLimits,
     config: &OrchestratorConfig,
     wave_size: usize,
+    remaining_tokens: u64,
 ) -> AgentLimits {
     let max_rounds = parent.max_rounds.min(10);
     let max_total_tokens = if config.shared_budget && wave_size > 0 && parent.max_total_tokens > 0 {
-        // Divide by wave_size (all tasks that need a budget share), not by max_concurrent_agents.
-        // Floor at 1 to avoid zero-budget sub-agents.
-        (parent.max_total_tokens / wave_size as u32).max(1)
+        // Use the REMAINING tokens (not the initial parent budget) so later waves
+        // reflect actual consumption.  Cap at the original parent limit to guard
+        // against u64::MAX (returned by remaining_tokens() when unlimited).
+        let effective = remaining_tokens
+            .min(parent.max_total_tokens as u64) as u32;
+        // Divide by wave_size (all tasks that need a share) and floor at 1.
+        (effective / wave_size as u32).max(1)
     } else {
         parent.max_total_tokens
     };
@@ -263,6 +270,8 @@ pub async fn run_orchestrator(
 
     let mut all_results: Vec<SubAgentResult> = Vec::new();
     let mut failed_task_ids: HashSet<Uuid> = HashSet::new();
+    let mut budget_exceeded = false;
+    let mut budget_skipped_count: usize = 0;
 
     // Detect cyclic tasks: any task not appearing in any wave was skipped by
     // topological_waves() due to an unresolvable dependency cycle. These tasks
@@ -308,11 +317,17 @@ pub async fn run_orchestrator(
         // Compute per-wave sub-limits using the actual wave size so the budget is split
         // correctly.  A wave with 11 tasks divides by 11; a wave with 2 tasks divides by 2.
         let wave_size = wave.len();
-        let sub_limits = derive_sub_limits(parent_limits, config, wave_size);
+        let sub_limits = derive_sub_limits(parent_limits, config, wave_size, budget.remaining_tokens());
 
         // Check budget before each wave.
         if budget.is_over_budget() {
-            tracing::warn!("Orchestrator budget exceeded, stopping before next wave");
+            budget_exceeded = true;
+            budget_skipped_count += wave.iter().count();
+            tracing::warn!(
+                orchestrator_id = %orchestrator_id,
+                skipped = wave.iter().count(),
+                "Orchestrator budget exceeded, stopping before next wave",
+            );
             break;
         }
 
@@ -1072,12 +1087,53 @@ pub async fn run_orchestrator(
             })
             .collect();
 
-        // Execute wave concurrently.
-        let wave_results = futures::future::join_all(futures).await;
+        // P10: Enforce max_concurrent_agents concurrency cap.
+        //
+        // The previous `join_all` launched ALL tasks in the wave simultaneously, ignoring
+        // `config.max_concurrent_agents`. Large waves could exhaust provider rate limits,
+        // saturate the OS thread pool, and spike memory. `buffer_unordered(cap)` pulls
+        // tasks from the iterator lazily — only `cap` sub-agents run at any moment.
+        //
+        // P4: Intra-wave budget enforcement.
+        //
+        // Tokens are accumulated as each task completes so `is_over_budget()` reflects
+        // real-time consumption rather than the stale pre-wave snapshot. When the budget
+        // is exceeded mid-wave, we drain the already-in-flight tasks (at most cap−1) and
+        // skip the rest — those unstarted futures are simply dropped from the iterator.
+        let cap = config.max_concurrent_agents.max(1);
+        let mut wave_results: Vec<SubAgentResult> = Vec::with_capacity(eligible_tasks.len());
+        {
+            use futures::stream::StreamExt as _;
+            let mut stream = std::pin::pin!(
+                futures::stream::iter(futures).buffer_unordered(cap)
+            );
+            while let Some(result) = stream.next().await {
+                budget.add_tokens(result.input_tokens + result.output_tokens);
+                wave_results.push(result);
+                if budget.is_over_budget() {
+                    let dropped = eligible_tasks.len().saturating_sub(wave_results.len());
+                    budget_exceeded = true;
+                    budget_skipped_count += dropped;
+                    tracing::warn!(
+                        orchestrator_id = %orchestrator_id,
+                        completed = wave_results.len(),
+                        total_in_wave = eligible_tasks.len(),
+                        dropped,
+                        "intra-wave budget exceeded — dropping stream, skipping unstarted tasks",
+                    );
+                    // Break immediately.  Dropping `stream` cancels any futures that
+                    // buffer_unordered has already started but not yet completed (at most
+                    // cap−1 outstanding).  Unstarted futures were never polled and require
+                    // no cleanup.
+                    break;
+                }
+            }
+        }
 
-        // Process results: update budget, persist, emit events, track failures.
+        // Process results: persist, emit events, track failures.
+        // NOTE: budget.add_tokens() has been moved into the stream collection loop above
+        // (P4 fix) so that intra-wave budget checks reflect real token consumption.
         for result in wave_results {
-            budget.add_tokens(result.input_tokens + result.output_tokens);
 
             // Track failed tasks for downstream failure cascade.
             // IMPORTANT: Timeout failures (error_type:timeout) are treated differently from
@@ -1183,7 +1239,13 @@ pub async fn run_orchestrator(
     }
 
     let total_latency_ms = orch_start.elapsed().as_millis() as u64;
-    let orch_result = OrchestratorResult::from_results(orchestrator_id, all_results, total_latency_ms);
+    let orch_result = OrchestratorResult::from_results(
+        orchestrator_id,
+        all_results,
+        total_latency_ms,
+        budget_exceeded,
+        budget_skipped_count,
+    );
 
     // Emit OrchestratorCompleted event.
     let _ = event_tx.send(DomainEvent::new(EventPayload::OrchestratorCompleted {
@@ -1565,7 +1627,7 @@ mod tests {
             ..Default::default()
         };
         // wave_size=5: budget is split by the actual wave size, not max_concurrent_agents.
-        let limits = derive_sub_limits(&parent, &config, 5);
+        let limits = derive_sub_limits(&parent, &config, 5, parent.max_total_tokens as u64);
         assert_eq!(limits.max_rounds, 10); // capped at 10
         assert_eq!(limits.max_total_tokens, 20_000); // 100k / 5 (wave_size)
         assert_eq!(limits.max_duration_secs, 300); // 600 / 2
@@ -1588,7 +1650,7 @@ mod tests {
             shared_budget: true,
             ..Default::default()
         };
-        let limits = derive_sub_limits(&parent, &config, 11);
+        let limits = derive_sub_limits(&parent, &config, 11, parent.max_total_tokens as u64);
         assert_eq!(limits.max_total_tokens, 10_000); // 110k / 11 — not 110k / 3 = 36_666
     }
 
@@ -1607,7 +1669,7 @@ mod tests {
             ..Default::default()
         };
         // shared_budget=false → wave_size has no effect.
-        let limits = derive_sub_limits(&parent, &config, 3);
+        let limits = derive_sub_limits(&parent, &config, 3, parent.max_total_tokens as u64);
         assert_eq!(limits.max_total_tokens, 100_000); // full budget when not shared
         assert_eq!(limits.max_duration_secs, 120); // explicit timeout
     }
@@ -2232,6 +2294,193 @@ mod tests {
         let summary = "Wrote the output file";
         let is_zero_tool_drift = true && tools_used.is_empty() && !is_synthesis_summary(summary);
         assert!(!is_zero_tool_drift, "Task that ran tools must NOT be flagged as drift");
+    }
+
+    // ── P10: Concurrency cap tests ────────────────────────────────────────────
+    //
+    // Verify that `max_concurrent_agents` is actually enforced (was previously
+    // ignored — all tasks in a wave ran via uncapped join_all).
+
+    #[tokio::test]
+    async fn p10_concurrency_cap_one_completes_all_tasks() {
+        // max_concurrent_agents=1 forces serial execution within the wave.
+        // All tasks must still complete — the cap must not cause starvation.
+        let provider: Arc<dyn ModelProvider> = Arc::new(halcon_providers::EchoProvider::new());
+        let tool_registry = ToolRegistry::new();
+        let (event_tx, _rx) = halcon_core::event_bus(64);
+        let limits = AgentLimits::default();
+        let config = OrchestratorConfig {
+            max_concurrent_agents: 1, // strictly serial
+            ..Default::default()
+        };
+        let routing = RoutingConfig::default();
+
+        // Build 5 independent tasks (same wave, no deps).
+        let tasks: Vec<SubAgentTask> = (0..5)
+            .map(|i| SubAgentTask {
+                task_id: Uuid::new_v4(),
+                instruction: format!("Task {i}"),
+                agent_type: AgentType::Chat,
+                model: None, provider: None,
+                allowed_tools: HashSet::new(),
+                limits_override: None, depends_on: vec![], priority: 0,
+                system_prompt_prefix: None,
+                role: halcon_core::types::AgentRole::default(),
+                team_id: None, mailbox_id: None, estimated_tokens: 0,
+            })
+            .collect();
+
+        let result = run_orchestrator(
+            Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
+            &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
+            &[], true, false, None, test_policy(),
+        ).await.unwrap();
+
+        // All 5 must succeed despite the concurrency cap of 1.
+        assert_eq!(result.total_count, 5, "all tasks must complete under cap=1");
+        assert_eq!(result.success_count, 5, "all tasks must succeed under cap=1");
+    }
+
+    #[tokio::test]
+    async fn p10_concurrency_cap_three_completes_large_wave() {
+        // Wave of 8 tasks with cap=3 — verify correct completion count.
+        let provider: Arc<dyn ModelProvider> = Arc::new(halcon_providers::EchoProvider::new());
+        let tool_registry = ToolRegistry::new();
+        let (event_tx, _rx) = halcon_core::event_bus(64);
+        let limits = AgentLimits::default();
+        let config = OrchestratorConfig {
+            max_concurrent_agents: 3,
+            ..Default::default()
+        };
+        let routing = RoutingConfig::default();
+
+        let tasks: Vec<SubAgentTask> = (0..8)
+            .map(|i| SubAgentTask {
+                task_id: Uuid::new_v4(),
+                instruction: format!("Work item {i}"),
+                agent_type: AgentType::Chat,
+                model: None, provider: None,
+                allowed_tools: HashSet::new(),
+                limits_override: None, depends_on: vec![], priority: 0,
+                system_prompt_prefix: None,
+                role: halcon_core::types::AgentRole::default(),
+                team_id: None, mailbox_id: None, estimated_tokens: 0,
+            })
+            .collect();
+
+        let result = run_orchestrator(
+            Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
+            &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
+            &[], true, false, None, test_policy(),
+        ).await.unwrap();
+
+        assert_eq!(result.total_count, 8, "all 8 tasks must complete with cap=3");
+        assert_eq!(result.success_count, 8);
+    }
+
+    // ── P4: Intra-wave budget enforcement tests ────────────────────────────────
+    //
+    // Verify that the orchestrator halts mid-wave when the shared token budget
+    // is exhausted, rather than waiting for all tasks to complete first.
+
+    #[tokio::test]
+    async fn p4_intra_wave_budget_stops_when_exceeded() {
+        // EchoProvider returns ~2 tokens per short instruction (1 input + ~2 output
+        // for "**Echo:** A").  Setting max_total_tokens=8 gives room for ~3 tasks
+        // before the shared budget is exhausted — the remaining 3 must be skipped.
+        //
+        // max_concurrent_agents=1 keeps execution serial so the assertion is deterministic.
+        let provider: Arc<dyn ModelProvider> = Arc::new(halcon_providers::EchoProvider::new());
+        let tool_registry = ToolRegistry::new();
+        let (event_tx, _rx) = halcon_core::event_bus(64);
+        let limits = AgentLimits {
+            max_total_tokens: 8, // trips after ~3 tasks (3 × ~3 tokens ≈ 9 > 8)
+            max_duration_secs: 600,
+            ..Default::default()
+        };
+        let config = OrchestratorConfig {
+            shared_budget: false,        // each sub-agent gets full 8-token budget to run
+            max_concurrent_agents: 1,   // serial execution for a deterministic test
+            ..Default::default()
+        };
+        let routing = RoutingConfig::default();
+
+        // Use single-character instructions to keep token counts predictable.
+        let instrs = ["A", "B", "C", "D", "E", "F"];
+        let tasks: Vec<SubAgentTask> = instrs.iter()
+            .map(|s| SubAgentTask {
+                task_id: Uuid::new_v4(),
+                instruction: s.to_string(),
+                agent_type: AgentType::Chat,
+                model: None, provider: None,
+                allowed_tools: HashSet::new(),
+                limits_override: None, depends_on: vec![], priority: 0,
+                system_prompt_prefix: None,
+                role: halcon_core::types::AgentRole::default(),
+                team_id: None, mailbox_id: None, estimated_tokens: 0,
+            })
+            .collect();
+
+        let result = run_orchestrator(
+            Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
+            &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
+            &[], true, false, None, test_policy(),
+        ).await.unwrap();
+
+        // Intra-wave budget enforcement must stop before all 6 tasks execute.
+        // Previously (join_all), all 6 ran and tokens were summed only after the wave.
+        assert!(
+            result.budget_exceeded,
+            "P4: budget_exceeded must be true when tokens run out mid-wave",
+        );
+        assert!(
+            result.skipped_count > 0,
+            "P4: skipped_count must be > 0 when wave is halted early; got skipped_count={}",
+            result.skipped_count
+        );
+        assert_eq!(
+            result.total_count, 6,
+            "P4: total_count must equal all submitted tasks (executed + skipped); got {}",
+            result.total_count
+        );
+    }
+
+    #[tokio::test]
+    async fn p4_generous_budget_allows_all_tasks() {
+        // Verify that with an ample budget, all tasks complete normally.
+        let provider: Arc<dyn ModelProvider> = Arc::new(halcon_providers::EchoProvider::new());
+        let tool_registry = ToolRegistry::new();
+        let (event_tx, _rx) = halcon_core::event_bus(64);
+        let limits = AgentLimits {
+            max_total_tokens: 0, // 0 = unlimited
+            max_duration_secs: 0, // 0 = unlimited
+            ..Default::default()
+        };
+        let config = OrchestratorConfig::default();
+        let routing = RoutingConfig::default();
+
+        let tasks: Vec<SubAgentTask> = (0..4)
+            .map(|i| SubAgentTask {
+                task_id: Uuid::new_v4(),
+                instruction: format!("Unlimited {i}"),
+                agent_type: AgentType::Chat,
+                model: None, provider: None,
+                allowed_tools: HashSet::new(),
+                limits_override: None, depends_on: vec![], priority: 0,
+                system_prompt_prefix: None,
+                role: halcon_core::types::AgentRole::default(),
+                team_id: None, mailbox_id: None, estimated_tokens: 0,
+            })
+            .collect();
+
+        let result = run_orchestrator(
+            Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
+            &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
+            &[], true, false, None, test_policy(),
+        ).await.unwrap();
+
+        assert_eq!(result.total_count, 4, "unlimited budget must complete all tasks");
+        assert_eq!(result.success_count, 4);
     }
 
     /// Whitelist covers all synthesis-variant keywords (not just "synthesis").

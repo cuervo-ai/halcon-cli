@@ -1287,7 +1287,7 @@ impl Default for AgentLimits {
         Self {
             max_rounds: 25,
             max_total_tokens: 0,
-            max_duration_secs: 0,
+            max_duration_secs: 600,
             tool_timeout_secs: 120,
             provider_timeout_secs: default_provider_timeout(),
             max_parallel_tools: default_max_parallel(),

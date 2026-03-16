@@ -30,6 +30,8 @@ pub enum SynthesisReason {
     LoopGuardInjectSynthesis,
     /// `RoundScorer.should_inject_synthesis()` fired (consecutive regression rounds).
     RoundScorerConsecutiveRegression,
+    /// `MidLoopCritic` fired `CriticAction::ForceSynthesis` (budget >90% with <60% progress).
+    MidLoopCriticForceSynthesis,
 }
 
 /// Identifies which authority triggered a replan decision.
@@ -41,6 +43,8 @@ pub enum ReplanReason {
     LoopGuardStagnationDetected,
     /// `RoundScorer.should_trigger_replan()` fired (persistent low trajectory).
     RoundScorerLowTrajectory,
+    /// `MidLoopCritic` fired `CriticAction::Replan`, `ReduceScope`, or `ChangeStrategy`.
+    MidLoopCriticReplan,
 }
 
 // ── TerminationDecision ───────────────────────────────────────────────────────
@@ -76,6 +80,7 @@ impl TerminationOracle {
     /// # Precedence
     /// 1. **Halt** — `ConvergenceAction::Halt` OR `LoopSignal::Break` (hard stop)
     /// 2. **InjectSynthesis** — `ConvergenceAction::Synthesize` (highest semantic authority)
+    /// 3c. **Mid-loop critic** — `CriticAction::ForceSynthesis/Replan/ReduceScope/ChangeStrategy`
     ///    OR `LoopSignal::InjectSynthesis` (loop guard escalation)
     ///    OR `feedback.synthesis_advised` (RoundScorer consecutive regressions)
     /// 3. **Replan** — `ConvergenceAction::Replan`
@@ -184,6 +189,24 @@ impl TerminationOracle {
             return TerminationDecision::Replan {
                 reason: ReplanReason::LoopGuardStagnationDetected,
             };
+        }
+
+        // ── Precedence 3c: Mid-Loop Critic ───────────────────────────────────
+        // Lower precedence than ConvergenceController/LoopGuard/RoundScorer but higher than
+        // ForceNoTools.  ForceSynthesis is blocked by GovernanceRescue like all synthesis paths.
+        use super::mid_loop_critic::CriticAction;
+        match feedback.mid_critic_action {
+            Some(CriticAction::ForceSynthesis) if !feedback.governance_rescue_active => {
+                return TerminationDecision::InjectSynthesis {
+                    reason: SynthesisReason::MidLoopCriticForceSynthesis,
+                };
+            }
+            Some(CriticAction::Replan | CriticAction::ReduceScope | CriticAction::ChangeStrategy) => {
+                return TerminationDecision::Replan {
+                    reason: ReplanReason::MidLoopCriticReplan,
+                };
+            }
+            _ => {}
         }
 
         // ── Precedence 4: ForceNoTools ────────────────────────────────────────
@@ -433,8 +456,9 @@ mod tests {
             SynthesisReason::ConvergenceControllerSynthesizeAction,
             SynthesisReason::LoopGuardInjectSynthesis,
             SynthesisReason::RoundScorerConsecutiveRegression,
+            SynthesisReason::MidLoopCriticForceSynthesis,
         ];
-        assert_eq!(reasons.len(), 3);
+        assert_eq!(reasons.len(), 4);
     }
 
     #[test]
@@ -443,8 +467,103 @@ mod tests {
             ReplanReason::ConvergenceControllerReplanAction,
             ReplanReason::LoopGuardStagnationDetected,
             ReplanReason::RoundScorerLowTrajectory,
+            ReplanReason::MidLoopCriticReplan,
         ];
-        assert_eq!(reasons.len(), 3);
+        assert_eq!(reasons.len(), 4);
+    }
+
+    // ── Precedence 3c: Mid-Loop Critic ────────────────────────────────────────
+
+    #[test]
+    fn mid_critic_force_synthesis_produces_inject_synthesis() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::ForceSynthesis);
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::InjectSynthesis {
+                reason: SynthesisReason::MidLoopCriticForceSynthesis,
+            }
+        );
+    }
+
+    #[test]
+    fn mid_critic_force_synthesis_blocked_by_governance_rescue() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::ForceSynthesis);
+        fb.governance_rescue_active = true;
+        // Governance rescue active → ForceSynthesis skipped, falls through to Continue
+        assert_eq!(TerminationOracle::adjudicate(&fb), TerminationDecision::Continue);
+    }
+
+    #[test]
+    fn mid_critic_replan_produces_replan() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::Replan);
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Replan {
+                reason: ReplanReason::MidLoopCriticReplan,
+            }
+        );
+    }
+
+    #[test]
+    fn mid_critic_reduce_scope_produces_replan() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::ReduceScope);
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Replan {
+                reason: ReplanReason::MidLoopCriticReplan,
+            }
+        );
+    }
+
+    #[test]
+    fn mid_critic_change_strategy_produces_replan() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::ChangeStrategy);
+        assert_eq!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::Replan {
+                reason: ReplanReason::MidLoopCriticReplan,
+            }
+        );
+    }
+
+    #[test]
+    fn mid_critic_continue_does_not_interrupt() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::Continue);
+        assert_eq!(TerminationOracle::adjudicate(&fb), TerminationDecision::Continue);
+    }
+
+    #[test]
+    fn halt_beats_mid_critic_force_synthesis() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::ForceSynthesis);
+        fb.convergence_action = ConvergenceAction::Halt;
+        assert_eq!(TerminationOracle::adjudicate(&fb), TerminationDecision::Halt);
+    }
+
+    #[test]
+    fn convergence_synthesize_beats_mid_critic_replan() {
+        use super::super::mid_loop_critic::CriticAction;
+        let mut fb = base_feedback();
+        fb.mid_critic_action = Some(CriticAction::Replan);
+        fb.convergence_action = ConvergenceAction::Synthesize;
+        // InjectSynthesis (P2) beats MidCriticReplan (P3c)
+        assert!(matches!(
+            TerminationOracle::adjudicate(&fb),
+            TerminationDecision::InjectSynthesis { .. }
+        ));
     }
 
     // ── Phase 6: Evidence-coverage-based synthesis delay ─────────────────────

@@ -556,12 +556,14 @@ impl ModelProvider for AnthropicProvider {
             }
 
             // Non-retryable or exhausted retries.
+            // Clone headers NOW — before `response.text().await` consumes the response,
+            // making headers inaccessible.  This was previously a bug: parsing Retry-After
+            // from `reqwest::header::HeaderMap::new()` always yielded None, so all
+            // rate-limited exhausted responses fell back to a hardcoded 30s default.
+            let response_headers = response.headers().clone();
             let body_text = response.text().await.unwrap_or_default();
             if status_code == 429 {
-                let retry_after = http::parse_retry_after(
-                    &reqwest::header::HeaderMap::new(), // headers already consumed
-                )
-                .unwrap_or(30);
+                let retry_after = http::parse_retry_after(&response_headers).unwrap_or(30);
                 return Err(HalconError::RateLimited {
                     provider: "anthropic".into(),
                     retry_after_secs: retry_after,

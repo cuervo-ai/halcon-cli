@@ -441,7 +441,7 @@ async fn default_limits_backward_compatible() {
     let limits = AgentLimits::default();
     assert_eq!(limits.max_rounds, 25);
     assert_eq!(limits.max_total_tokens, 0);
-    assert_eq!(limits.max_duration_secs, 0);
+    assert_eq!(limits.max_duration_secs, 600); // Phase 2 fix: 600s hard cap prevents indefinite hangs
     assert_eq!(limits.tool_timeout_secs, 120);
     assert_eq!(limits.provider_timeout_secs, 300);
     assert_eq!(limits.max_parallel_tools, 10);
