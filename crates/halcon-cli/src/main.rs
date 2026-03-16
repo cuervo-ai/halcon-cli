@@ -882,7 +882,13 @@ async fn main() -> Result<()> {
         Some(Commands::Init { force }) => commands::init::run(force).await,
         Some(Commands::Status) => commands::status::run(&config, &provider, &model).await,
         Some(Commands::Auth { action }) => match action {
+            AuthAction::Login { provider: p } if p.eq_ignore_ascii_case("cenzontle") => {
+                commands::sso::login().await
+            }
             AuthAction::Login { provider: p } => commands::auth::login(&p),
+            AuthAction::Logout { provider: p } if p.eq_ignore_ascii_case("cenzontle") => {
+                commands::sso::logout()
+            }
             AuthAction::Logout { provider: p } => commands::auth::logout(&p),
             AuthAction::Status => commands::auth::status(),
         },

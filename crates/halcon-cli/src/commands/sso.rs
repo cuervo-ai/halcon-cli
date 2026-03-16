@@ -94,7 +94,7 @@ pub fn status() -> Result<()> {
         .is_some();
 
     if !has_token {
-        println!("cenzontle: not logged in  (run `halcon login cenzontle` to authenticate)");
+        println!("cenzontle: not logged in  (run `halcon auth login cenzontle` to authenticate)");
         return Ok(());
     }
 

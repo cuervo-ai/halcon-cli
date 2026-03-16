@@ -57,6 +57,20 @@ pub fn status() -> Result<()> {
     let keystore = KeyStore::new(SERVICE_NAME);
 
     println!("API key status:");
+
+    // Cenzontle uses SSO tokens, not API keys — check its dedicated keychain entries.
+    let cenzontle_token = keystore.get_secret("cenzontle:access_token").ok().flatten().is_some();
+    let cenzontle_env = std::env::var("CENZONTLE_ACCESS_TOKEN")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let cenzontle_status: String = match (cenzontle_token, cenzontle_env) {
+        (true, true) => "logged in (SSO keychain + $CENZONTLE_ACCESS_TOKEN)".into(),
+        (true, false) => "logged in (SSO keychain)".into(),
+        (false, true) => "set ($CENZONTLE_ACCESS_TOKEN)".into(),
+        (false, false) => "not logged in  -> run `halcon auth login cenzontle`".into(),
+    };
+    println!("  cenzontle: {cenzontle_status}");
+
     for provider in KNOWN_PROVIDERS {
         let key_name = provider_key(provider);
 
