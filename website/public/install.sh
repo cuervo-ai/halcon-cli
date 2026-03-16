@@ -86,7 +86,13 @@ detect_platform() {
                     if [ "$_IS_MUSL" = "1" ]; then
                         TARGET="aarch64-unknown-linux-musl"
                     else
-                        TARGET="aarch64-unknown-linux-gnu"
+                        # Require glibc ≥ 2.17 for the gnu target; fall back to musl
+                        if _check_glibc 2 17; then
+                            TARGET="aarch64-unknown-linux-gnu"
+                        else
+                            TARGET="aarch64-unknown-linux-musl"
+                            info "glibc < 2.17 detected — using static musl binary"
+                        fi
                     fi
                     ;;
                 armv7l)  TARGET="armv7-unknown-linux-musleabihf" ;;
@@ -303,22 +309,26 @@ _prefer_curl() {
 download() {
     local url="$1"
     local dest="$2"
+    # Use --progress-bar when connected to a TTY; silent otherwise (piped installs)
+    local _progress
+    [ -t 1 ] && _progress="--progress-bar" || _progress="--silent"
     local _curl
     _curl="$(_prefer_curl 2>/dev/null)" || _curl=""
     if [ -n "$_curl" ]; then
         # --proto '=https' rejects any non-HTTPS redirects
         # --tlsv1.2 enforces minimum TLS version
+        # --retry-connrefused retries on ECONNREFUSED (transient CDN errors)
         # Attempt with cipher enforcement first; fall back without (older curl/macOS)
-        "$_curl" -sSfL \
+        "$_curl" $_progress \
             --proto '=https' \
             --tlsv1.2 \
             --ciphers "$_CURL_CIPHERS" \
-            --retry 3 --retry-delay 2 \
-            -o "$dest" "$url" 2>/dev/null \
+            --retry 3 --retry-delay 2 --retry-connrefused \
+            -fL -o "$dest" "$url" 2>/dev/null \
         || "$_curl" -sSfL \
             --proto '=https' \
             --tlsv1.2 \
-            --retry 3 --retry-delay 2 \
+            --retry 3 --retry-delay 2 --retry-connrefused \
             -o "$dest" "$url"
     elif command -v wget >/dev/null 2>&1; then
         wget -q --tries=3 --https-only -O "$dest" "$url" 2>/dev/null \
@@ -346,6 +356,62 @@ verify_sha256() {
         error "SHA-256 mismatch!\n  Expected: $expected\n  Got:      $actual"
     fi
     ok "SHA-256 verified"
+}
+
+# ─── glibc version check ─────────────────────────────────────────────────────
+# Returns 0 if system glibc satisfies the minimum major.minor requirement.
+# Falls back gracefully on non-glibc systems (musl, macOS, etc.).
+_check_glibc() {
+    local _min_major="${1:-2}"
+    local _min_minor="${2:-17}"
+    # Only applicable on Linux with GNU libc
+    [ "$(uname -s)" = "Linux" ] || return 0
+    ldd --version 2>&1 | grep -qi musl && return 0  # musl — always OK
+    _glibc_ver="$(ldd --version 2>/dev/null | awk 'NR==1{print $NF}')"
+    [ -z "$_glibc_ver" ] && return 0  # can't detect; assume OK
+    _sys_major="$(printf '%s' "$_glibc_ver" | cut -d. -f1)"
+    _sys_minor="$(printf '%s' "$_glibc_ver" | cut -d. -f2)"
+    # Compare: major first, then minor
+    [ "$_sys_major" -gt "$_min_major" ] && return 0
+    [ "$_sys_major" -eq "$_min_major" ] && [ "${_sys_minor:-0}" -ge "$_min_minor" ] && return 0
+    return 1  # too old
+}
+
+# ─── Cosign optional verification ────────────────────────────────────────────
+# Verifies supply chain integrity when cosign is available.
+# Degrades gracefully — installer proceeds without it (TLS + SHA-256 is the floor).
+# See: https://docs.sigstore.dev/cosign/verifying/verify/
+_verify_cosign() {
+    local _archive="$1"
+    local _sig_url="$2"
+    local _cert_url="$3"
+    local _tmpdir="$4"
+
+    command -v cosign >/dev/null 2>&1 || {
+        info "cosign not found — skipping signature verification (TLS+SHA-256 enforced)"
+        info "Install cosign for supply chain security: https://docs.sigstore.dev"
+        return 0
+    }
+
+    _sig_file="${_tmpdir}/archive.sig"
+    _cert_file="${_tmpdir}/archive.pem"
+
+    download "$_sig_url"  "$_sig_file"  2>/dev/null || { warn "cosign sig unavailable — skipping"; return 0; }
+    download "$_cert_url" "$_cert_file" 2>/dev/null || { warn "cosign cert unavailable — skipping"; return 0; }
+
+    info "Verifying cosign signature (Sigstore keyless)..."
+    if cosign verify-blob \
+        --signature "$_sig_file" \
+        --certificate "$_cert_file" \
+        --certificate-identity-regexp "^https://github.com/cuervo-ai/halcon-cli/\.github/workflows/release\.yml@refs/tags/" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        "$_archive" 2>/dev/null
+    then
+        ok "Cosign signature verified (Sigstore Rekor)"
+    else
+        warn "Cosign verification failed — the binary may still be safe (SHA-256 was verified)"
+        warn "Check: https://search.sigstore.dev/?hash=$(sha256sum "$_archive" 2>/dev/null | cut -d' ' -f1)"
+    fi
 }
 
 # ─── PATH configuration ──────────────────────────────────────────────────────
@@ -403,7 +469,10 @@ main() {
     printf "  ──────────────────────\n\n"
 
     TMPDIR_WORK="$(mktemp -d)"
+    # Trap EXIT for normal cleanup; INT/TERM for Ctrl-C / kill (128+signal convention)
     trap 'rm -rf "$TMPDIR_WORK"' EXIT
+    trap 'rm -rf "$TMPDIR_WORK"; exit 130' INT
+    trap 'rm -rf "$TMPDIR_WORK"; exit 143' TERM
 
     # ─── Channel-aware manifest URL ──────────────────────────────────────────
     case "$CHANNEL" in
@@ -524,6 +593,16 @@ main() {
     else
         warn "SHA-256 not available, skipping verification"
     fi
+
+    # ─── Cosign supply-chain verification (optional, graceful degradation) ───
+    if [ "$REQUESTED_VERSION" = "latest" ]; then
+        _SIG_URL="${RELEASES_URL}/latest/${ARTIFACT_NAME}.sig"
+        _CERT_URL="${RELEASES_URL}/latest/${ARTIFACT_NAME}.pem"
+    else
+        _SIG_URL="${RELEASES_URL}/v${VERSION}/${ARTIFACT_NAME}.sig"
+        _CERT_URL="${RELEASES_URL}/v${VERSION}/${ARTIFACT_NAME}.pem"
+    fi
+    _verify_cosign "$ARCHIVE_FILE" "$_SIG_URL" "$_CERT_URL" "$TMPDIR_WORK"
 
     # ─── Extract binary ─────────────────────────────────────────────────────
     info "Extracting..."
