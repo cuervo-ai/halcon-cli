@@ -151,6 +151,14 @@ fn is_transient_error(error: &str) -> bool {
         || lower.contains("rate limit")
         || lower.contains("rate_limit")
         || lower.contains("429")
+        // HTTP 5xx transient server errors: gateway/proxy/overload codes that can
+        // recover on retry. 400/401/403/404 are permanent client errors — not here.
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
+        || lower.contains("502 bad gateway")
+        || lower.contains("503 service unavailable")
+        || lower.contains("504 gateway timeout")
         || lower.contains("connection reset")
         || lower.contains("connection refused")
         || lower.contains("broken pipe")
@@ -2585,6 +2593,17 @@ mod tests {
         assert!(is_transient_error("Connection reset by peer"));
         assert!(!is_transient_error("file not found: /tmp/missing.rs"));
         assert!(!is_transient_error("permission denied"));
+        // HTTP 5xx gateway/overload errors are transient
+        assert!(is_transient_error("HTTP 502: request to https://api.example.com failed"));
+        assert!(is_transient_error("HTTP 503: request to https://api.example.com failed"));
+        assert!(is_transient_error("HTTP 504: request to https://api.example.com failed"));
+        assert!(is_transient_error("503 Service Unavailable"));
+        assert!(is_transient_error("502 Bad Gateway"));
+        // HTTP client errors (4xx except 429) are NOT transient
+        assert!(!is_transient_error("HTTP 400: bad request"));
+        assert!(!is_transient_error("HTTP 401: unauthorized"));
+        assert!(!is_transient_error("HTTP 403: forbidden"));
+        assert!(!is_transient_error("HTTP 404: not found"));
     }
 
     #[test]

@@ -39,7 +39,20 @@ pub use instruction_cache::InstructionCache;
 pub use pipeline::{ContextPipeline, ContextPipelineConfig};
 pub use segment::{extract_segment_from_message, ContextSegment};
 pub use repo_map::{RepoMap, build_repo_map};
-pub use embedding::{cosine_sim, EmbeddingEngine, TfIdfHashEngine, DIMS};
+pub use embedding::{
+    cosine_sim, EmbeddingEngine, EmbeddingEngineFactory, OllamaEmbeddingEngine,
+    TfIdfHashEngine, DIMS, OLLAMA_DEFAULT_ENDPOINT, OLLAMA_DEFAULT_MODEL,
+};
+
+/// Obtain the best available embedding engine, respecting env-var overrides.
+///
+/// Resolution order: `HALCON_EMBEDDING_ENDPOINT` > `OLLAMA_HOST` > default localhost.
+/// All subsystems without access to PolicyConfig should call this instead of
+/// constructing engines directly. Policy-level callers should use
+/// `EmbeddingEngineFactory::with_config(&policy.embedding_endpoint, &policy.embedding_model)`.
+pub fn embedding_engine() -> Box<dyn EmbeddingEngine> {
+    embedding::EmbeddingEngineFactory::from_env()
+}
 pub use semantic_store::SemanticStore;
 pub use vector_store::{MemoryEntry, SearchResult, VectorMemoryStore};
 pub use sliding_window::SlidingWindow;

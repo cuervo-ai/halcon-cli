@@ -58,46 +58,29 @@ impl OnboardingCheck {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
-
-    fn tempdir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "halcon_ob_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
 
     #[test]
     fn configured_when_project_halcon_md_exists() {
-        let dir = tempdir();
-        let halcon_dir = dir.join(".halcon");
+        let dir = tempfile::TempDir::new().unwrap();
+        let halcon_dir = dir.path().join(".halcon");
         fs::create_dir_all(&halcon_dir).unwrap();
         fs::write(halcon_dir.join("HALCON.md"), "# My Project\n").unwrap();
 
-        let status = OnboardingCheck::run(&dir);
+        let status = OnboardingCheck::run(dir.path());
         assert!(
             matches!(status, OnboardingStatus::Configured { .. }),
             "should be Configured when .halcon/HALCON.md exists: {status:?}"
         );
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn not_configured_when_no_project_halcon_md() {
-        let dir = tempdir();
+        let dir = tempfile::TempDir::new().unwrap();
         // No HALCON.md in the temp dir (global ~/.halcon is excluded by design)
-        let status = OnboardingCheck::run(&dir);
+        let status = OnboardingCheck::run(dir.path());
         assert!(
             matches!(status, OnboardingStatus::NotConfigured { .. }),
             "should be NotConfigured when no project HALCON.md: {status:?}"
         );
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

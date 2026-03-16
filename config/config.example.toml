@@ -1,37 +1,113 @@
-# Cuervo CLI - Configuración de Ejemplo
-# Copia este archivo a ~/.cuervo/config.toml o ./.cuervo/config.toml
+# Halcón CLI — Configuración de Ejemplo
+# Copia este archivo a ~/.halcon/config.toml  (global)
+#                  o  .halcon/config.toml      (proyecto)
 
 [general]
 default_provider = "anthropic"
-default_model = "claude-sonnet-4-5-20250929"
-max_tokens = 8192
-temperature = 0.0
+default_model    = "claude-sonnet-4-6"
+max_tokens       = 8192
+temperature      = 0.0
 
-# Configuración de proveedores
+# ── Providers ─────────────────────────────────────────────────────────────────
+
+# Anthropic — Claude models via Anthropic API
+# Activa: exporta ANTHROPIC_API_KEY  o  halcon auth login anthropic
 [models.providers.anthropic]
-enabled = true
-api_base = "https://api.anthropic.com"
-# Configura tu API key con: cuervo auth login anthropic
-# o exporta ANTHROPIC_API_KEY en tu entorno
+enabled       = true
+api_base      = "https://api.anthropic.com"
+api_key_env   = "ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-4-6"
 
+# Ollama — modelos locales, sin API key
 [models.providers.ollama]
-enabled = true
-api_base = "http://localhost:11434"
+enabled       = true
+api_base      = "http://localhost:11434"
 default_model = "llama3.2"
 
+# OpenAI — GPT models
+# Activa: exporta OPENAI_API_KEY
 [models.providers.openai]
-enabled = false
-api_base = "https://api.openai.com/v1"
+enabled       = false
+api_base      = "https://api.openai.com/v1"
+api_key_env   = "OPENAI_API_KEY"
 default_model = "gpt-4o"
 
+# Google Gemini — modelos Gemini via Generative AI API
+# Activa: exporta GEMINI_API_KEY
 [models.providers.gemini]
-enabled = false
-default_model = "gemini-1.5-pro"
+enabled       = false
+api_base      = "https://generativelanguage.googleapis.com"
+api_key_env   = "GEMINI_API_KEY"
+default_model = "gemini-2.0-flash"
 
+# DeepSeek — API compatible con OpenAI, muy económico
+# Activa: exporta DEEPSEEK_API_KEY
 [models.providers.deepseek]
-enabled = false
-api_base = "https://api.deepseek.com"
+enabled       = false
+api_base      = "https://api.deepseek.com"
+api_key_env   = "DEEPSEEK_API_KEY"
 default_model = "deepseek-chat"
+
+# Cenzontle — plataforma AI propia de Zuclubit (SSO empresarial)
+# Activa: halcon login cenzontle  o  exporta CENZONTLE_ACCESS_TOKEN
+[models.providers.cenzontle]
+enabled       = false
+api_base      = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
+api_key_env   = "CENZONTLE_ACCESS_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+# ── AWS Bedrock — Claude via Amazon Bedrock ────────────────────────────────────
+# Activa: CLAUDE_CODE_USE_BEDROCK=1 + credenciales AWS
+# Env vars requeridas:
+#   AWS_ACCESS_KEY_ID       — clave de acceso AWS
+#   AWS_SECRET_ACCESS_KEY   — clave secreta AWS
+#   AWS_REGION              — región (ej. us-east-1, eu-west-1, ap-northeast-1)
+#   AWS_SESSION_TOKEN       — (opcional) para credenciales temporales / IAM roles
+# Activación en tiempo de ejecución:
+#   export CLAUDE_CODE_USE_BEDROCK=1
+#   halcon chat  (seleccionará automáticamente el proveedor bedrock)
+# O en config:
+# [models.providers.bedrock]
+# enabled       = false
+# region        = "us-east-1"
+# default_model = "anthropic.claude-sonnet-4-6"
+# cross_region  = false   # true para usar prefijos us.*/eu.*/ap.*
+
+# ── Azure AI Foundry — Claude y modelos OpenAI via Azure ──────────────────────
+# Activa: CLAUDE_CODE_USE_AZURE=1 + endpoint + credencial
+# Env vars requeridas:
+#   AZURE_AI_ENDPOINT  — URL del endpoint de Azure AI Foundry
+#                        (ej. https://my-project.openai.azure.com)
+#   AZURE_API_KEY      — API key de Azure AI Foundry (preferida)
+# Alternativa con Entra ID (sin API key):
+#   AZURE_CLIENT_ID    — Client ID de la aplicación registrada
+#   AZURE_TENANT_ID    — Tenant ID de Azure AD
+# Activación en tiempo de ejecución:
+#   export CLAUDE_CODE_USE_AZURE=1 AZURE_AI_ENDPOINT=https://... AZURE_API_KEY=...
+#   halcon chat
+# O en config:
+# [models.providers.azure_foundry]
+# enabled        = false
+# endpoint_env   = "AZURE_AI_ENDPOINT"
+# api_key_env    = "AZURE_API_KEY"
+# default_model  = "claude-sonnet-4-6"
+# api_version    = "2024-05-01-preview"
+
+# ── Google Vertex AI — Claude via Google Cloud ────────────────────────────────
+# Activa: CLAUDE_CODE_USE_VERTEX=1 + proyecto GCP + Application Default Credentials
+# Env vars requeridas:
+#   ANTHROPIC_VERTEX_PROJECT_ID     — ID del proyecto GCP
+#   GOOGLE_APPLICATION_CREDENTIALS  — ruta al service account JSON (si no usas gcloud ADC)
+# Setup rápido:
+#   gcloud auth application-default login
+#   export CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_VERTEX_PROJECT_ID=mi-proyecto
+#   halcon chat
+# O en config:
+# [models.providers.vertex]
+# enabled        = false
+# project_env    = "ANTHROPIC_VERTEX_PROJECT_ID"
+# region         = "us-east5"
+# default_model  = "claude-sonnet-4-6"
 
 # Configuración de herramientas
 [tools]

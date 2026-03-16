@@ -44,8 +44,8 @@ is_interactive() { [ -t 0 ] && [ "${CI:-}" = "" ]; }
 
 ask() {
     local prompt="$1" default="${2:-y}"
-    [ "$INSTALL_FULL" = "1" ] && { [ "$default" = "y" ] && return 0 || return 0; }
-    [ "$INSTALL_MINIMAL" = "1" ] && return 1
+    [ "$INSTALL_FULL" = "1" ] && return 0      # full install: always accept
+    [ "$INSTALL_MINIMAL" = "1" ] && return 1   # minimal install: always decline
     if ! is_interactive; then [ "$default" = "y" ] && return 0 || return 1; fi
     local hint; [ "$default" = "y" ] && hint="${GREEN}Y${NC}/n" || hint="y/${GREEN}N${NC}"
     echo -en "  ${CYAN}?${NC} ${BOLD}${prompt}${NC} [${hint}] " >&2
@@ -226,6 +226,45 @@ default_model = "gemini-2.0-flash"
 enabled       = true
 api_base      = "http://localhost:11434"
 default_model = "llama3.2"
+
+# Cenzontle — plataforma AI propia de Zuclubit (SSO OAuth 2.1 PKCE)
+# Autenticación: halcon login cenzontle  o  export CENZONTLE_ACCESS_TOKEN
+[models.providers.cenzontle]
+enabled       = false
+api_base      = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
+api_key_env   = "CENZONTLE_ACCESS_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+# ── AWS Bedrock ────────────────────────────────────────────────────────────────
+# Activa con: export CLAUDE_CODE_USE_BEDROCK=1
+# Requiere:   AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION
+# Opcional:   AWS_SESSION_TOKEN (credenciales temporales / IAM roles)
+[models.providers.bedrock]
+enabled       = false
+region        = "us-east-1"
+default_model = "anthropic.claude-sonnet-4-6"
+cross_region  = false
+
+# ── Azure AI Foundry ───────────────────────────────────────────────────────────
+# Activa con: export CLAUDE_CODE_USE_AZURE=1
+# Requiere:   AZURE_AI_ENDPOINT + AZURE_API_KEY
+# Alternativa Entra ID (sin API key): AZURE_CLIENT_ID + AZURE_TENANT_ID
+[models.providers.azure_foundry]
+enabled       = false
+endpoint_env  = "AZURE_AI_ENDPOINT"
+api_key_env   = "AZURE_API_KEY"
+default_model = "claude-sonnet-4-6"
+api_version   = "2024-05-01-preview"
+
+# ── Google Vertex AI ──────────────────────────────────────────────────────────
+# Activa con: export CLAUDE_CODE_USE_VERTEX=1
+# Requiere:   ANTHROPIC_VERTEX_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS
+# Setup:      gcloud auth application-default login
+[models.providers.vertex]
+enabled       = false
+project_env   = "ANTHROPIC_VERTEX_PROJECT_ID"
+region        = "us-east5"
+default_model = "claude-sonnet-4-6"
 
 [tools]
 confirm_destructive = true
@@ -525,11 +564,9 @@ fi  # DO_FRONTIER
 section "7 · Shell completions"
 
 echo ""
-ask "Install shell completions (bash/zsh/fish)?" "y" || { skip "Shell completions"; }
-
-if ask "Install shell completions (bash/zsh/fish)?" "y" 2>/dev/null; then true; else
-    skip "Shell completions skipped"
-fi
+if ! ask "Install shell completions (bash/zsh/fish)?" "y"; then
+    skip "Shell completions"
+else
 
 COMP_DIR="$CONFIG_DIR/completions"
 mkdir -p "$COMP_DIR"
@@ -715,6 +752,8 @@ if has fish; then
 fi
 
 ok "Completions written → $COMP_DIR/"
+
+fi  # install completions
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STEP 8 — VS Code / Cursor extension
@@ -985,10 +1024,25 @@ echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━�
 echo ""
 echo -e "  ${BOLD}Quick start:${NC}"
 echo ""
-echo -e "  ${CYAN}1.${NC} Set an API key:"
-echo -e "     ${BOLD}export ANTHROPIC_API_KEY=sk-ant-...${NC}  (recommended)"
-echo -e "     ${BOLD}export DEEPSEEK_API_KEY=sk-...${NC}"
-echo -e "     ${BOLD}export OPENAI_API_KEY=sk-...${NC}"
+echo -e "  ${CYAN}1.${NC} Connect a provider:"
+echo ""
+echo -e "     ${DIM}— Cloud APIs (API key) ────────────────────────────────────────────────────${NC}"
+echo -e "     ${BOLD}export ANTHROPIC_API_KEY=sk-ant-...${NC}    ${DIM}# Claude — recommended${NC}"
+echo -e "     ${BOLD}export OPENAI_API_KEY=sk-...${NC}           ${DIM}# GPT models${NC}"
+echo -e "     ${BOLD}export DEEPSEEK_API_KEY=sk-...${NC}         ${DIM}# cheapest option${NC}"
+echo -e "     ${BOLD}export GEMINI_API_KEY=AI...${NC}            ${DIM}# Google Gemini${NC}"
+echo ""
+echo -e "     ${DIM}— Enterprise / Cloud Infrastructure ──────────────────────────────────────${NC}"
+echo -e "     ${BOLD}halcon login cenzontle${NC}                  ${DIM}# Cenzontle SSO (Zuclubit)${NC}"
+echo -e "     ${BOLD}export CLAUDE_CODE_USE_BEDROCK=1${NC}       ${DIM}# AWS Bedrock${NC}"
+echo -e "       ${DIM}→ also set: AWS_ACCESS_KEY_ID  AWS_SECRET_ACCESS_KEY  AWS_REGION${NC}"
+echo -e "     ${BOLD}export CLAUDE_CODE_USE_AZURE=1${NC}         ${DIM}# Azure AI Foundry${NC}"
+echo -e "       ${DIM}→ also set: AZURE_AI_ENDPOINT  AZURE_API_KEY${NC}"
+echo -e "     ${BOLD}export CLAUDE_CODE_USE_VERTEX=1${NC}        ${DIM}# Google Vertex AI${NC}"
+echo -e "       ${DIM}→ also set: ANTHROPIC_VERTEX_PROJECT_ID  (+ gcloud ADC)${NC}"
+echo ""
+echo -e "     ${DIM}— Local / Air-gap ─────────────────────────────────────────────────────────${NC}"
+echo -e "     ${BOLD}halcon chat -p ollama${NC}                   ${DIM}# Ollama — fully local, no API key${NC}"
 echo ""
 echo -e "  ${CYAN}2.${NC} Reload your shell:  ${BOLD}source ~/.zshrc${NC}  or  ${BOLD}source ~/.bashrc${NC}"
 echo ""
@@ -998,9 +1052,10 @@ echo -e "     ${BOLD}halcon chat \"explain this\"${NC}  — single shot"
 echo -e "     ${BOLD}halcon agents list${NC}         — sub-agents"
 echo -e "     ${BOLD}halcon mcp list${NC}            — MCP servers"
 echo -e "     ${BOLD}halcon tools list${NC}          — all 50+ tools"
-echo -e "     ${BOLD}halcon audit list${NC}          — audit trail"
+echo -e "     ${BOLD}halcon audit list${NC}          — compliance export"
 echo -e "     ${BOLD}halcon login cenzontle${NC}     — enterprise SSO"
-echo -e "     ${BOLD}halcon mcp serve${NC}           — expose as MCP server"
+echo -e "     ${BOLD}halcon mcp serve${NC}           — expose como servidor MCP"
+echo -e "     ${BOLD}halcon doctor${NC}              — diagnóstico de proveedores"
 [ -f "$INSTALL_DIR/halcon-desktop" ] && \
 echo -e "     ${BOLD}halcon-desktop${NC}             — native GUI"
 echo ""

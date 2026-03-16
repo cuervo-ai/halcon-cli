@@ -3056,6 +3056,7 @@ dependencies = [
  "criterion",
  "futures",
  "halcon-core",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

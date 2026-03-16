@@ -136,7 +136,7 @@ impl Tool for FileEditTool {
         Ok(ToolOutput {
             tool_use_id: input.tool_use_id,
             content: output_text,
-            is_error: false,
+            is_error: has_errors,
             metadata: Some(json!({
                 "replacements": replacements,
                 "syntax_warnings": warnings.len(),

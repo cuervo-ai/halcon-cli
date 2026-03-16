@@ -1,7 +1,11 @@
 //! L3 Vector Memory Store: embedding-based semantic retrieval over MEMORY.md entries.
 //!
-//! Replaces the BM25 max-200-entry truncated list with cosine similarity over
-//! TF-IDF hash-projected vectors (384 dims, pure Rust — see `embedding.rs`).
+//! Uses `EmbeddingEngineFactory::from_env()` at construction time:
+//! - `OllamaEmbeddingEngine` (multilingual neural) when Ollama is reachable
+//! - `TfIdfHashEngine` (pure Rust, zero deps) otherwise
+//!
+//! Engine and dimensionality are determined at runtime — the store works correctly
+//! with 384-dim (TfIdf), 768-dim (nomic-embed-text), or 1024-dim (mxbai-embed-large).
 //!
 //! ## Entry lifecycle
 //! 1. `load_from_memory_files()` parses MEMORY.md(s) into `MemoryEntry` records.
@@ -21,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::embedding::{cosine_sim, EmbeddingEngine, TfIdfHashEngine, DIMS};
+use crate::embedding::{cosine_sim, EmbeddingEngine, EmbeddingEngineFactory, TfIdfHashEngine, DIMS};
 
 /// MMR trade-off: relevance weight (1 − λ = diversity weight).
 const MMR_LAMBDA: f32 = 0.7;
@@ -72,21 +76,28 @@ pub struct VectorMemoryStore {
 
 impl VectorMemoryStore {
     /// Create an empty in-memory store.
+    ///
+    /// Uses `EmbeddingEngineFactory::from_env()` — Ollama when available, TfIdf otherwise.
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            engine: Box::new(TfIdfHashEngine),
-            index_path: None,
-            next_id: 0,
-        }
+        Self::new_with_engine(EmbeddingEngineFactory::from_env(), None)
     }
 
     /// Create a store that persists to `index_path` (`.halcon/memory/MEMORY.vindex.json`).
+    ///
+    /// Uses `EmbeddingEngineFactory::from_env()` — Ollama when available, TfIdf otherwise.
     pub fn with_index_path(index_path: PathBuf) -> Self {
+        Self::new_with_engine(EmbeddingEngineFactory::from_env(), Some(index_path))
+    }
+
+    /// Create a store with an explicit engine (for tests and advanced configuration).
+    ///
+    /// Use this to inject a specific engine (e.g., `TfIdfHashEngine` for fast unit tests,
+    /// or a pre-configured `OllamaEmbeddingEngine` for a specific remote deployment).
+    pub fn new_with_engine(engine: Box<dyn EmbeddingEngine>, index_path: Option<PathBuf>) -> Self {
         Self {
             entries: Vec::new(),
-            engine: Box::new(TfIdfHashEngine),
-            index_path: Some(index_path),
+            engine,
+            index_path,
             next_id: 0,
         }
     }
@@ -281,9 +292,12 @@ impl VectorMemoryStore {
             Some(p) => p,
             None => return,
         };
+        // Use actual vector length from entries, not the compile-time DIMS constant.
+        // This supports OllamaEmbeddingEngine which may return 768-dim or 1024-dim vectors.
+        let dims = self.entries.first().map(|e| e.vector.len()).unwrap_or(DIMS);
         let snapshot = VIndexSnapshot {
             version: 1,
-            dims: DIMS,
+            dims,
             entries: self.entries.clone(),
         };
         match serde_json::to_string(&snapshot) {
@@ -301,30 +315,79 @@ impl VectorMemoryStore {
         }
     }
 
+    /// Load a persisted index from disk using an explicitly provided engine.
+    ///
+    /// Preferred over `load_from_disk()` when the caller has policy-level engine
+    /// configuration (e.g., the agent loop reads `policy.embedding_endpoint`).
+    /// Validates stored dims against the provided engine; rebuilds on mismatch.
+    pub fn load_from_disk_with_engine(index_path: PathBuf, engine: Box<dyn EmbeddingEngine>) -> Self {
+        let mut store = Self::new_with_engine(engine, Some(index_path.clone()));
+        let content = match std::fs::read_to_string(&index_path) {
+            Ok(c) => c,
+            Err(_) => return store,
+        };
+        let engine_dims = {
+            let v = store.engine.embed("probe");
+            if v.is_empty() { DIMS } else { v.len() }
+        };
+        match serde_json::from_str::<VIndexSnapshot>(&content) {
+            Ok(snap) if snap.version == 1 && snap.dims == engine_dims => {
+                let max_id = snap.entries.iter().map(|e| e.id).max().unwrap_or(0);
+                store.next_id = max_id + 1;
+                store.entries = snap.entries;
+                debug!(
+                    "vector_store: loaded {} entries from {} (dims={})",
+                    store.entries.len(), index_path.display(), engine_dims,
+                );
+            }
+            Ok(snap) => {
+                warn!(
+                    "vector_store: index version/dims mismatch \
+                     (v={}, stored_dims={}, engine_dims={}); rebuilding",
+                    snap.version, snap.dims, engine_dims,
+                );
+            }
+            Err(e) => {
+                warn!("vector_store: failed to parse index: {e}; rebuilding");
+            }
+        }
+        store
+    }
+
     /// Load a persisted index from disk.
     ///
     /// Returns an empty store on any error (graceful degradation).
+    /// Validates that the persisted index dimensions match the current engine.
+    /// If dimensions differ (e.g., engine changed from TfIdf→Ollama), the index
+    /// is discarded and rebuilt on next indexing — no crash, no stale data.
     pub fn load_from_disk(index_path: PathBuf) -> Self {
         let mut store = Self::with_index_path(index_path.clone());
         let content = match std::fs::read_to_string(&index_path) {
             Ok(c) => c,
             Err(_) => return store, // First run, no index yet.
         };
+        // Determine expected dims from the engine selected at construction time.
+        let engine_dims = {
+            let v = store.engine.embed("probe");
+            if v.is_empty() { DIMS } else { v.len() }
+        };
         match serde_json::from_str::<VIndexSnapshot>(&content) {
-            Ok(snap) if snap.version == 1 && snap.dims == DIMS => {
+            Ok(snap) if snap.version == 1 && snap.dims == engine_dims => {
                 let max_id = snap.entries.iter().map(|e| e.id).max().unwrap_or(0);
                 store.next_id = max_id + 1;
                 store.entries = snap.entries;
                 debug!(
-                    "vector_store: loaded {} entries from {}",
+                    "vector_store: loaded {} entries from {} (dims={})",
                     store.entries.len(),
-                    index_path.display()
+                    index_path.display(),
+                    engine_dims,
                 );
             }
             Ok(snap) => {
                 warn!(
-                    "vector_store: index version/dims mismatch (v={}, dims={}); rebuilding",
-                    snap.version, snap.dims
+                    "vector_store: index version/dims mismatch \
+                     (v={}, stored_dims={}, engine_dims={}); rebuilding",
+                    snap.version, snap.dims, engine_dims,
                 );
             }
             Err(e) => {

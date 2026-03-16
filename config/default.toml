@@ -20,10 +20,55 @@ api_base = "http://localhost:11434"
 default_model = "llama3.2"
 
 [models.providers.openai]
-enabled = false
-api_base = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+enabled       = false
+api_base      = "https://api.openai.com/v1"
+api_key_env   = "OPENAI_API_KEY"
 default_model = "gpt-4o"
+
+[models.providers.deepseek]
+enabled       = false
+api_base      = "https://api.deepseek.com"
+api_key_env   = "DEEPSEEK_API_KEY"
+default_model = "deepseek-chat"
+
+[models.providers.gemini]
+enabled       = false
+api_base      = "https://generativelanguage.googleapis.com"
+api_key_env   = "GEMINI_API_KEY"
+default_model = "gemini-2.0-flash"
+
+# Cenzontle — plataforma AI propia de Zuclubit (SSO OAuth 2.1 PKCE)
+# Autenticación: halcon login cenzontle  o  CENZONTLE_ACCESS_TOKEN
+[models.providers.cenzontle]
+enabled       = false
+api_base      = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
+api_key_env   = "CENZONTLE_ACCESS_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+# AWS Bedrock — activar con CLAUDE_CODE_USE_BEDROCK=1
+# Requiere: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+[models.providers.bedrock]
+enabled       = false
+region        = "us-east-1"
+default_model = "anthropic.claude-sonnet-4-6"
+cross_region  = false
+
+# Azure AI Foundry — activar con CLAUDE_CODE_USE_AZURE=1
+# Requiere: AZURE_AI_ENDPOINT, AZURE_API_KEY (o AZURE_CLIENT_ID + AZURE_TENANT_ID)
+[models.providers.azure_foundry]
+enabled       = false
+endpoint_env  = "AZURE_AI_ENDPOINT"
+api_key_env   = "AZURE_API_KEY"
+default_model = "claude-sonnet-4-6"
+api_version   = "2024-05-01-preview"
+
+# Google Vertex AI — activar con CLAUDE_CODE_USE_VERTEX=1
+# Requiere: ANTHROPIC_VERTEX_PROJECT_ID, GOOGLE_APPLICATION_CREDENTIALS (o gcloud ADC)
+[models.providers.vertex]
+enabled       = false
+project_env   = "ANTHROPIC_VERTEX_PROJECT_ID"
+region        = "us-east5"
+default_model = "claude-sonnet-4-6"
 
 [tools]
 confirm_destructive = true

@@ -609,6 +609,26 @@ pub struct PolicyConfig {
     /// `VectorMemorySource` context source (default: 5).
     #[serde(default = "default_semantic_memory_top_k")]
     pub semantic_memory_top_k: usize,
+
+    // ── Embedding Engine Configuration ────────────────────────────────────────
+    /// Ollama endpoint for neural multilingual embeddings.
+    ///
+    /// Overridden by `HALCON_EMBEDDING_ENDPOINT` or `OLLAMA_HOST` env vars.
+    /// Used by HybridIntentClassifier (PrototypeStore) and VectorMemoryStore.
+    /// Default: `http://localhost:11434`.
+    #[serde(default = "default_embedding_endpoint")]
+    pub embedding_endpoint: String,
+
+    /// Embedding model name to request from Ollama.
+    ///
+    /// Overridden by `HALCON_EMBEDDING_MODEL` env var.
+    /// Recommended models:
+    ///   - `nomic-embed-text`  (768-dim, multilingual, default)
+    ///   - `mxbai-embed-large` (1024-dim, high-quality EN)
+    ///   - `paraphrase-multilingual-minilm` (384-dim, drop-in for DIMS=384)
+    /// Default: `nomic-embed-text`.
+    #[serde(default = "default_embedding_model")]
+    pub embedding_model: String,
 }
 
 impl Default for PolicyConfig {
@@ -747,6 +767,9 @@ impl Default for PolicyConfig {
             // Semantic memory vector store (off by default)
             enable_semantic_memory: default_enable_semantic_memory(),
             semantic_memory_top_k: default_semantic_memory_top_k(),
+            // Embedding engine
+            embedding_endpoint: default_embedding_endpoint(),
+            embedding_model: default_embedding_model(),
         }
     }
 }
@@ -889,6 +912,9 @@ fn default_enable_agent_registry() -> bool { true }
 // Semantic memory vector store — off by default (TF-IDF overhead, explicit opt-in)
 fn default_enable_semantic_memory() -> bool { false }
 fn default_semantic_memory_top_k() -> usize { 5 }
+// Embedding engine — configurable endpoint/model for multi-provider deployments
+fn default_embedding_endpoint() -> String { "http://localhost:11434".to_string() }
+fn default_embedding_model() -> String { "nomic-embed-text".to_string() }
 
 #[cfg(test)]
 mod tests {

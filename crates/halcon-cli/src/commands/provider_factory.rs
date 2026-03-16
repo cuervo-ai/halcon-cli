@@ -705,6 +705,7 @@ pub fn load_dynamic_providers(dir: &std::path::Path, registry: &mut ProviderRegi
 mod tests {
     use super::*;
 
+    #[serial_test::serial(provider_factory_env)]
     #[test]
     fn build_registry_air_gap_only_registers_ollama() {
         // DECISION: air-gap mode is tested by directly setting the env var.
@@ -734,6 +735,7 @@ mod tests {
         std::env::remove_var("OLLAMA_BASE_URL");
     }
 
+    #[serial_test::serial(provider_factory_env)]
     #[test]
     fn build_registry_always_has_echo() {
         // Ensure HALCON_AIR_GAP is not set for this test.

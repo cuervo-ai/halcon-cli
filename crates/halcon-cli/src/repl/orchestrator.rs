@@ -651,12 +651,19 @@ pub async fn run_orchestrator(
                         policy: policy.clone(),
                     };
 
-                    let loop_result = tokio::time::timeout(timeout_dur, agent::run_agent_loop(ctx)).await;
+                    // Panic isolation: wrap the agent loop in catch_unwind so a panicking
+                    // sub-agent is converted to a SubAgentResult failure instead of
+                    // propagating the panic through join_all to the parent orchestrator.
+                    use futures::FutureExt as _;
+                    let loop_result = tokio::time::timeout(
+                        timeout_dur,
+                        std::panic::AssertUnwindSafe(agent::run_agent_loop(ctx)).catch_unwind(),
+                    ).await;
 
                     let latency_ms = task_start.elapsed().as_millis() as u64;
 
                     match loop_result {
-                        Ok(Ok(result)) => {
+                        Ok(Ok(Ok(result))) => {
                             // A sub-agent is successful if it produced non-empty output,
                             // had a clean EndTurn exit, OR executed at least one tool successfully.
                             //
@@ -912,7 +919,7 @@ pub async fn run_orchestrator(
                             content_read_attempts: result.content_read_attempts,
                             had_tools_available,
                         }},
-                        Ok(Err(e)) => SubAgentResult {
+                        Ok(Ok(Err(e))) => SubAgentResult {
                             task_id,
                             success: false,
                             output_text: String::new(),
@@ -931,6 +938,38 @@ pub async fn run_orchestrator(
                             evidence_verified: false,
                             content_read_attempts: 0,
                             had_tools_available,
+                        },
+                        Ok(Err(panic_payload)) => {
+                            let msg = panic_payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
+                                .unwrap_or("unknown panic payload");
+                            tracing::error!(
+                                task_id = %task_id,
+                                panic_msg = %msg,
+                                "Sub-agent panicked — isolated, parent orchestrator continues."
+                            );
+                            SubAgentResult {
+                                task_id,
+                                success: false,
+                                output_text: String::new(),
+                                agent_result: AgentResult {
+                                    success: false,
+                                    summary: format!("Sub-agent panicked: {msg}"),
+                                    files_modified: vec![],
+                                    tools_used: vec![],
+                                },
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                cost_usd: 0.0,
+                                latency_ms,
+                                rounds: 0,
+                                error: Some(format!("error_type:panic | msg:{msg}")),
+                                evidence_verified: false,
+                                content_read_attempts: 0,
+                                had_tools_available,
+                            }
                         },
                         Err(_) => {
                             let timeout_secs = timeout_dur.as_secs();

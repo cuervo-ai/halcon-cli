@@ -410,7 +410,7 @@ impl Tool for CodeCoverageTool {
                     "No coverage report found in {}.\n\nLooked for: lcov.info, coverage.lcov, coverage-summary.json, cobertura.xml, coverage.xml\n\nGenerate one first:\n  Rust: cargo tarpaulin --out Xml  or  cargo llvm-cov --lcov\n  Node: npx jest --coverage\n  Python: pytest --cov --cov-report=xml",
                     scan_path.display()
                 ),
-                is_error: false,
+                is_error: true,
                 metadata: None,
             });
         }
@@ -605,7 +605,8 @@ end_of_record
             })
             .await
             .unwrap();
-        assert!(!out.is_error);
+        // "No coverage report found" is a failure state — the agent needs to know to run coverage first.
+        assert!(out.is_error);
         assert!(out.content.contains("No coverage report") || out.content.contains("coverage"));
     }
 

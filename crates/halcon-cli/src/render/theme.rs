@@ -1892,6 +1892,7 @@ mod tests {
 
     #[cfg(feature = "color-science")]
     #[test]
+    #[serial_test::serial(adaptive_palette)]
     fn adaptive_palette_initializes_with_base() {
         init("neon", None);
         reset_adaptive_for_test(); // Ensure clean state
@@ -1906,6 +1907,7 @@ mod tests {
 
     #[cfg(feature = "color-science")]
     #[test]
+    #[serial_test::serial(adaptive_palette)]
     fn adaptive_palette_changes_on_degraded() {
         use crate::repl::health::HealthLevel;
 
@@ -1929,6 +1931,7 @@ mod tests {
 
     #[cfg(feature = "color-science")]
     #[test]
+    #[serial_test::serial(adaptive_palette)]
     fn adaptive_palette_critical_uses_red_monochrome() {
         use crate::repl::health::HealthLevel;
 
@@ -1957,6 +1960,7 @@ mod tests {
 
     #[cfg(feature = "color-science")]
     #[test]
+    #[serial_test::serial(adaptive_palette)]
     fn adaptive_palette_reverts_to_base_when_healthy_again() {
         use crate::repl::health::HealthLevel;
 

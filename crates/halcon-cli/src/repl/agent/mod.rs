@@ -1000,7 +1000,16 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         }
         .join("MEMORY.vindex.json");
 
-        let mut vector_store = halcon_context::VectorMemoryStore::load_from_disk(index_path);
+        // Build engine from policy config (env vars still take precedence via with_config).
+        // Consistent with PrototypeStore and DynamicPrototypeStore engine selection.
+        let embed_engine = halcon_context::EmbeddingEngineFactory::with_config(
+            &policy.embedding_endpoint,
+            &policy.embedding_model,
+        );
+        let mut vector_store = halcon_context::VectorMemoryStore::load_from_disk_with_engine(
+            index_path,
+            embed_engine,
+        );
         if vector_store.is_empty() {
             vector_store.load_from_standard_locations(std::path::Path::new(working_dir), repo_name);
             if !vector_store.is_empty() {

@@ -30,6 +30,25 @@ pub struct CenzontleModelsResponse {
     pub data: Vec<CenzontleModel>,
 }
 
+/// Non-streaming response from `POST /v1/llm/chat` (stream=false).
+///
+/// Cenzontle buffers the full LLM response before returning, so non-streaming
+/// mode is preferred over SSE to avoid issues with single-chunk HTTP/2 delivery.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CenzonzleChatResponse {
+    pub content: String,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default)]
+    pub completion_tokens: Option<u32>,
+    #[serde(default)]
+    pub total_tokens: Option<u32>,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
 /// Auth profile from `GET /v1/auth/me`.
 #[derive(Debug, Deserialize)]
 pub struct CenzontleAuthMe {

@@ -46,7 +46,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use halcon_context::embedding::{cosine_sim, EmbeddingEngine, TfIdfHashEngine};
+use halcon_context::embedding::{cosine_sim, EmbeddingEngine, EmbeddingEngineFactory};
 
 use super::task_analyzer::TaskType;
 
@@ -380,8 +380,9 @@ pub struct DynamicPrototypeStore {
     version: u64,
     /// Configuration.
     config: AdaptiveConfig,
-    /// Embedding engine — same hash projection as PROTOTYPE_STORE for dim alignment.
-    engine: TfIdfHashEngine,
+    /// Embedding engine — matches PROTOTYPE_STORE engine for dim alignment.
+    /// Selected at construction time via `EmbeddingEngineFactory::default_local()`.
+    engine: Box<dyn EmbeddingEngine>,
 }
 
 impl DynamicPrototypeStore {
@@ -398,7 +399,7 @@ impl DynamicPrototypeStore {
             pending: VecDeque::new(),
             version: 0,
             config,
-            engine: TfIdfHashEngine,
+            engine: EmbeddingEngineFactory::from_env(),
         }
     }
 
@@ -737,8 +738,26 @@ impl DynamicPrototypeStore {
         let mut store = Self::new(config);
         store.version = snapshot.version;
 
+        // Probe current engine dims to detect engine changes (e.g., TfIdf→Ollama).
+        // Centroids from a different engine have incompatible dimensions and are discarded.
+        let engine_dims = {
+            let v = store.engine.embed("probe");
+            if v.is_empty() { 0 } else { v.len() }
+        };
+
         for record in snapshot.prototypes {
             if let Some(t) = TaskType::from_str(&record.task_type) {
+                // Discard centroids whose dims don't match the current engine.
+                if engine_dims > 0 && record.centroid.len() != engine_dims {
+                    tracing::warn!(
+                        target: "halcon::adaptive_learning",
+                        task_type   = record.task_type,
+                        stored_dims = record.centroid.len(),
+                        engine_dims = engine_dims,
+                        "Discarding stored centroid — engine changed, dims mismatch"
+                    );
+                    continue;
+                }
                 let idx = task_type_to_idx(t);
                 store.prototypes.insert(
                     idx,

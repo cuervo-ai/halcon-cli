@@ -68,7 +68,7 @@
         "halcon.model": {
           "type": "string",
           "default": "",
-          "description": "Model to use (e.g. claude-sonnet-4-5-20250929). Defaults to Halcon CLI default."
+          "description": "Model to use (e.g. claude-sonnet-4-6). Defaults to Halcon CLI default."
         },
         "halcon.maxTurns": {
           "type": "number",

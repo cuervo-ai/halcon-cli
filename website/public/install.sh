@@ -262,11 +262,19 @@ main() {
         download "$MANIFEST_URL" "$MANIFEST_FILE"
 
         if grep -q '"error"' "$MANIFEST_FILE" 2>/dev/null; then
-            ERR="$(grep -o '"error": *"[^"]*"' "$MANIFEST_FILE" | sed 's/.*"\([^"]*\)".*/\1/')"
+            if command -v jq >/dev/null 2>&1; then
+                ERR="$(jq -r '.error // empty' "$MANIFEST_FILE" 2>/dev/null)"
+            else
+                ERR="$(grep -o '"error": *"[^"]*"' "$MANIFEST_FILE" | sed 's/.*"\([^"]*\)".*/\1/')"
+            fi
             error "Release API error: ${ERR}. Check https://releases.cli.cuervo.cloud/health"
         fi
 
-        VERSION="$(grep -o '"version": *"[^"]*"' "$MANIFEST_FILE" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
+        if command -v jq >/dev/null 2>&1; then
+            VERSION="$(jq -r '.version // empty' "$MANIFEST_FILE" 2>/dev/null)"
+        else
+            VERSION="$(grep -o '"version": *"[^"]*"' "$MANIFEST_FILE" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
+        fi
         if [ -z "$VERSION" ]; then
             error "Failed to parse version from manifest"
         fi
@@ -403,11 +411,20 @@ main() {
     configure_halcon
 
     printf "\n${GREEN}${BOLD}  Installation complete!${RESET}\n"
-    printf "\n  ${BOLD}Next step — add your API key:${RESET}\n"
-    printf "    ${BOLD}halcon auth login anthropic${RESET}   ${CYAN}# recommended${RESET}\n"
-    printf "    ${BOLD}halcon auth login openai${RESET}\n"
-    printf "    ${BOLD}halcon auth login deepseek${RESET}    ${CYAN}# cheapest option${RESET}\n"
-    printf "\n  ${BOLD}Then start chatting:${RESET}\n"
+    printf "\n  ${BOLD}Next step — connect a provider:${RESET}\n"
+    printf "\n  ${CYAN}Cloud APIs (API key):${RESET}\n"
+    printf "    ${BOLD}halcon auth login anthropic${RESET}     ${CYAN}# Claude — recommended${RESET}\n"
+    printf "    ${BOLD}halcon auth login openai${RESET}        ${CYAN}# GPT models${RESET}\n"
+    printf "    ${BOLD}halcon auth login deepseek${RESET}      ${CYAN}# cheapest option${RESET}\n"
+    printf "    ${BOLD}halcon auth login gemini${RESET}        ${CYAN}# Google Gemini${RESET}\n"
+    printf "\n  ${CYAN}Enterprise / Cloud Infrastructure:${RESET}\n"
+    printf "    ${BOLD}halcon login cenzontle${RESET}          ${CYAN}# Cenzontle SSO (Zuclubit)${RESET}\n"
+    printf "    ${BOLD}export CLAUDE_CODE_USE_BEDROCK=1${RESET} ${CYAN}# AWS Bedrock (+ AWS_REGION + AWS credentials)${RESET}\n"
+    printf "    ${BOLD}export CLAUDE_CODE_USE_AZURE=1${RESET}   ${CYAN}# Azure AI Foundry (+ AZURE_AI_ENDPOINT + AZURE_API_KEY)${RESET}\n"
+    printf "    ${BOLD}export CLAUDE_CODE_USE_VERTEX=1${RESET}  ${CYAN}# Google Vertex AI (+ ANTHROPIC_VERTEX_PROJECT_ID)${RESET}\n"
+    printf "\n  ${CYAN}Local (no API key):${RESET}\n"
+    printf "    ${BOLD}halcon chat -p ollama${RESET}           ${CYAN}# Ollama — fully local${RESET}\n"
+    printf "\n  ${BOLD}Then start:${RESET}\n"
     printf "    ${BOLD}halcon chat --tui --full --expert${RESET}\n\n"
 }
 
@@ -1087,6 +1104,64 @@ retry_base_delay_ms  = 1000
 
 # ── Claude Code CLI ───────────────────────────────────────────────────────────
 ${_SYS_CLAUDE_SECTION}
+
+# ── Cenzontle — plataforma AI propia de Zuclubit (SSO OAuth 2.1 PKCE) ────────
+# Activa: halcon login cenzontle  o  export CENZONTLE_ACCESS_TOKEN
+[models.providers.cenzontle]
+enabled       = false
+api_base      = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
+api_key_env   = "CENZONTLE_ACCESS_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+[models.providers.cenzontle.http]
+connect_timeout_secs = 10
+request_timeout_secs = ${_SYS_PROVIDER_TIMEOUT}
+max_retries          = 3
+retry_base_delay_ms  = 1000
+
+# ── AWS Bedrock — Claude via Amazon Bedrock ───────────────────────────────────
+# Activa: export CLAUDE_CODE_USE_BEDROCK=1
+# Requiere: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION
+# Opcional: AWS_SESSION_TOKEN (credenciales temporales / IAM roles)
+# Modelos cross-region: set cross_region = true para prefijos us.*/eu.*/ap.*
+[models.providers.bedrock]
+enabled       = false
+region        = "us-east-1"
+default_model = "anthropic.claude-sonnet-4-6"
+cross_region  = false
+
+# ── Azure AI Foundry — Claude y modelos GPT via Azure ────────────────────────
+# Activa: export CLAUDE_CODE_USE_AZURE=1
+# Requiere: AZURE_AI_ENDPOINT + AZURE_API_KEY
+# Alternativa Entra ID: AZURE_CLIENT_ID + AZURE_TENANT_ID (sin API key)
+[models.providers.azure_foundry]
+enabled       = false
+endpoint_env  = "AZURE_AI_ENDPOINT"
+api_key_env   = "AZURE_API_KEY"
+default_model = "claude-sonnet-4-6"
+api_version   = "2024-05-01-preview"
+
+[models.providers.azure_foundry.http]
+connect_timeout_secs = 10
+request_timeout_secs = ${_SYS_PROVIDER_TIMEOUT}
+max_retries          = 3
+retry_base_delay_ms  = 1000
+
+# ── Google Vertex AI — Claude via Google Cloud ────────────────────────────────
+# Activa: export CLAUDE_CODE_USE_VERTEX=1
+# Requiere: ANTHROPIC_VERTEX_PROJECT_ID + Application Default Credentials
+# Setup: gcloud auth application-default login
+[models.providers.vertex]
+enabled       = false
+project_env   = "ANTHROPIC_VERTEX_PROJECT_ID"
+region        = "us-east5"
+default_model = "claude-sonnet-4-6"
+
+[models.providers.vertex.http]
+connect_timeout_secs = 10
+request_timeout_secs = ${_SYS_PROVIDER_TIMEOUT}
+max_retries          = 3
+retry_base_delay_ms  = 1000
 
 # ── Policy ────────────────────────────────────────────────────────────────────
 [policy]

@@ -58,7 +58,7 @@ impl Tool for NativeIndexQueryTool {
                              2. Set search.enabled = true\n\
                              3. Restart halcon\n\n\
                              Cannot query index without search engine.".to_string(),
-                    is_error: false,
+                    is_error: true,
                     metadata: Some(json!({
                         "status": "not_initialized",
                         "query_type": query_type,

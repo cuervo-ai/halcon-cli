@@ -492,6 +492,15 @@ enabled = true
 api_base = "http://localhost:11434"
 default_model = "llama3.2"
 
+# Cenzontle — plataforma AI propia de Zuclubit
+# Autenticación via SSO: halcon login cenzontle
+# o exporta CENZONTLE_ACCESS_TOKEN y CENZONTLE_BASE_URL
+[models.providers.cenzontle]
+enabled = false
+api_base = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
+api_key_env = "CENZONTLE_ACCESS_TOKEN"
+default_model = "gpt-4o-mini"
+
 [tools]
 confirm_destructive = true
 timeout_secs = 120

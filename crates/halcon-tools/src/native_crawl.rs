@@ -69,7 +69,7 @@ impl Tool for NativeCrawlTool {
                              2. Set search.enabled = true\n\
                              3. Restart halcon\n\n\
                              Cannot index URLs without search engine.".to_string(),
-                    is_error: false,
+                    is_error: true,
                     metadata: Some(json!({
                         "status": "not_initialized",
                         "url": url,

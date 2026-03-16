@@ -127,7 +127,14 @@ async fn op_create(
     working_dir: &str,
     timeout_secs: u64,
 ) -> ToolOutput {
-    validate_path(archive_path, "archive").unwrap_or(());
+    if let Err(e) = validate_path(archive_path, "archive") {
+        return ToolOutput {
+            tool_use_id: "archive".into(),
+            content: e.to_string(),
+            is_error: true,
+            metadata: None,
+        };
+    }
 
     let result: std::result::Result<(String, String, i32), String> = match format {
         ArchiveFormat::Zip => {
@@ -186,8 +193,22 @@ async fn op_extract(
     working_dir: &str,
     timeout_secs: u64,
 ) -> ToolOutput {
-    validate_path(archive_path, "archive").unwrap_or(());
-    validate_path(dest, "destination").unwrap_or(());
+    if let Err(e) = validate_path(archive_path, "archive") {
+        return ToolOutput {
+            tool_use_id: "archive".into(),
+            content: e.to_string(),
+            is_error: true,
+            metadata: None,
+        };
+    }
+    if let Err(e) = validate_path(dest, "destination") {
+        return ToolOutput {
+            tool_use_id: "archive".into(),
+            content: e.to_string(),
+            is_error: true,
+            metadata: None,
+        };
+    }
 
     // Create destination directory if needed.
     let _ = tokio::fs::create_dir_all(dest).await;
@@ -238,7 +259,14 @@ async fn op_list(
     working_dir: &str,
     timeout_secs: u64,
 ) -> ToolOutput {
-    validate_path(archive_path, "archive").unwrap_or(());
+    if let Err(e) = validate_path(archive_path, "archive") {
+        return ToolOutput {
+            tool_use_id: "archive".into(),
+            content: e.to_string(),
+            is_error: true,
+            metadata: None,
+        };
+    }
 
     let result: std::result::Result<(String, String, i32), String> = match format {
         ArchiveFormat::Zip => {

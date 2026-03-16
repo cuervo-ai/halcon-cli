@@ -82,7 +82,7 @@ use std::time::{Duration, Instant};
 
 use super::adaptive_learning::{auto_feedback_from_trace, DynamicPrototypeStore};
 
-use halcon_context::embedding::{cosine_sim, EmbeddingEngine, TfIdfHashEngine, DIMS};
+use halcon_context::embedding::{cosine_sim, EmbeddingEngine, EmbeddingEngineFactory, DIMS};
 use serde::{Deserialize, Serialize};
 
 use super::task_analyzer::{
@@ -656,23 +656,45 @@ struct TypePrototype {
 /// Store de prototipos — uno por TaskType con suficientes ejemplos.
 ///
 /// Lazy-initialized en primer uso. Se reconstruye si se cambia el TOML.
+/// The engine is selected at startup by `EmbeddingEngineFactory::default_local()`:
+/// uses `OllamaEmbeddingEngine` (multilingual neural) when Ollama is available,
+/// otherwise falls back to `TfIdfHashEngine` (pure Rust, English-biased).
 struct PrototypeStore {
     prototypes: Vec<TypePrototype>,
-    engine: TfIdfHashEngine,
+    engine: Box<dyn EmbeddingEngine>,
 }
 
 impl PrototypeStore {
     /// Construye el store desde examples explícitos (TOML) + sintéticos (keywords).
+    ///
+    /// Uses `EmbeddingEngineFactory::from_env()` to select the best available engine.
+    /// Respects `HALCON_EMBEDDING_ENDPOINT`, `HALCON_EMBEDDING_MODEL`, `OLLAMA_HOST`.
     fn build(rule_set: &ClassifierRuleSet) -> Self {
-        let engine = TfIdfHashEngine;
+        let engine = EmbeddingEngineFactory::from_env();
+        Self::build_with_engine(rule_set, engine)
+    }
+
+    /// Construye el store con un engine explícito.
+    ///
+    /// Determines embedding dimensionality dynamically from the engine's first embed
+    /// call, so that neural engines (Ollama, 768/1024-dim) and hash engines (384-dim)
+    /// both work without requiring a compile-time constant.
+    pub fn build_with_engine(rule_set: &ClassifierRuleSet, engine: Box<dyn EmbeddingEngine>) -> Self {
+        // Probe dims from engine — neural models may return ≠ DIMS dimensions.
+        let probe = engine.embed("probe");
+        let dims = if probe.is_empty() { DIMS } else { probe.len() };
+
         let mut sums: HashMap<usize, (Vec<f32>, usize)> = HashMap::new();
 
         // ── Fuente 1: few-shot examples del TOML ─────────────────────────────
         for ex in rule_set.examples() {
             if let Some(task_type) = TaskType::from_str(&ex.task_type) {
                 let vec = engine.embed(&ex.query);
+                if vec.len() != dims {
+                    continue; // skip on engine error or dims mismatch
+                }
                 let idx = Self::type_to_idx(task_type);
-                let entry = sums.entry(idx).or_insert_with(|| (vec![0.0; DIMS], 0));
+                let entry = sums.entry(idx).or_insert_with(|| (vec![0.0; dims], 0));
                 for (i, v) in vec.iter().enumerate() {
                     entry.0[i] += v;
                 }
@@ -683,6 +705,9 @@ impl PrototypeStore {
         // ── Fuente 2: ejemplos sintéticos desde keywords de reglas ────────────
         // Para cada keyword de tier ≥ 3, generamos una "oración" representativa.
         // Esto garantiza que el EmbeddingLayer funcione incluso sin examples en TOML.
+        // Con OllamaEmbeddingEngine, el modelo entiende semánticamente la frase —
+        // "please refactor the code" y "por favor refactorizar" proyectan al mismo
+        // espacio semántico sin necesitar ejemplos adicionales por idioma.
         for rule in rule_set.rules() {
             // Solo usar keywords de alto peso (tier 3+) como ejemplos sintéticos.
             // Las tier 1 son demasiado ambiguas para construir prototipos.
@@ -691,10 +716,12 @@ impl PrototypeStore {
             }
             let idx = Self::type_to_idx(rule.task_type);
             for kw in &rule.keywords {
-                // Construir oración natural: "please <keyword> the code"
                 let synthetic = format!("please {} the code", kw);
                 let vec = engine.embed(&synthetic);
-                let entry = sums.entry(idx).or_insert_with(|| (vec![0.0; DIMS], 0));
+                if vec.len() != dims {
+                    continue;
+                }
+                let entry = sums.entry(idx).or_insert_with(|| (vec![0.0; dims], 0));
                 for (i, v) in vec.iter().enumerate() {
                     entry.0[i] += v;
                 }
@@ -724,6 +751,7 @@ impl PrototypeStore {
         tracing::debug!(
             target: "halcon::hybrid_classifier",
             prototype_count = prototypes.len(),
+            engine_dims = dims,
             "EmbeddingLayer: prototype store built"
         );
 

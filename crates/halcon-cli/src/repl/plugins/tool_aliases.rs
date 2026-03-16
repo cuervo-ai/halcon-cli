@@ -50,6 +50,10 @@ static TOOL_ALIASES: &[(&str, &[&str])] = &[
     // ── Web ──
     ("web_search",      &["search_web", "search_internet", "web_query", "internet_search"]),
     ("web_fetch",       &["fetch_url", "get_url", "http_get", "fetch_page", "fetch"]),
+    // ── Native search (local index) ──
+    ("native_search",   &["local_search", "index_search", "document_search", "search_index", "search_local"]),
+    ("native_crawl",    &["crawl_url", "index_url", "crawl_page", "crawl_website"]),
+    ("native_index_query", &["index_stats", "search_stats", "index_query"]),
     // ── Tasks ──
     ("task_track",      &["track_task", "create_task", "add_task", "new_task"]),
 ];
@@ -184,6 +188,24 @@ mod tests {
         assert_eq!(canonicalize("write_file"), "file_write");
         assert_eq!(canonicalize("search_files"), "glob");
         assert_eq!(canonicalize("list_directory"), "directory_tree");
+    }
+
+    #[test]
+    fn native_search_aliases_resolve() {
+        assert_eq!(canonicalize("local_search"), "native_search");
+        assert_eq!(canonicalize("index_search"), "native_search");
+        assert_eq!(canonicalize("document_search"), "native_search");
+        assert_eq!(canonicalize("search_index"), "native_search");
+        assert_eq!(canonicalize("search_local"), "native_search");
+        assert_eq!(canonicalize("crawl_url"), "native_crawl");
+        assert_eq!(canonicalize("index_url"), "native_crawl");
+        assert_eq!(canonicalize("crawl_page"), "native_crawl");
+        assert_eq!(canonicalize("index_stats"), "native_index_query");
+        assert_eq!(canonicalize("search_stats"), "native_index_query");
+        // Canonical names still resolve to themselves
+        assert_eq!(canonicalize("native_search"), "native_search");
+        assert_eq!(canonicalize("native_crawl"), "native_crawl");
+        assert_eq!(canonicalize("native_index_query"), "native_index_query");
     }
 
     #[test]

@@ -80,14 +80,16 @@ fn save_manifest(path: &PathBuf, manifest: &UsersManifest) -> Result<()> {
 /// Provisions a new user with the given email and role.
 /// Valid roles: Admin, Developer, ReadOnly, AuditViewer.
 pub fn add(email: &str, role_str: &str) -> Result<()> {
-    // Validate role string before writing.
+    add_with_path(email, role_str, &users_file())
+}
+
+fn add_with_path(email: &str, role_str: &str, path: &PathBuf) -> Result<()> {
     let role = Role::from_str(role_str)
         .ok_or_else(|| anyhow::anyhow!(
             "Unknown role '{role_str}'. Valid roles: Admin, Developer, ReadOnly, AuditViewer"
         ))?;
 
-    let path = users_file();
-    let mut manifest = load_manifest(&path)?;
+    let mut manifest = load_manifest(path)?;
 
     if manifest.users.contains_key(email) {
         anyhow::bail!("User '{email}' already exists. Use `halcon users revoke` first if you want to reassign.");
@@ -103,7 +105,7 @@ pub fn add(email: &str, role_str: &str) -> Result<()> {
         },
     );
 
-    save_manifest(&path, &manifest)?;
+    save_manifest(path, &manifest)?;
     println!("User '{email}' added with role '{role}'.");
     Ok(())
 }
@@ -112,8 +114,11 @@ pub fn add(email: &str, role_str: &str) -> Result<()> {
 ///
 /// Lists all provisioned users with their role and status.
 pub fn list() -> Result<()> {
-    let path = users_file();
-    let manifest = load_manifest(&path)?;
+    list_with_path(&users_file())
+}
+
+fn list_with_path(path: &PathBuf) -> Result<()> {
+    let manifest = load_manifest(path)?;
 
     if manifest.users.is_empty() {
         println!("No users provisioned.");
@@ -140,8 +145,11 @@ pub fn list() -> Result<()> {
 ///
 /// Marks a user as inactive (soft delete). The record is retained for audit.
 pub fn revoke(email: &str) -> Result<()> {
-    let path = users_file();
-    let mut manifest = load_manifest(&path)?;
+    revoke_with_path(email, &users_file())
+}
+
+fn revoke_with_path(email: &str, path: &PathBuf) -> Result<()> {
+    let mut manifest = load_manifest(path)?;
 
     let user = manifest.users.get_mut(email)
         .ok_or_else(|| anyhow::anyhow!("User '{email}' not found."))?;
@@ -152,7 +160,7 @@ pub fn revoke(email: &str) -> Result<()> {
     }
 
     user.active = false;
-    save_manifest(&path, &manifest)?;
+    save_manifest(path, &manifest)?;
     println!("User '{email}' access revoked (role retained for audit).");
     Ok(())
 }
@@ -162,92 +170,73 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn setup_env(tmp: &tempfile::TempDir) {
-        let path = tmp.path().join("users.toml");
-        std::env::set_var("HALCON_USERS_FILE", path.to_str().unwrap());
-    }
-
-    fn teardown_env() {
-        std::env::remove_var("HALCON_USERS_FILE");
+    fn tmp_path(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join("users.toml")
     }
 
     #[test]
     fn add_and_list_user() {
         let tmp = tempdir().unwrap();
-        setup_env(&tmp);
+        let path = tmp_path(&tmp);
 
-        add("alice@example.com", "Developer").unwrap();
+        add_with_path("alice@example.com", "Developer", &path).unwrap();
 
-        let path = users_file();
         let manifest = load_manifest(&path).unwrap();
         let user = manifest.users.get("alice@example.com").unwrap();
 
         assert_eq!(user.role, "Developer");
         assert!(user.active);
-
-        teardown_env();
     }
 
     #[test]
     fn duplicate_user_returns_error() {
         let tmp = tempdir().unwrap();
-        setup_env(&tmp);
+        let path = tmp_path(&tmp);
 
-        add("bob@example.com", "ReadOnly").unwrap();
-        let result = add("bob@example.com", "Admin");
+        add_with_path("bob@example.com", "ReadOnly", &path).unwrap();
+        let result = add_with_path("bob@example.com", "Admin", &path);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
-
-        teardown_env();
     }
 
     #[test]
     fn invalid_role_returns_error() {
         let tmp = tempdir().unwrap();
-        setup_env(&tmp);
+        let path = tmp_path(&tmp);
 
-        let result = add("carol@example.com", "SuperAdmin");
+        let result = add_with_path("carol@example.com", "SuperAdmin", &path);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unknown role"));
-
-        teardown_env();
     }
 
     #[test]
     fn revoke_user_marks_inactive() {
         let tmp = tempdir().unwrap();
-        setup_env(&tmp);
+        let path = tmp_path(&tmp);
 
-        add("dave@example.com", "Admin").unwrap();
-        revoke("dave@example.com").unwrap();
+        add_with_path("dave@example.com", "Admin", &path).unwrap();
+        revoke_with_path("dave@example.com", &path).unwrap();
 
-        let path = users_file();
         let manifest = load_manifest(&path).unwrap();
         let user = manifest.users.get("dave@example.com").unwrap();
         assert!(!user.active);
-
-        teardown_env();
     }
 
     #[test]
     fn revoke_nonexistent_user_returns_error() {
         let tmp = tempdir().unwrap();
-        setup_env(&tmp);
+        let path = tmp_path(&tmp);
 
-        let result = revoke("ghost@example.com");
+        let result = revoke_with_path("ghost@example.com", &path);
         assert!(result.is_err());
-
-        teardown_env();
     }
 
     #[test]
     fn list_empty_users() {
         let tmp = tempdir().unwrap();
-        setup_env(&tmp);
+        let path = tmp_path(&tmp);
 
         // Should not panic with empty manifest.
-        list().unwrap();
-
-        teardown_env();
+        list_with_path(&path).unwrap();
     }
 }
