@@ -2985,7 +2985,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-agent-core"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3016,7 +3016,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-api"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "axum",
  "axum-extra",
@@ -3042,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-auth"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-cli"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-client"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "chrono",
  "futures-util",
@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-context"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-core"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-desktop"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3218,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-files"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "calamine",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-integrations"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -3266,7 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-mcp"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-providers"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "aws-sigv4",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-runtime"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-runtime-events"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "chrono",
  "serde",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-sandbox"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-search"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-security"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "halcon-core",
  "regex",
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-storage"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "chrono",
  "halcon-core",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "halcon-tools"
-version = "0.3.7"
+version = "0.3.10"
 dependencies = [
  "async-trait",
  "criterion",

@@ -7,6 +7,10 @@
 #[path = "audit/mod.rs"]
 pub mod audit;
 
+// commands must be accessible from repl/ and tui/ (e.g., update::UpdateInfo)
+#[path = "commands/mod.rs"]
+pub(crate) mod commands;
+
 #[path = "config_loader.rs"]
 pub(crate) mod config_loader;
 

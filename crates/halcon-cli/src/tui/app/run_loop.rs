@@ -78,6 +78,17 @@ impl TuiApp {
             }
         }
 
+        // Frontier update: open overlay before the first frame if an update is waiting.
+        if let Some(ref info) = self.pending_update.take() {
+            self.state.overlay.open(OverlayKind::UpdateAvailable {
+                current: info.current.clone(),
+                remote: info.remote.clone(),
+                notes: info.notes.clone(),
+                published_at: info.published_at.clone(),
+                size_bytes: info.size_bytes,
+            });
+        }
+
         tracing::debug!("TUI entering main event loop");
         let mut loop_iterations = 0;
 
@@ -447,6 +458,17 @@ impl TuiApp {
                             suggestions,
                             *selected,
                             *dry_run,
+                        );
+                    }
+                    Some(OverlayKind::UpdateAvailable { current, remote, notes, published_at, size_bytes }) => {
+                        overlay::render_update_available(
+                            frame,
+                            area,
+                            current,
+                            remote,
+                            notes,
+                            published_at,
+                            *size_bytes,
                         );
                     }
                     None => {}

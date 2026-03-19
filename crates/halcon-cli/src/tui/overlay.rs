@@ -53,6 +53,17 @@ pub enum OverlayKind {
         selected: usize,
         dry_run: bool,
     },
+    /// Update-available notification overlay.
+    ///
+    /// Shown at TUI startup when `get_pending_update_info()` returns Some.
+    /// Enter = install now + quit; Esc = dismiss + toast reminder.
+    UpdateAvailable {
+        current: String,
+        remote: String,
+        notes: Option<String>,
+        published_at: Option<String>,
+        size_bytes: u64,
+    },
 }
 
 /// State for the overlay system.
@@ -1187,6 +1198,110 @@ pub fn render_plugin_suggest(
         Paragraph::new(lines).wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+/// Render the update-available notification overlay.
+///
+/// Shows current vs new version, optional release notes, download size, and
+/// two actions: [Enter] install now, [Esc] dismiss.
+pub fn render_update_available(
+    frame: &mut Frame,
+    area: Rect,
+    current: &str,
+    remote: &str,
+    notes: &Option<String>,
+    published_at: &Option<String>,
+    size_bytes: u64,
+) {
+    let p = &theme::active().palette;
+    let c_border = p.border_ratatui();
+    let c_accent = p.accent_ratatui();
+    let c_text = p.text_ratatui();
+    let c_muted = p.muted_ratatui();
+    let c_success = p.success_ratatui();
+    let c_warning = p.warning_ratatui();
+
+    // Compute popup height: base + notes lines
+    let notes_lines = notes.as_deref()
+        .map(|n| n.lines().count().min(10) as u16)
+        .unwrap_or(0);
+    let popup_height = (10 + notes_lines).min(area.height.saturating_sub(4));
+    let popup_width = area.width.saturating_sub(8).min(68);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect { x, y, width: popup_width, height: popup_height };
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(c_warning))
+        .title(Span::styled(
+            " ⚡ Actualización disponible ",
+            Style::default().fg(c_warning).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    // Version info
+    let date_str = published_at.as_deref()
+        .and_then(|d| d.get(..10))
+        .map(|d| format!("  (publicado {d})"))
+        .unwrap_or_default();
+    lines.push(Line::from(vec![
+        Span::styled("  Versión actual:  ", Style::default().fg(c_muted)),
+        Span::styled(format!("v{current}"), Style::default().fg(c_text)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Nueva versión:   ", Style::default().fg(c_muted)),
+        Span::styled(format!("v{remote}"), Style::default().fg(c_success).add_modifier(Modifier::BOLD)),
+        Span::styled(date_str, Style::default().fg(c_muted)),
+    ]));
+
+    if size_bytes > 0 {
+        let mb = size_bytes as f64 / 1_048_576.0;
+        lines.push(Line::from(vec![
+            Span::styled("  Tamaño:          ", Style::default().fg(c_muted)),
+            Span::styled(format!("{mb:.1} MB"), Style::default().fg(c_text)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Release notes (capped)
+    if let Some(ref note_text) = notes {
+        lines.push(Line::from(Span::styled(
+            "  Notas de versión:",
+            Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+        )));
+        for note_line in note_text.lines().take(10) {
+            lines.push(Line::from(Span::styled(
+                format!("    {note_line}"),
+                Style::default().fg(c_text),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    // Divider + actions
+    lines.push(Line::from(Span::styled(
+        "  ─────────────────────────────────────────",
+        Style::default().fg(c_muted),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  [", Style::default().fg(c_muted)),
+        Span::styled("Enter", Style::default().fg(c_success).add_modifier(Modifier::BOLD)),
+        Span::styled("] Instalar ahora    [", Style::default().fg(c_muted)),
+        Span::styled("Esc", Style::default().fg(c_muted).add_modifier(Modifier::BOLD)),
+        Span::styled("] Posponer", Style::default().fg(c_muted)),
+    ]));
+
+    let paragraph = ratatui::widgets::Paragraph::new(lines)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
 }
 
 #[cfg(test)]

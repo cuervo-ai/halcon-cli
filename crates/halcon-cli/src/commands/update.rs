@@ -460,6 +460,317 @@ fn prune_backups(dir: &Path, bin_stem: &str, keep: usize) {
     }
 }
 
+// ─── Public update info type ─────────────────────────────────────────────────
+
+/// Pending update information read from local notification files.
+///
+/// Written by the background checker thread; consumed by interactive UI code
+/// so the user sees a rich prompt (version, notes, size) rather than a bare
+/// one-liner.
+#[derive(Debug, Clone)]
+pub struct UpdateInfo {
+    pub current: String,
+    pub remote: String,
+    pub notes: Option<String>,
+    pub published_at: Option<String>,
+    /// Total download size in bytes (0 = unknown)
+    pub size_bytes: u64,
+    /// Download URL for the artifact (resolved at check time)
+    pub artifact_url: String,
+    /// Expected SHA-256 hex digest
+    pub artifact_sha256: String,
+}
+
+/// Return a pending update if one has been detected by the background checker.
+///
+/// Reads the set of small notification files written by `notify_if_update_available`.
+/// Returns `None` immediately when no update is pending or on any I/O error.
+pub fn get_pending_update_info() -> Option<UpdateInfo> {
+    let halcon_dir = dirs_next()?;
+    let note = halcon_dir.join(".update-available");
+    let remote_raw = std::fs::read_to_string(&note).ok()?;
+    let remote = remote_raw.trim().to_string();
+    if remote.is_empty() || !version_gt(&remote, CURRENT_VERSION) {
+        return None;
+    }
+
+    let notes = std::fs::read_to_string(halcon_dir.join(".update-notes")).ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let published_at = std::fs::read_to_string(halcon_dir.join(".update-date")).ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let size_bytes: u64 = std::fs::read_to_string(halcon_dir.join(".update-size")).ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    let artifact_url = std::fs::read_to_string(halcon_dir.join(".update-url")).ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let artifact_sha256 = std::fs::read_to_string(halcon_dir.join(".update-sha256")).ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    Some(UpdateInfo {
+        current: CURRENT_VERSION.to_string(),
+        remote,
+        notes,
+        published_at,
+        size_bytes,
+        artifact_url,
+        artifact_sha256,
+    })
+}
+
+/// Interactive classic-mode update prompt (non-TUI).
+///
+/// Renders a crossterm box with version info, release notes, and download size,
+/// then asks the user to confirm.  Returns `true` when the user chose to install.
+pub fn run_interactive_classic(info: &UpdateInfo) -> anyhow::Result<bool> {
+    use crossterm::{
+        cursor,
+        style::{self, Stylize},
+        terminal as cterm,
+        ExecutableCommand,
+    };
+    use std::io::{BufRead, Write};
+
+    let mut stdout = std::io::stdout();
+
+    // Build size label
+    let size_label = if info.size_bytes > 0 {
+        let mb = info.size_bytes as f64 / 1_048_576.0;
+        format!("  {:.1} MB", mb)
+    } else {
+        String::new()
+    };
+
+    let date_label = info.published_at.as_deref()
+        .and_then(|d| d.get(..10))
+        .map(|d| format!("  Released {d}"))
+        .unwrap_or_default();
+
+    // ─── Header ───────────────────────────────────────────────────────────────
+    writeln!(stdout)?;
+    writeln!(stdout, "  \x1b[1;33m⚡ Actualización disponible\x1b[0m")?;
+    writeln!(stdout, "  \x1b[90m────────────────────────────────────────────────\x1b[0m")?;
+    writeln!(stdout, "  Versión actual:  \x1b[36mv{}\x1b[0m", info.current)?;
+    writeln!(stdout, "  Nueva versión:   \x1b[1;32mv{}\x1b[0m{}{}", info.remote, date_label, size_label)?;
+    writeln!(stdout)?;
+
+    // ─── Release notes (capped at 12 lines) ────────────────────────────────
+    if let Some(ref notes) = info.notes {
+        writeln!(stdout, "  \x1b[1mNotas de versión:\x1b[0m")?;
+        for line in notes.lines().take(12) {
+            writeln!(stdout, "    {line}")?;
+        }
+        writeln!(stdout)?;
+    }
+
+    // ─── Confirmation ──────────────────────────────────────────────────────
+    write!(stdout, "  \x1b[1m¿Instalar ahora? [S/n]\x1b[0m  ")?;
+    stdout.flush()?;
+
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let trimmed = line.trim().to_lowercase();
+
+    let confirmed = trimmed.is_empty() || trimmed == "s" || trimmed == "si" || trimmed == "y" || trimmed == "yes";
+
+    if !confirmed {
+        writeln!(stdout, "  Actualización pospuesta. Usa \x1b[1mhalcon update\x1b[0m cuando quieras.")?;
+    }
+    writeln!(stdout)?;
+
+    Ok(confirmed)
+}
+
+/// Download and install from an `UpdateInfo` record, streaming progress to stderr.
+///
+/// Writes a real progress bar for each phase: downloading, verifying, replacing.
+/// On success the current binary is replaced atomically and backups are pruned.
+pub fn run_update_from_info(info: &UpdateInfo) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    if info.artifact_url.is_empty() {
+        // Fall back to the normal run() path which re-fetches the manifest
+        return run(UpdateArgs {
+            check: false,
+            force: false,
+            version: Some(info.remote.clone()),
+            channel: None,
+        });
+    }
+
+    let releases_url = std::env::var("HALCON_RELEASES_URL")
+        .unwrap_or_else(|_| RELEASES_URL.to_string());
+
+    let tmp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
+    let target = artifact_target();
+    let ext = archive_extension();
+    let artifact_name = format!("halcon-{}-{target}.{ext}", info.remote);
+    let archive_path = tmp_dir.path().join(&artifact_name);
+
+    // ─── Download with progress ──────────────────────────────────────────────
+    eprint!("\r  Descargando v{}...  [                    ]   0%", info.remote);
+    std::io::stderr().flush().ok();
+
+    let url = if !info.artifact_url.is_empty() {
+        info.artifact_url.clone()
+    } else {
+        format!("{releases_url}/latest/{artifact_name}")
+    };
+
+    download_with_progress(&url, &archive_path, |done, total| {
+        if total > 0 {
+            let pct = (done * 100 / total) as usize;
+            let filled = pct / 5;  // 20-char bar
+            let bar: String = format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled));
+            let mb_done = done as f64 / 1_048_576.0;
+            let mb_total = total as f64 / 1_048_576.0;
+            eprint!("\r  Descargando v{}...  [{bar}]  {pct:3}%  ({mb_done:.1}/{mb_total:.1} MB)",
+                info.remote);
+            std::io::stderr().flush().ok();
+        }
+    })?;
+    eprintln!("\r  Descargando v{}...  [████████████████████]  100%  ✓", info.remote);
+
+    // ─── SHA-256 verification ─────────────────────────────────────────────────
+    if !info.artifact_sha256.is_empty() {
+        eprint!("  Verificando SHA-256... ");
+        std::io::stderr().flush().ok();
+        let actual = sha256_file(&archive_path)?;
+        if actual != info.artifact_sha256 {
+            anyhow::bail!(
+                "SHA-256 no coincide!\n  Esperado: {}\n  Obtenido: {}\n\
+                 Abortando — el archivo puede estar corrupto o comprometido.",
+                info.artifact_sha256, actual
+            );
+        }
+        eprintln!("✓");
+    } else {
+        eprintln!("  AVISO: SHA-256 no disponible en manifiesto, omitiendo verificación");
+    }
+
+    // ─── Extract ──────────────────────────────────────────────────────────────
+    eprint!("  Extrayendo... ");
+    std::io::stderr().flush().ok();
+    let new_binary = extract_binary(tmp_dir.path(), &archive_path, binary_name())?;
+    eprintln!("✓");
+
+    // ─── Replace current binary ───────────────────────────────────────────────
+    let current_exe = std::env::current_exe().context("No se pudo determinar el ejecutable actual")?;
+    let current_exe = canonicalize_best_effort(&current_exe);
+
+    if cfg!(target_os = "windows") {
+        let next_path = current_exe.with_file_name("halcon-new.exe");
+        std::fs::copy(&new_binary, &next_path).context("Error al escribir nuevo binario")?;
+        eprintln!("\n  Nuevo binario: {}", next_path.display());
+        eprintln!("  Para completar: Move-Item -Force '{}' '{}'",
+            next_path.display(), current_exe.display());
+        return Ok(());
+    }
+
+    eprint!("  Reemplazando binario... ");
+    std::io::stderr().flush().ok();
+    let backup_name = format!("{}.bak.v{}",
+        current_exe.file_name().unwrap_or_default().to_string_lossy(),
+        info.current);
+    let backup_path = current_exe.with_file_name(&backup_name);
+    atomic_replace(&current_exe, &new_binary, &backup_path)?;
+    eprintln!("✓");
+
+    if let Some(parent) = current_exe.parent() {
+        let bin_stem = current_exe.file_name()
+            .unwrap_or_default().to_string_lossy().into_owned();
+        prune_backups(parent, &bin_stem, MAX_BACKUPS);
+    }
+
+    // ─── Clean up notification files ──────────────────────────────────────────
+    if let Some(halcon_dir) = dirs_next() {
+        for name in &[".update-available", ".update-notes", ".update-date",
+                      ".update-size", ".update-url", ".update-sha256"] {
+            let _ = std::fs::remove_file(halcon_dir.join(name));
+        }
+    }
+
+    eprintln!("\n  ✅ Halcon CLI actualizado a v{}.", info.remote);
+    eprintln!("  Respaldo guardado: {}", backup_path.display());
+    eprintln!("  Para revertir: halcon update --version {}", info.current);
+    Ok(())
+}
+
+/// Re-execute the current process with the same arguments.
+///
+/// Uses `exec()` on Unix (replaces process image) and `Command::new().spawn()` + exit on Windows.
+/// This enables seamless restart after a self-update without the user noticing.
+pub fn reexec_with_current_args() -> ! {
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("halcon"));
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe)
+            .args(&args)
+            .exec();
+        eprintln!("halcon: re-exec failed: {err}");
+        std::process::exit(1);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = std::process::Command::new(&exe)
+            .args(&args)
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("halcon: re-exec failed: {e}");
+                std::process::exit(1);
+            });
+        std::process::exit(status.code().unwrap_or(0));
+    }
+}
+
+/// Download `url` to `dest`, calling `progress(bytes_done, total_bytes)` for each chunk.
+pub fn download_with_progress<F>(url: &str, dest: &std::path::Path, mut progress: F) -> anyhow::Result<()>
+where
+    F: FnMut(u64, u64),
+{
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .user_agent(format!("halcon-cli/{CURRENT_VERSION}"))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let mut resp = client.get(url).send()
+        .with_context(|| format!("GET {url}"))?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {} downloading {url}", resp.status());
+    }
+
+    let total = resp.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(dest)
+        .with_context(|| format!("Create {}", dest.display()))?;
+
+    let mut downloaded: u64 = 0;
+    let mut buf = [0u8; 65536];
+    use std::io::Read;
+    loop {
+        let n = resp.read(&mut buf).context("Read response")?;
+        if n == 0 { break; }
+        file.write_all(&buf[..n]).context("Write to temp file")?;
+        downloaded += n as u64;
+        progress(downloaded, total);
+    }
+    Ok(())
+}
+
 /// Check for updates silently in the background (best-effort, non-blocking).
 ///
 /// Spawns a short-lived thread that fetches the manifest and writes a
@@ -499,18 +810,37 @@ pub fn notify_if_update_available() {
             if !resp.status().is_success() { return; }
             let Ok(manifest) = resp.json::<Manifest>() else { return; };
 
-            let remote = manifest.version.trim_start_matches('v');
-            if version_gt(remote, CURRENT_VERSION) {
+            let remote = manifest.version.trim_start_matches('v').to_string();
+            if version_gt(&remote, CURRENT_VERSION) {
                 if let Some(halcon_dir) = dirs_next() {
-                    let note = halcon_dir.join(".update-available");
-                    let _ = std::fs::write(&note, remote);
+                    let _ = std::fs::write(halcon_dir.join(".update-available"), &remote);
+                    // Save extra metadata for rich interactive UI
+                    if let Some(ref notes) = manifest.release_notes {
+                        let _ = std::fs::write(halcon_dir.join(".update-notes"), notes);
+                    }
+                    if let Some(ref ts) = manifest.published_at {
+                        let _ = std::fs::write(halcon_dir.join(".update-date"), ts);
+                    }
+                    // Resolve artifact info for this platform
+                    let target = artifact_target();
+                    let ext = archive_extension();
+                    let artifact_name = format!("halcon-{remote}-{target}.{ext}");
+                    let art_url = format!("{releases_url}/latest/{artifact_name}");
+                    let _ = std::fs::write(halcon_dir.join(".update-url"), &art_url);
+                    if let Some(art) = manifest.artifacts.iter().find(|a| a.name == artifact_name) {
+                        let _ = std::fs::write(halcon_dir.join(".update-sha256"), &art.sha256);
+                        let _ = std::fs::write(halcon_dir.join(".update-size"), art.size.to_string());
+                    }
                     // Touch the stamp to avoid re-checking for 24h
                     let _ = std::fs::write(halcon_dir.join(".update-check"), "");
                 }
             } else {
-                // Up to date — clear the notification and touch stamp
+                // Up to date — clear the notification files and touch stamp
                 if let Some(halcon_dir) = dirs_next() {
-                    let _ = std::fs::remove_file(halcon_dir.join(".update-available"));
+                    for name in &[".update-available", ".update-notes", ".update-date",
+                                  ".update-size", ".update-url", ".update-sha256"] {
+                        let _ = std::fs::remove_file(halcon_dir.join(name));
+                    }
                     let _ = std::fs::write(halcon_dir.join(".update-check"), "");
                 }
             }

@@ -255,6 +255,14 @@ pub struct TuiApp {
     /// prompt and the palette mirrors the current `/xxx` prefix as its filter; when
     /// false the palette consumes Backspace and Char events itself (normal Ctrl+P mode).
     slash_completing: bool,
+
+    // ─── Frontier update notification (v0.3.10) ──────────────────────────────
+    /// Pending update info — Some when `get_pending_update_info()` returned data.
+    /// When Some the UpdateAvailable overlay is opened at startup before accepting input.
+    pub(crate) pending_update: Option<crate::commands::update::UpdateInfo>,
+    /// Set to `true` by the overlay handler when the user chooses to install.
+    /// Checked by repl/mod.rs after TUI exits; triggers `run_update_from_info` + re-exec.
+    pub(crate) update_install_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Detect the OS username for the user avatar in the activity feed.
@@ -357,7 +365,19 @@ impl TuiApp {
             sudo_has_cached: false,
             sudo_cache: None,
             slash_completing: false,
+            pending_update: None,
+            update_install_signal: None,
         }
+    }
+
+    /// Set a pending update so the TUI opens the UpdateAvailable overlay at startup.
+    pub fn set_pending_update(
+        &mut self,
+        info: crate::commands::update::UpdateInfo,
+        signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.pending_update = Some(info);
+        self.update_install_signal = Some(signal);
     }
 
     /// Wire the sudo password sender so the TUI can deliver passwords to the executor.

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] — 2026-03-19
+
+### Added
+
+- **Frontier Update Notification System**: When a new version of halcon is detected, users are now notified interactively at chat startup rather than via a one-line hint only.
+  - **TUI mode**: An `UpdateAvailable` overlay is rendered as the first screen before any input is accepted. Shows current/new version, release date, download size, and up to 10 lines of release notes. `[Enter]` downloads+installs+re-execs seamlessly; `[Esc]` dismisses with a toast reminder.
+  - **Classic mode**: A crossterm-rendered box with full version info and release notes is shown before the session starts. `[S/y]` confirms installation; `[n]` skips. On confirmation the binary is replaced atomically and the process is re-executed with identical arguments (seamless restart).
+  - **`UpdateInfo` struct**: `{ current, remote, notes, published_at, size_bytes, artifact_url, artifact_sha256 }` — written by the background checker thread to `~/.halcon/.update-{available,notes,date,size,url,sha256}` and read at next startup.
+  - **`get_pending_update_info()`**: reads the set of small notification files, returns `None` if no update is pending.
+  - **`run_update_from_info(info)`**: downloads with a 20-char `█░` progress bar, verifies SHA-256, replaces binary atomically, prunes backups (≤3 kept), cleans notification files.
+  - **`reexec_with_current_args()`**: `exec()` on Unix (replaces process image), `Command::new().spawn()+exit` on Windows — transparent restart after update.
+  - **`download_with_progress<F>(url, dest, cb)`**: public helper with `(bytes_done, total_bytes)` progress callback.
+  - Background checker now also saves artifact URL, SHA-256 and size alongside the version file for richer UI without re-fetching the manifest.
+  - `Arc<AtomicBool>` signal pattern wired between TUI overlay handler and `repl/mod.rs` post-TUI code.
+
+### Changed
+
+- `notify_if_update_available()` now writes 6 notification files (`.update-available`, `.update-notes`, `.update-date`, `.update-size`, `.update-url`, `.update-sha256`) in addition to the existing `.update-check` stamp.
+- `lib.rs` now declares `commands` as `pub(crate)` so `repl/` and `tui/` sub-modules can access `update::UpdateInfo` and friends via `crate::commands::update`.
+
+---
+
 ## [0.3.9] — 2026-03-19
 
 ### Added

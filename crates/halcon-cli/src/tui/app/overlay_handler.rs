@@ -306,6 +306,29 @@ impl TuiApp {
             return;
         }
 
+        // Update-available overlay key routing.
+        if matches!(self.state.overlay.active, Some(OverlayKind::UpdateAvailable { .. })) {
+            match key.code {
+                KeyCode::Enter => {
+                    // Signal the caller to run the update after TUI exits.
+                    if let Some(ref sig) = self.update_install_signal {
+                        sig.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    self.state.overlay.close();
+                    self.state.should_quit = true;
+                }
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.state.overlay.close();
+                    self.toasts.push(Toast::new(
+                        "Actualización pospuesta — usa `halcon update` cuando quieras".to_string(),
+                        ToastLevel::Info,
+                    ));
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Phase 95: PluginSuggest overlay key routing.
         if matches!(self.state.overlay.active, Some(OverlayKind::PluginSuggest { .. })) {
             match key.code {

@@ -160,6 +160,24 @@ pub async fn run(
         }
     }
 
+    // Frontier update: in classic (non-TUI) mode, show an interactive update prompt
+    // when a new version is pending.  TUI mode handles this via the overlay system.
+    if !tui && !no_banner {
+        if let Some(info) = super::update::get_pending_update_info() {
+            match super::update::run_interactive_classic(&info) {
+                Ok(true) => {
+                    // User confirmed — download, verify, replace, then re-exec.
+                    match super::update::run_update_from_info(&info) {
+                        Ok(()) => super::update::reexec_with_current_args(),
+                        Err(e) => eprintln!("  Error al instalar actualización: {e}"),
+                    }
+                }
+                Ok(false) => {} // User skipped
+                Err(e) => tracing::debug!("Interactive update prompt error: {e}"),
+            }
+        }
+    }
+
     // If cenzontle was auto-detected from the keystore (token exists) but the
     // config still lists a different default_provider, promote cenzontle in-memory.
     // This covers users who ran `halcon auth login cenzontle` before v0.3.8

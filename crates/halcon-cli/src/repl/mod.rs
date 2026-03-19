@@ -1533,6 +1533,12 @@ impl Repl {
         tracing::debug!("Spawning TUI task");
         let async_db_clone = self.async_db.clone(); // Phase 3 SRCH-004: Pass database for search history
         let ui_tx_for_bg = ui_tx.clone(); // Phase 45E: for background DB queries from TUI
+
+        // Frontier update: check for a pending update before spawning the TUI.
+        let pending_update_info = crate::commands::update::get_pending_update_info();
+        let update_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let update_signal_clone = update_signal.clone();
+
         let tui_handle = tokio::spawn(async move {
             tracing::debug!("TUI task started");
             let mut app = TuiApp::with_mode(
@@ -1547,6 +1553,10 @@ impl Repl {
             app.set_ui_tx(ui_tx_for_bg);
             // Phase 50: Wire sudo password sender so TuiApp can deliver passwords to executor.
             app.set_sudo_pw_tx(sudo_pw_tx);
+            // Frontier update: wire pending update overlay if a new version is available.
+            if let Some(info) = pending_update_info {
+                app.set_pending_update(info, update_signal_clone);
+            }
             tracing::debug!("TUI app created with mode: {:?}", initial_mode);
             app.push_banner(
                 &banner_version,
@@ -2101,6 +2111,24 @@ impl Repl {
 
         // Wait for TUI task to finish.
         let _ = tui_handle.await;
+
+        // Frontier update: if the user chose to install from the overlay, run the update now.
+        if update_signal.load(std::sync::atomic::Ordering::SeqCst) {
+            // Re-fetch info (the TUI had it, but it's cheap to re-read the small files).
+            if let Some(info) = crate::commands::update::get_pending_update_info() {
+                eprintln!("\n  Instalando actualización v{}…", info.remote);
+                match crate::commands::update::run_update_from_info(&info) {
+                    Ok(()) => {
+                        eprintln!("  Reiniciando halcon…\n");
+                        crate::commands::update::reexec_with_current_args();
+                    }
+                    Err(e) => {
+                        eprintln!("  Error al instalar actualización: {e}");
+                        eprintln!("  Puedes intentarlo manualmente con: halcon update");
+                    }
+                }
+            }
+        }
 
         // Emit SessionEnded event (matches classic REPL behavior).
         let _ = self
