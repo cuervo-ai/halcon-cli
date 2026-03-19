@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod audit;
 pub mod auth;
+pub mod auth_gate;
 pub mod chat;
 pub mod schedule;
 pub mod json_rpc;

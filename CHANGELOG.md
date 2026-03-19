@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] — 2026-03-19
+
+### Added
+
+- **Interactive Auth Gate**: When `halcon chat` starts with no authenticated provider, a rich crossterm terminal UI appears before the session begins. The gate detects all supported providers (cenzontle, anthropic, openai, deepseek, gemini, claude_code, ollama), shows their status, and lets the user configure one interactively:
+  - **API key providers** (anthropic, openai, deepseek, gemini): masked input, saved securely to OS keystore and injected into the current process so the rebuilt registry picks it up immediately.
+  - **OAuth/browser providers** (cenzontle, claude_code): launches the respective browser flow and waits for completion.
+  - **Local providers** (ollama): shows setup instructions.
+  - Skippable with `S` or `Esc` — the session continues and `precheck_providers_explicit` shows its normal error if no provider becomes available.
+- **`commands/auth_gate.rs`**: new module — `probe_providers()`, `any_authenticated()`, `registry_has_no_real_providers()`, `run_if_needed()`, 9 unit tests.
+
+### Changed
+
+- `chat::run()` now calls the auth gate between registry build and provider precheck when no real AI provider is registered.
+
+---
+
 ## [0.3.8] — 2026-03-19
 
 ### Fixed

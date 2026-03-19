@@ -140,6 +140,26 @@ pub async fn run(
     // Populate Cenzontle model list from the API (no-op if Cenzontle not registered).
     provider_factory::ensure_cenzontle_models(&mut registry).await;
 
+    // ── Auth gate ────────────────────────────────────────────────────────────
+    // If no real AI provider is registered (no valid token anywhere), show the
+    // interactive auth gate before starting the session.  On success, rebuild the
+    // registry with the newly configured credentials.
+    {
+        let registry_list = registry.list();
+        let no_real = super::auth_gate::registry_has_no_real_providers(&registry_list);
+        drop(registry_list);
+
+        if no_real {
+            let gate = super::auth_gate::run_if_needed(&config, true).await?;
+            if gate.credentials_added {
+                // Rebuild registry with the freshly stored credentials.
+                registry = provider_factory::build_registry(&config);
+                provider_factory::ensure_local_fallback(&mut registry).await;
+                provider_factory::ensure_cenzontle_models(&mut registry).await;
+            }
+        }
+    }
+
     // If cenzontle was auto-detected from the keystore (token exists) but the
     // config still lists a different default_provider, promote cenzontle in-memory.
     // This covers users who ran `halcon auth login cenzontle` before v0.3.8
