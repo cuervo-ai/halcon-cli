@@ -711,22 +711,45 @@ main() {
     # ─── Full-capacity configuration ─────────────────────────────────────────
     configure_halcon
 
-    printf "\n${GREEN}${BOLD}  Installation complete!${RESET}\n"
-    printf "\n  ${BOLD}Next step — connect a provider:${RESET}\n"
-    printf "\n  ${CYAN}Cloud APIs (API key):${RESET}\n"
-    printf "    ${BOLD}halcon auth login anthropic${RESET}     ${CYAN}# Claude — recommended${RESET}\n"
-    printf "    ${BOLD}halcon auth login openai${RESET}        ${CYAN}# GPT models${RESET}\n"
-    printf "    ${BOLD}halcon auth login deepseek${RESET}      ${CYAN}# cheapest option${RESET}\n"
-    printf "    ${BOLD}halcon auth login gemini${RESET}        ${CYAN}# Google Gemini${RESET}\n"
-    printf "\n  ${CYAN}Enterprise / Cloud Infrastructure:${RESET}\n"
-    printf "    ${BOLD}halcon auth login cenzontle${RESET}     ${CYAN}# Cenzontle SSO (Zuclubit)${RESET}\n"
-    printf "    ${BOLD}export CLAUDE_CODE_USE_BEDROCK=1${RESET} ${CYAN}# AWS Bedrock (+ AWS_REGION + AWS credentials)${RESET}\n"
-    printf "    ${BOLD}export CLAUDE_CODE_USE_AZURE=1${RESET}   ${CYAN}# Azure AI Foundry (+ AZURE_AI_ENDPOINT + AZURE_API_KEY)${RESET}\n"
-    printf "    ${BOLD}export CLAUDE_CODE_USE_VERTEX=1${RESET}  ${CYAN}# Google Vertex AI (+ ANTHROPIC_VERTEX_PROJECT_ID)${RESET}\n"
-    printf "\n  ${CYAN}Local (no API key):${RESET}\n"
-    printf "    ${BOLD}halcon chat -p ollama${RESET}           ${CYAN}# Ollama — fully local${RESET}\n"
-    printf "\n  ${BOLD}Then start:${RESET}\n"
-    printf "    ${BOLD}halcon chat --tui --full --expert${RESET}\n\n"
+    printf "\n${GREEN}${BOLD}  Installation complete!${RESET}\n\n"
+
+    # ── Cenzontle active path ─────────────────────────────────────────────────
+    if [ "$_SYS_CENZONTLE_CONFIGURED" = "true" ]; then
+        printf "${GREEN}${BOLD}  ✓ Cenzontle AI active — you're ready to go!${RESET}\n\n"
+        printf "  ${BOLD}Start now:${RESET}\n"
+        printf "    ${BOLD}halcon chat --tui --full --expert${RESET}       ${CYAN}# default: Cenzontle${RESET}\n"
+        printf "    ${BOLD}halcon -p cenzontle chat --tui${RESET}          ${CYAN}# explicit${RESET}\n"
+        printf "    ${BOLD}halcon auth status${RESET}                      ${CYAN}# verify token${RESET}\n"
+        printf "\n  ${BOLD}Other providers (optional):${RESET}\n"
+        printf "    ${BOLD}halcon -p anthropic chat${RESET}                ${CYAN}# Claude direct (needs ANTHROPIC_API_KEY)${RESET}\n"
+        printf "    ${BOLD}halcon -p ollama chat${RESET}                   ${CYAN}# local, no API key${RESET}\n"
+    else
+        # ── No provider yet ──────────────────────────────────────────────────
+        printf "  ${BOLD}Next step — connect a provider:${RESET}\n"
+        printf "\n  ${CYAN}Enterprise (recommended):${RESET}\n"
+        printf "    ${BOLD}halcon auth login cenzontle${RESET}     ${CYAN}# Cenzontle SSO — browser OAuth, no API key needed${RESET}\n"
+        printf "\n  ${CYAN}Cloud APIs (API key):${RESET}\n"
+        printf "    ${BOLD}halcon auth login anthropic${RESET}     ${CYAN}# Claude — recommended${RESET}\n"
+        printf "    ${BOLD}halcon auth login openai${RESET}        ${CYAN}# GPT models${RESET}\n"
+        printf "    ${BOLD}halcon auth login deepseek${RESET}      ${CYAN}# cheapest option${RESET}\n"
+        printf "    ${BOLD}halcon auth login gemini${RESET}        ${CYAN}# Google Gemini${RESET}\n"
+        printf "\n  ${CYAN}Cloud Infrastructure:${RESET}\n"
+        printf "    ${BOLD}export CLAUDE_CODE_USE_BEDROCK=1${RESET} ${CYAN}# AWS Bedrock (+ AWS_REGION + credentials)${RESET}\n"
+        printf "    ${BOLD}export CLAUDE_CODE_USE_AZURE=1${RESET}   ${CYAN}# Azure AI Foundry (+ AZURE_AI_ENDPOINT)${RESET}\n"
+        printf "    ${BOLD}export CLAUDE_CODE_USE_VERTEX=1${RESET}  ${CYAN}# Google Vertex AI (+ project + gcloud ADC)${RESET}\n"
+        printf "\n  ${CYAN}Local (no API key):${RESET}\n"
+        printf "    ${BOLD}halcon chat -p ollama${RESET}           ${CYAN}# Ollama — fully local${RESET}\n"
+        printf "\n  ${BOLD}Then start:${RESET}\n"
+        printf "    ${BOLD}halcon chat --tui --full --expert${RESET}\n"
+    fi
+
+    printf "\n  ${BOLD}Useful commands:${RESET}\n"
+    printf "    ${BOLD}halcon auth status${RESET}              ${CYAN}# check configured providers${RESET}\n"
+    printf "    ${BOLD}halcon doctor${RESET}                   ${CYAN}# runtime diagnostics${RESET}\n"
+    printf "    ${BOLD}halcon update${RESET}                   ${CYAN}# update to latest version${RESET}\n"
+    printf "    ${BOLD}halcon agents list${RESET}              ${CYAN}# sub-agent registry${RESET}\n"
+    printf "    ${BOLD}halcon mcp list${RESET}                 ${CYAN}# MCP servers${RESET}\n"
+    printf "\n"
 }
 
 # ─── System detection ────────────────────────────────────────────────────────
@@ -803,6 +826,63 @@ detect_system() {
     do
         [ -x "$_c" ] && { _SYS_CLAUDE_CMD="$_c"; break; }
     done
+
+    # ── Cenzontle SSO token detection ─────────────────────────────────────────
+    # Priority: env var > macOS Keychain > Linux D-Bus (secret-tool) > XDG file store
+    # Non-blocking: each probe has a fast timeout; failures are silently skipped.
+    _SYS_CENZONTLE_CONFIGURED="false"
+    _SYS_CENZONTLE_TOKEN=""
+
+    # 1. Environment variable (CI/CD or manual export — highest priority)
+    if [ -n "${CENZONTLE_ACCESS_TOKEN:-}" ]; then
+        _SYS_CENZONTLE_CONFIGURED="true"
+        _SYS_CENZONTLE_TOKEN="${CENZONTLE_ACCESS_TOKEN}"
+
+    # 2. macOS Keychain (written by `halcon auth login cenzontle` on macOS)
+    elif [ "$_SYS_OS" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+        _tok="$(security find-generic-password \
+            -s "halcon-cli" -a "cenzontle:access_token" -w 2>/dev/null || true)"
+        if [ -n "$_tok" ]; then
+            _SYS_CENZONTLE_CONFIGURED="true"
+            _SYS_CENZONTLE_TOKEN="$_tok"
+        fi
+
+    # 3. Linux D-Bus Secret Service (written by `halcon auth login cenzontle` on desktop Linux)
+    elif [ "$_SYS_OS" = "Linux" ] && command -v secret-tool >/dev/null 2>&1; then
+        _tok="$(secret-tool lookup \
+            service halcon-cli account "cenzontle:access_token" 2>/dev/null || true)"
+        if [ -n "$_tok" ]; then
+            _SYS_CENZONTLE_CONFIGURED="true"
+            _SYS_CENZONTLE_TOKEN="$_tok"
+        fi
+    fi
+
+    # 4. XDG file store fallback (headless Linux — ~/.local/share/halcon/halcon-cli.json)
+    if [ "$_SYS_CENZONTLE_CONFIGURED" = "false" ] && [ "$_SYS_OS" = "Linux" ]; then
+        _cz_store="$HOME/.local/share/halcon/halcon-cli.json"
+        if [ -f "$_cz_store" ] && command -v python3 >/dev/null 2>&1; then
+            _tok="$(python3 - "$_cz_store" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("cenzontle:access_token", ""))
+except Exception:
+    pass
+PYEOF
+)"
+            if [ -n "$_tok" ]; then
+                _SYS_CENZONTLE_CONFIGURED="true"
+                _SYS_CENZONTLE_TOKEN="$_tok"
+            fi
+        fi
+    fi
+
+    # Derive: if cenzontle is configured, make it the default provider
+    if [ "$_SYS_CENZONTLE_CONFIGURED" = "true" ]; then
+        _SYS_DEFAULT_PROVIDER="cenzontle"
+    else
+        _SYS_DEFAULT_PROVIDER="anthropic"
+    fi
 
     # ── Derive tuned values ───────────────────────────────────────────────────
 
@@ -973,13 +1053,19 @@ configure_halcon() {
     [ "$_SYS_HAS_GPU"        = "1" ] && printf "    GPU: detected (%s)\n" "$_SYS_MULTIMODAL_MODE"
     [ "$_SYS_OLLAMA_ENABLED" = "true" ] && printf "    Ollama: found (%s)\n" "$_SYS_OLLAMA_MODEL"
     [ -n "$_SYS_CLAUDE_CMD" ] && printf "    Claude CLI: %s\n" "$_SYS_CLAUDE_CMD"
+    if [ "$_SYS_CENZONTLE_CONFIGURED" = "true" ]; then
+        printf "    ${GREEN}Cenzontle:${RESET} token found — will be set as default provider\n"
+    else
+        printf "    Cenzontle: not configured (run: halcon auth login cenzontle)\n"
+    fi
 
     printf "\n  ${BOLD}Configuring Halcón...${RESET}\n"
     mkdir -p "$HALCON_DIR" 2>/dev/null || true
 
     # ── config.toml ──────────────────────────────────────────────────────────
     if [ -f "$CONFIG_FILE" ]; then
-        ok "Config already exists — skipping (${CONFIG_FILE})"
+        ok "Config already exists — patching cenzontle state (${CONFIG_FILE})"
+        _patch_cenzontle_config "$CONFIG_FILE"
     else
         info "Writing system-adapted config..."
         _write_config "$CONFIG_FILE"
@@ -998,6 +1084,54 @@ configure_halcon() {
 
     # ── Classifier rules ─────────────────────────────────────────────────────
     _write_classifier_rules "$HALCON_DIR/classifier_rules.toml"
+
+    # ── Cenzontle SSO — interactive login if not yet configured ──────────────
+    # Skipped in CI, containers, or when token already present.
+    if [ "$_SYS_CENZONTLE_CONFIGURED" = "false" ] \
+        && [ "$_SYS_IS_CI" = "0" ] \
+        && [ "$_SYS_IS_CONTAINER" = "0" ] \
+        && [ -t 1 ]; then
+        printf "\n${CYAN}  Cenzontle AI${RESET} — enterprise platform (Zuclubit SSO)\n"
+        printf "  ${CYAN}→${RESET} Log in once; token stored securely in OS keystore.\n"
+        printf "  ${CYAN}→${RESET} Makes Cenzontle your default provider automatically.\n"
+        printf "\n"
+        printf "  Log in to Cenzontle now? [y/N] "
+        read -r _cz_ans 2>/dev/null || _cz_ans="n"
+        case "$_cz_ans" in
+            [Yy]*)
+                HALCON_BIN="${INSTALL_DIR:-$HOME/.local/bin}/halcon"
+                if [ -x "$HALCON_BIN" ]; then
+                    if "$HALCON_BIN" auth login cenzontle; then
+                        # Re-detect token after successful login
+                        _SYS_CENZONTLE_CONFIGURED="true"
+                        _SYS_DEFAULT_PROVIDER="cenzontle"
+                        _patch_cenzontle_config "$CONFIG_FILE"
+                        ok "Cenzontle: authenticated and set as default provider"
+                    else
+                        warn "Cenzontle login failed — run: halcon auth login cenzontle"
+                    fi
+                else
+                    warn "Binary not yet in PATH — run: halcon auth login cenzontle"
+                fi
+                ;;
+            *)
+                info "Skipping Cenzontle login — run: halcon auth login cenzontle"
+                ;;
+        esac
+    elif [ "$_SYS_CENZONTLE_CONFIGURED" = "true" ]; then
+        ok "Cenzontle: active (token found in $(
+            case "$_SYS_OS" in
+                Darwin) echo "macOS Keychain" ;;
+                *)
+                    if command -v secret-tool >/dev/null 2>&1; then
+                        echo "D-Bus Secret Service"
+                    else
+                        echo "XDG file store"
+                    fi
+                    ;;
+            esac
+        ))"
+    fi
 }
 
 _write_config() {
@@ -1010,11 +1144,12 @@ _write_config() {
 #  Generated by install.sh on $(date '+%Y-%m-%d %H:%M %Z')
 #
 #  System profile:
-#    OS   : ${_SYS_OS} ${_SYS_ARCH}
-#    CPU  : ${_SYS_CORES} cores
-#    RAM  : ${_SYS_RAM_GB} GB
-#    Disk : ${_SYS_DISK_GB} GB free
-#    GPU  : ${_SYS_HAS_GPU}  |  Ollama: ${_SYS_OLLAMA_ENABLED}
+#    OS       : ${_SYS_OS} ${_SYS_ARCH}
+#    CPU      : ${_SYS_CORES} cores
+#    RAM      : ${_SYS_RAM_GB} GB
+#    Disk     : ${_SYS_DISK_GB} GB free
+#    GPU      : ${_SYS_HAS_GPU}  |  Ollama: ${_SYS_OLLAMA_ENABLED}
+#    Cenzontle: ${_SYS_CENZONTLE_CONFIGURED}  (default_provider → ${_SYS_DEFAULT_PROVIDER})
 #
 #  Usage:
 #    halcon chat --tui --full --expert
@@ -1024,13 +1159,12 @@ _write_config() {
 #
 #  Add API keys:
 #    halcon auth login anthropic
-#    halcon auth login openai
-#    halcon auth login deepseek
+#    halcon auth login cenzontle   # Cenzontle SSO (Zuclubit enterprise)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── General ───────────────────────────────────────────────────────────────────
 [general]
-default_provider = "anthropic"
+default_provider = "${_SYS_DEFAULT_PROVIDER}"
 default_model    = "claude-sonnet-4-6"
 max_tokens       = 16000
 temperature      = 0.0
@@ -1407,9 +1541,11 @@ retry_base_delay_ms  = 1000
 ${_SYS_CLAUDE_SECTION}
 
 # ── Cenzontle — plataforma AI propia de Zuclubit (SSO OAuth 2.1 PKCE) ────────
-# Activa: halcon auth login cenzontle  o  export CENZONTLE_ACCESS_TOKEN
+# enabled = ${_SYS_CENZONTLE_CONFIGURED}  (auto-detected at install time)
+# To authenticate: halcon auth login cenzontle
+# Env var override: export CENZONTLE_ACCESS_TOKEN=<token>
 [models.providers.cenzontle]
-enabled       = false
+enabled       = ${_SYS_CENZONTLE_CONFIGURED}
 api_base      = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
 api_key_env   = "CENZONTLE_ACCESS_TOKEN"
 default_model = "claude-sonnet-4-6"
@@ -1489,6 +1625,63 @@ max_round_iterations         = 12
 # scopes        = ["openid", "profile", "email", "halcon:chat"]
 # redirect_port = 9876
 HALCON_CONFIG
+}
+
+# ─── Patch cenzontle into an existing config.toml ────────────────────────────
+# Called when config already exists (upgrade path).
+# Idempotent: safe to call multiple times.
+_patch_cenzontle_config() {
+    local cfg="$1"
+
+    if [ "$_SYS_CENZONTLE_CONFIGURED" = "true" ]; then
+        # Activate cenzontle: flip enabled = false → true
+        if grep -q "^\[models.providers.cenzontle\]" "$cfg" 2>/dev/null; then
+            # Use awk for portable in-place edit (sed -i differs between macOS/GNU)
+            awk '
+                /^\[models\.providers\.cenzontle\]/ { in_cz=1 }
+                in_cz && /^enabled[[:space:]]*=/ {
+                    print "enabled       = true"
+                    in_cz=0
+                    next
+                }
+                /^\[/ && !/^\[models\.providers\.cenzontle\]/ { in_cz=0 }
+                { print }
+            ' "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
+            ok "Cenzontle: enabled = true (patched in ${cfg})"
+        else
+            # Section missing — append it
+            cat >> "$cfg" << CZEOF
+
+# ── Cenzontle — added by installer upgrade (token detected) ───────────────────
+[models.providers.cenzontle]
+enabled       = true
+api_base      = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io"
+api_key_env   = "CENZONTLE_ACCESS_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+[models.providers.cenzontle.http]
+connect_timeout_secs = 10
+request_timeout_secs = 300
+max_retries          = 3
+retry_base_delay_ms  = 1000
+CZEOF
+            ok "Cenzontle: section added to ${cfg}"
+        fi
+
+        # Update default_provider if it's still anthropic
+        if grep -q '^default_provider.*=.*"anthropic"' "$cfg" 2>/dev/null; then
+            awk '{
+                if (/^default_provider[[:space:]]*=/) {
+                    print "default_provider = \"cenzontle\""
+                } else {
+                    print
+                }
+            }' "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
+            ok "default_provider → cenzontle"
+        fi
+    else
+        ok "Cenzontle: not configured — keeping existing config"
+    fi
 }
 
 _setup_agent_registry() {
