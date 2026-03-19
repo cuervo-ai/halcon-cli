@@ -4,7 +4,7 @@ use anyhow::Result;
 use halcon_core::traits::ModelProvider;
 use halcon_core::types::{AppConfig, HttpConfig, McpConfig, ModelInfo};
 use halcon_providers::{
-    AnthropicProvider, CenzonzleProvider, ClaudeCodeProvider, DeepSeekProvider, EchoProvider,
+    AnthropicProvider, CenzontleProvider, ClaudeCodeProvider, DeepSeekProvider, EchoProvider,
     GeminiProvider, OllamaProvider, OpenAICompatibleProvider, OpenAIProvider, ProviderRegistry,
 };
 use halcon_tools::ToolRegistry;
@@ -260,10 +260,18 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
     //
     // Token priority:
     // 1. CENZONTLE_ACCESS_TOKEN env var (CI/CD — also forces registration)
-    // 2. OS keychain (stored by `halcon login cenzontle`)
+    // 2. Credential store (written by `halcon auth login cenzontle`)
+    //    Backend is auto-selected by CredentialManager:
+    //      macOS    → Keychain
+    //      Linux+dbus → Secret Service
+    //      Linux headless → XDG file store (~/.local/share/halcon/halcon-cli.json)
     //
-    // Model discovery is deferred to an async initializer; the provider is only
-    // registered when the token resolves, so `is_available()` gates usage.
+    // IMPORTANT: credential store errors are logged explicitly (not silenced with
+    // .ok().flatten()) so that Linux users get actionable diagnostics instead of
+    // a mysterious "provider not registered" error.
+    //
+    // Model discovery is deferred to ensure_cenzontle_models() which runs after
+    // build_registry() in an async context.
     let cenzontle_env_token = std::env::var("CENZONTLE_ACCESS_TOKEN")
         .ok()
         .filter(|v| !v.is_empty());
@@ -279,7 +287,26 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
     if cenzontle_enabled {
         let cenzontle_token: Option<String> = cenzontle_env_token.or_else(|| {
             let keystore = halcon_auth::KeyStore::new("halcon-cli");
-            keystore.get_secret("cenzontle:access_token").ok().flatten()
+            tracing::debug!(
+                backend = keystore.backend_info(),
+                "Cenzontle: reading access token from credential store"
+            );
+            match keystore.get_secret("cenzontle:access_token") {
+                Ok(token) => token,
+                Err(e) => {
+                    // Surface the real error rather than silencing it.
+                    // On Linux headless this typically means D-Bus is absent and the
+                    // file store fallback also failed — surface actionable guidance.
+                    tracing::warn!(
+                        error = %e,
+                        backend = keystore.backend_info(),
+                        "Cenzontle: credential store read failed. \
+                         Workaround: set CENZONTLE_ACCESS_TOKEN env var, or run \
+                         `halcon auth login cenzontle` to re-authenticate."
+                    );
+                    None
+                }
+            }
         });
 
         // Resolve base URL: env var > config api_base > built-in default
@@ -294,7 +321,7 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
 
         if let Some(token) = cenzontle_token {
             // Build with empty model list — `ensure_cenzontle_models()` populates async.
-            let provider = CenzonzleProvider::new(token, base_url, Vec::new());
+            let provider = CenzontleProvider::new(token, base_url, Vec::new());
             registry.register(Arc::new(provider));
             tracing::debug!("Registered Cenzontle provider (token found, enabled=true)");
         } else {
@@ -328,13 +355,22 @@ pub async fn ensure_cenzontle_models(registry: &mut ProviderRegistry) {
         .filter(|v| !v.is_empty())
         .or_else(|| {
             let keystore = halcon_auth::KeyStore::new("halcon-cli");
-            keystore.get_secret("cenzontle:access_token").ok().flatten()
+            match keystore.get_secret("cenzontle:access_token") {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Cenzontle: credential store read failed during model refresh"
+                    );
+                    None
+                }
+            }
         });
 
     let Some(token) = token else { return };
     let base_url = std::env::var("CENZONTLE_BASE_URL").ok();
 
-    if let Some(provider) = CenzonzleProvider::from_token(token, base_url).await {
+    if let Some(provider) = CenzontleProvider::from_token(token, base_url).await {
         // Re-register with populated model list.
         registry.register(Arc::new(provider));
         tracing::debug!("Cenzontle provider models populated");

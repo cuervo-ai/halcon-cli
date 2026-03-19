@@ -23,6 +23,7 @@ uuid = { workspace = true }
 rand = { workspace = true }
 bytes = { workspace = true }
 libc = { workspace = true }
+regex = { workspace = true }
 # Cloud provider auth (optional features — see [features])
 aws-sigv4 = { workspace = true, optional = true }
 gcp_auth = { workspace = true, optional = true }

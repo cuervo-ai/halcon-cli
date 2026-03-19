@@ -156,9 +156,14 @@ pub async fn run(
         config.agent.limits.max_rounds = turns as usize;
     }
 
+    // Proactively refresh Cenzontle SSO token if near-expiry (< 5 min remaining).
+    // Must run before build_registry() so the refreshed token is read from the credential store.
+    let _ = super::sso::refresh_if_needed().await;
+
     // Build provider registry.
     let mut registry = super::provider_factory::build_registry(&config);
     super::provider_factory::ensure_local_fallback(&mut registry).await;
+    super::provider_factory::ensure_cenzontle_models(&mut registry).await;
 
     let (provider_str, model_str) = super::provider_factory::precheck_providers_explicit(
         &registry, provider, model, explicit_model,
