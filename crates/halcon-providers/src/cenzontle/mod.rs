@@ -27,16 +27,18 @@ use uuid::Uuid;
 use halcon_core::error::{HalconError, Result};
 use halcon_core::traits::ModelProvider;
 use halcon_core::types::{
-    HttpConfig, ModelChunk, ModelInfo, ModelRequest, TokenCost, ToolFormat,
+    HttpConfig, ModelChunk, ModelInfo, ModelRequest, TokenCost, TokenizerHint, ToolFormat,
 };
 
+use crate::http::{backoff_delay_with_jitter, is_retryable_status, parse_retry_after};
 use crate::openai_compat::types::StreamOptions;
 use crate::openai_compat::OpenAICompatibleProvider;
 use types::{CenzontleModel, CenzontleModelsResponse};
 
 /// Production Cenzontle backend on Azure Container Apps.
 /// Override with CENZONTLE_BASE_URL env var or provider config api_base.
-pub const DEFAULT_BASE_URL: &str = "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io";
+pub const DEFAULT_BASE_URL: &str =
+    "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io";
 const PROVIDER_NAME: &str = "cenzontle";
 
 /// Tier → context window / max output heuristics (Cenzontle doesn't always return these).
@@ -60,8 +62,33 @@ fn tier_max_output(tier: Option<&str>) -> u32 {
     }
 }
 
+/// Infer the tokenizer family from a Cenzontle model ID string.
+///
+/// Cenzontle proxies models from multiple upstream providers. We detect the
+/// family by model ID prefix so callers can use accurate token estimates for
+/// context budgeting.
+fn tokenizer_hint_for_model(model_id: &str) -> TokenizerHint {
+    let m = model_id.to_ascii_lowercase();
+    if m.contains("claude") {
+        TokenizerHint::ClaudeBpe
+    } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        TokenizerHint::TiktokenCl100k
+    } else if m.contains("deepseek") {
+        TokenizerHint::DeepSeekBpe
+    } else if m.contains("gemini") {
+        TokenizerHint::GeminiSentencePiece
+    } else {
+        // Conservative fallback — 4.0 chars/token matches TiktokenCl100k.
+        TokenizerHint::Unknown
+    }
+}
+
 /// Cenzontle AI platform provider.
-pub struct CenzonzleProvider {
+///
+/// NOTE: The original struct was named `CenzonzleProvider` (double-z typo).
+/// It is now `CenzontleProvider`. A type alias at the bottom of this file
+/// preserves the old name for any external code that references it directly.
+pub struct CenzontleProvider {
     /// reqwest client for API calls.
     client: reqwest::Client,
     /// Bearer JWT access token (from SSO flow or env var).
@@ -81,16 +108,16 @@ pub struct CenzonzleProvider {
     session_id: String,
 }
 
-impl std::fmt::Debug for CenzonzleProvider {
+impl std::fmt::Debug for CenzontleProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CenzonzleProvider")
+        f.debug_struct("CenzontleProvider")
             .field("base_url", &self.base_url)
             .field("access_token", &"[REDACTED]")
             .finish()
     }
 }
 
-impl CenzonzleProvider {
+impl CenzontleProvider {
     /// Create from an access token and a list of pre-fetched models.
     ///
     /// Prefer `from_token()` which calls the API to discover real models.
@@ -101,6 +128,15 @@ impl CenzonzleProvider {
 
         // Force HTTP/1.1 so the server sends individual SSE frames instead of
         // batching them in a single HTTP/2 DATA frame (which breaks eventsource parsing).
+        //
+        // ROOT CAUSE: The Cenzontle backend flushes SSE frames correctly on HTTP/1.1
+        // but Azure App Gateway buffers HTTP/2 DATA frames until the response
+        // body closes, delivering all SSE events in one batch.  HTTP/1.1 forces
+        // chunked-encoding flush semantics that proxies cannot buffer.
+        //
+        // LONG-TERM FIX: Add `X-Accel-Buffering: no` + `flush()` calls on the
+        // backend and configure App Gateway to pass-through streaming responses.
+        // Once that is deployed, remove `.http1_only()` from this builder.
         let client = reqwest::Client::builder()
             .http1_only()
             .connect_timeout(Duration::from_secs(http_config.connect_timeout_secs))
@@ -158,7 +194,6 @@ impl CenzonzleProvider {
 
         Some(Self::new(access_token, Some(base), models))
     }
-
 }
 
 /// Fetch the model list from Cenzontle `GET /v1/llm/models`.
@@ -195,7 +230,7 @@ async fn fetch_models(
     let models = body
         .data
         .into_iter()
-        .map(|m| model_info_from_cenzontle(m))
+        .map(model_info_from_cenzontle)
         .collect();
 
     Ok(models)
@@ -213,7 +248,7 @@ fn model_info_from_cenzontle(m: CenzontleModel) -> ModelInfo {
         supports_tools: m.supports_tools,
         supports_vision: m.supports_vision,
         supports_reasoning: false,
-        cost_per_input_token: 0.0,  // billed through Cenzontle account
+        cost_per_input_token: 0.0, // billed through Cenzontle account
         cost_per_output_token: 0.0,
     }
 }
@@ -221,10 +256,10 @@ fn model_info_from_cenzontle(m: CenzontleModel) -> ModelInfo {
 // Token loading from OS keychain is intentionally NOT done here.
 // halcon-providers does not depend on halcon-auth.
 // The provider_factory (halcon-cli) is responsible for resolving the token
-// from env var or keychain before calling CenzonzleProvider::new().
+// from env var or keychain before calling CenzontleProvider::new().
 
 #[async_trait]
-impl ModelProvider for CenzonzleProvider {
+impl ModelProvider for CenzontleProvider {
     fn name(&self) -> &str {
         PROVIDER_NAME
     }
@@ -237,20 +272,30 @@ impl ModelProvider for CenzonzleProvider {
         ToolFormat::OpenAIFunctionObject
     }
 
+    /// Return the tokenizer family hint derived from the first registered model.
+    ///
+    /// Cenzontle is a multi-provider gateway (Anthropic, OpenAI, DeepSeek, Gemini).
+    /// We detect the family by model ID convention so callers can budget tokens
+    /// accurately without hard-coding provider-specific token counts.
+    fn tokenizer_hint(&self) -> TokenizerHint {
+        self.models
+            .first()
+            .map(|m| tokenizer_hint_for_model(&m.id))
+            .unwrap_or(TokenizerHint::Unknown)
+    }
+
     #[instrument(skip_all, fields(provider = "cenzontle", model = %request.model, msgs = request.messages.len()))]
     async fn invoke(
         &self,
         request: &ModelRequest,
     ) -> Result<BoxStream<'static, Result<ModelChunk>>> {
         // Build the OpenAI-compatible request body with SSE streaming enabled.
-        // HTTP/1.1 (forced in the client) ensures each SSE event arrives as an
-        // individual frame — on HTTP/2 the backend may batch all events in one DATA frame
-        // which breaks eventsource_stream parsing.
         let mut chat_request = self.inner.build_request(request);
         chat_request.stream = true;
         chat_request.stream_options = Some(StreamOptions { include_usage: true });
 
-        // Build the halcon context header so Cenzontle can enrich the request via RAG/CRM.
+        // Build the halcon context header so Cenzontle can enrich the request
+        // with RAG/session correlation.
         let halcon_ctx = {
             let tool_names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
             let cwd = std::env::current_dir()
@@ -269,17 +314,22 @@ impl ModelProvider for CenzonzleProvider {
 
         let max_retries = self.http_config.max_retries;
         let timeout_secs = self.http_config.request_timeout_secs;
+        // Unique identifier for this request — propagated so Cenzontle logs
+        // can be correlated with client-side traces.
+        let request_id = Uuid::new_v4().to_string();
 
         debug!(
             model = %chat_request.model,
             messages = chat_request.messages.len(),
             url = %self.chat_url,
+            request_id = %request_id,
             "Cenzontle: invoking chat API (SSE streaming)"
         );
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay = crate::http::backoff_delay(1000, attempt);
+                let delay = backoff_delay_with_jitter(1000, attempt);
+                debug!(attempt, delay_ms = delay.as_millis(), "Cenzontle: retry backoff");
                 tokio::time::sleep(delay).await;
             }
 
@@ -291,6 +341,7 @@ impl ModelProvider for CenzonzleProvider {
                     .post(&self.chat_url)
                     .bearer_auth(&self.access_token)
                     .header("x-halcon-context", &halcon_ctx)
+                    .header("x-request-id", &request_id)
                     .json(&chat_request)
                     .send(),
             )
@@ -300,7 +351,7 @@ impl ModelProvider for CenzonzleProvider {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(e)) if e.is_connect() => {
                     if attempt < max_retries {
-                        warn!(attempt = attempt + 1, "Cenzontle: connection error, retrying");
+                        warn!(attempt = attempt + 1, error = %e, "Cenzontle: connection error, retrying");
                         continue;
                     }
                     return Err(HalconError::ConnectionError {
@@ -327,6 +378,8 @@ impl ModelProvider for CenzonzleProvider {
             };
 
             let status = response.status();
+
+            // Non-retryable auth errors: return immediately.
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(HalconError::ApiError {
                     message: "Cenzontle: access token expired or invalid. Run `halcon login cenzontle` to refresh.".to_string(),
@@ -339,6 +392,36 @@ impl ModelProvider for CenzonzleProvider {
                     status: Some(403),
                 });
             }
+
+            // Retryable server-side errors (429 rate-limit, 500/502/503/529).
+            // Honour the Retry-After header when the server sends one (429).
+            if is_retryable_status(status.as_u16()) {
+                if attempt < max_retries {
+                    let retry_delay = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        // Prefer server-specified wait; fall back to exponential backoff.
+                        parse_retry_after(response.headers())
+                            .map(Duration::from_secs)
+                            .unwrap_or_else(|| backoff_delay_with_jitter(2000, attempt))
+                    } else {
+                        backoff_delay_with_jitter(1000, attempt)
+                    };
+                    warn!(
+                        status = status.as_u16(),
+                        attempt = attempt + 1,
+                        delay_ms = retry_delay.as_millis(),
+                        "Cenzontle: retryable error, backing off"
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                }
+                let code = status.as_u16();
+                let body = response.text().await.unwrap_or_default();
+                return Err(HalconError::ApiError {
+                    message: format!("Cenzontle HTTP {code} after {max_retries} retries: {body}"),
+                    status: Some(code),
+                });
+            }
+
             if !status.is_success() {
                 let code = status.as_u16();
                 let body = response.text().await.unwrap_or_default();
@@ -348,7 +431,7 @@ impl ModelProvider for CenzonzleProvider {
                 });
             }
 
-            debug!(url = %self.chat_url, "Cenzontle: SSE stream connected");
+            debug!(url = %self.chat_url, request_id = %request_id, "Cenzontle: SSE stream connected");
 
             // Hand off the response body to the OpenAI-compat SSE parser.
             return Ok(OpenAICompatibleProvider::build_sse_stream(
@@ -381,10 +464,94 @@ impl ModelProvider for CenzonzleProvider {
     }
 }
 
+/// Backward-compatibility alias.
+///
+/// The original name `CenzonzleProvider` had a double-z typo.  All new code
+/// should use `CenzontleProvider`.  This alias keeps existing code that imports
+/// `CenzonzleProvider` compiling without changes.
+#[deprecated(since = "0.3.6", note = "Use `CenzontleProvider` (single z)")]
+pub type CenzonzleProvider = CenzontleProvider;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use types::{CenzontleModel, CenzontleModelsResponse};
+
+    // ── tokenizer_hint ───────────────────────────────────────────────────────
+
+    #[test]
+    fn tokenizer_hint_claude_model() {
+        let p = CenzontleProvider::new(
+            "tok".to_string(),
+            None,
+            vec![ModelInfo {
+                id: "claude-sonnet-4-6".to_string(),
+                name: "Claude Sonnet 4.6".to_string(),
+                provider: "cenzontle".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 16_000,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_vision: true,
+                supports_reasoning: false,
+                cost_per_input_token: 0.0,
+                cost_per_output_token: 0.0,
+            }],
+        );
+        assert_eq!(p.tokenizer_hint(), TokenizerHint::ClaudeBpe);
+    }
+
+    #[test]
+    fn tokenizer_hint_gpt_model() {
+        let p = CenzontleProvider::new(
+            "tok".to_string(),
+            None,
+            vec![ModelInfo {
+                id: "gpt-4o-mini".to_string(),
+                name: "GPT-4o Mini".to_string(),
+                provider: "cenzontle".to_string(),
+                context_window: 128_000,
+                max_output_tokens: 16_384,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_vision: false,
+                supports_reasoning: false,
+                cost_per_input_token: 0.0,
+                cost_per_output_token: 0.0,
+            }],
+        );
+        assert_eq!(p.tokenizer_hint(), TokenizerHint::TiktokenCl100k);
+    }
+
+    #[test]
+    fn tokenizer_hint_empty_models_is_unknown() {
+        let p = CenzontleProvider::new("tok".to_string(), None, Vec::new());
+        assert_eq!(p.tokenizer_hint(), TokenizerHint::Unknown);
+    }
+
+    #[test]
+    fn tokenizer_hint_for_model_deepseek() {
+        assert_eq!(
+            tokenizer_hint_for_model("deepseek-chat"),
+            TokenizerHint::DeepSeekBpe
+        );
+    }
+
+    #[test]
+    fn tokenizer_hint_for_model_gemini() {
+        assert_eq!(
+            tokenizer_hint_for_model("gemini-2.0-flash"),
+            TokenizerHint::GeminiSentencePiece
+        );
+    }
+
+    #[test]
+    fn tokenizer_hint_for_model_unknown() {
+        assert_eq!(
+            tokenizer_hint_for_model("llama3.2"),
+            TokenizerHint::Unknown
+        );
+    }
 
     // ── model_info_from_cenzontle ────────────────────────────────────────────
 
@@ -468,21 +635,21 @@ mod tests {
 
     #[test]
     fn new_sets_correct_chat_url() {
-        let p = CenzonzleProvider::new("tok".to_string(), None, Vec::new());
+        let p = CenzontleProvider::new("tok".to_string(), None, Vec::new());
         assert_eq!(p.chat_url, format!("{}/v1/llm/chat", DEFAULT_BASE_URL));
     }
 
     #[test]
     fn new_with_custom_base_url() {
         let custom = "http://localhost:3000".to_string();
-        let p = CenzonzleProvider::new("tok".to_string(), Some(custom.clone()), Vec::new());
+        let p = CenzontleProvider::new("tok".to_string(), Some(custom.clone()), Vec::new());
         assert_eq!(p.base_url, custom);
         assert_eq!(p.chat_url, "http://localhost:3000/v1/llm/chat");
     }
 
     #[test]
     fn provider_name_is_cenzontle() {
-        let p = CenzonzleProvider::new("tok".to_string(), None, Vec::new());
+        let p = CenzontleProvider::new("tok".to_string(), None, Vec::new());
         assert_eq!(p.name(), "cenzontle");
     }
 
@@ -501,24 +668,22 @@ mod tests {
             cost_per_input_token: 0.0,
             cost_per_output_token: 0.0,
         }];
-        let p = CenzonzleProvider::new("tok".to_string(), None, models.clone());
+        let p = CenzontleProvider::new("tok".to_string(), None, models.clone());
         assert_eq!(p.supported_models().len(), 1);
         assert_eq!(p.supported_models()[0].id, "gpt-4o-mini");
     }
 
     #[test]
     fn empty_token_makes_from_token_return_none() {
-        // Can't do async here without tokio, but we can verify the empty-token guard
-        // by inspecting the logic path: from_token() returns None immediately if empty.
-        // We test the sync equivalent used by the factory.
+        // The empty-token guard fires synchronously before any async work.
         let empty = String::new();
-        assert!(empty.is_empty()); // guard condition
+        assert!(empty.is_empty());
     }
 
     #[test]
     fn tool_format_is_openai_function_object() {
         use halcon_core::types::ToolFormat;
-        let p = CenzonzleProvider::new("tok".to_string(), None, Vec::new());
+        let p = CenzontleProvider::new("tok".to_string(), None, Vec::new());
         assert!(matches!(p.tool_format(), ToolFormat::OpenAIFunctionObject));
     }
 
@@ -560,8 +725,8 @@ mod tests {
         let resp: CenzontleModelsResponse = serde_json::from_str(json).unwrap();
         let m = &resp.data[0];
         assert!(m.supports_streaming); // default_true
-        assert!(m.supports_tools);     // default_true
-        assert!(!m.supports_vision);   // default false
+        assert!(m.supports_tools); // default_true
+        assert!(!m.supports_vision); // default false
     }
 
     #[test]

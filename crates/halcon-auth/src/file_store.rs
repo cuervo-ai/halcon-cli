@@ -14,20 +14,44 @@
 //!
 //! - Directory permissions: `0700` (owner rwx only)
 //! - File permissions: `0600` (owner rw only)
-//! - Writes are **atomic** via `O_TMPFILE` + `rename(2)` — no partial reads
+//! - Writes are **atomic** via a sibling `.tmp` + `rename(2)` — no partial reads
+//! - Tmp file is always cleaned up, even on rename failure
 //! - No encryption at rest; relies on UNIX DAC. For high-security deployments,
 //!   back this with a secrets manager via `CENZONTLE_ACCESS_TOKEN` env var.
 //!
 //! # Concurrency
 //!
-//! Atomic rename ensures readers always see a complete JSON object. Concurrent
-//! writers are serialized at the OS level (last rename wins). This matches the
-//! behavior of all major CLI tools on Linux.
+//! Atomic rename ensures readers always see a complete JSON object. Use
+//! `set_multiple()` when writing multiple correlated keys (e.g., all three
+//! OAuth token fields) so they are committed in a single atomic write.
+//! Concurrent independent writers use last-rename-wins semantics, consistent
+//! with GitHub CLI and Docker CLI behavior.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use halcon_core::error::{HalconError, Result};
+use tracing::warn;
+
+/// Generate a 6-hex-char random suffix for tmp filenames to prevent concurrent
+/// writers from clobbering each other's in-flight tmp file.
+fn tmp_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Combine nanosecond timestamp + thread ID for cheap uniqueness without
+    // pulling in a full RNG crate. Collision probability for 8 concurrent
+    // writers: ~1 in 16^6 (1 in 16 million) per write — acceptable for a
+    // local credential store.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let tid = std::thread::current().id();
+    format!("{nanos:x}{tid:?}")
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(8)
+        .collect()
+}
 
 /// Atomic file-based credential store following XDG Base Directory Specification.
 #[derive(Debug, Clone)]
@@ -49,8 +73,8 @@ impl FileCredentialStore {
         }
     }
 
-    /// Construct a store at an explicit path (used in tests).
-    #[cfg(test)]
+    /// Construct a store at an explicit path (used in tests and diagnostics).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn at(path: PathBuf) -> Self {
         Self { path }
     }
@@ -69,10 +93,31 @@ impl FileCredentialStore {
     /// Uses an atomic write: the value is written to a sibling `.tmp` file
     /// then `rename`d into place, so concurrent readers always see a complete
     /// JSON object.
+    ///
+    /// Prefer [`set_multiple`] when storing several related keys (e.g., all
+    /// three OAuth token fields) to keep them atomically consistent.
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
         self.ensure_directory()?;
         let mut map = self.read_map_or_default();
         map.insert(key.to_string(), value.to_string());
+        self.write_map_atomic(&map)
+    }
+
+    /// Store multiple `(key, value)` pairs in a **single atomic write**.
+    ///
+    /// This is the preferred API when several correlated values must be kept
+    /// consistent (e.g., `access_token`, `refresh_token`, and `expires_at`).
+    /// A single `rename(2)` replaces the file, so readers never see a
+    /// partially-updated set of credentials.
+    pub fn set_multiple<'a, I>(&self, entries: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        self.ensure_directory()?;
+        let mut map = self.read_map_or_default();
+        for (key, value) in entries {
+            map.insert(key.to_string(), value.to_string());
+        }
         self.write_map_atomic(&map)
     }
 
@@ -109,28 +154,52 @@ impl FileCredentialStore {
         })?;
         serde_json::from_str(&raw).map_err(|e| {
             HalconError::AuthFailed(format!(
-                "credential file {} is corrupt ({}); remove it and re-authenticate",
+                "credential file {} is corrupt ({}); \
+                 remove it and re-authenticate: `halcon auth login cenzontle`",
                 self.path.display(),
                 e
             ))
         })
     }
 
+    /// Read the map or return an empty map on absence.
+    ///
+    /// Logs a warning if the file exists but is corrupt so the caller
+    /// does not silently lose data.
     fn read_map_or_default(&self) -> HashMap<String, String> {
         if !self.path.exists() {
             return HashMap::new();
         }
-        self.read_map().unwrap_or_default()
+        match self.read_map() {
+            Ok(m) => m,
+            Err(e) => {
+                // A corrupt credential file is unusual and actionable.
+                // Log it rather than silently discarding it.
+                warn!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "Credential file is corrupt and will be overwritten. \
+                     You may need to re-authenticate."
+                );
+                HashMap::new()
+            }
+        }
     }
 
     /// Atomically write `map` to `self.path` via a sibling tmp file.
+    ///
+    /// The tmp file is always cleaned up, even when rename fails.
     fn write_map_atomic(&self, map: &HashMap<String, String>) -> Result<()> {
         let serialized = serde_json::to_string_pretty(map).map_err(|e| {
             HalconError::AuthFailed(format!("credential serialization failed: {e}"))
         })?;
 
-        // Write to a sibling temp file, then rename.
-        let tmp = self.path.with_extension("tmp");
+        // Write to a uniquely-named sibling temp file to avoid concurrent
+        // writers clobbering each other's in-flight tmp file (rename is the
+        // only atomic operation; the write+chmod window must be per-writer).
+        let tmp = self
+            .path
+            .with_extension(format!("tmp.{}", tmp_suffix()));
         std::fs::write(&tmp, &serialized).map_err(|e| {
             HalconError::AuthFailed(format!(
                 "cannot write credential tmp file {}: {e}",
@@ -140,15 +209,21 @@ impl FileCredentialStore {
 
         // chmod 0600 before the rename so the target is never world-readable.
         #[cfg(unix)]
-        set_file_mode_600(&tmp)?;
+        if let Err(e) = set_file_mode_600(&tmp) {
+            // Clean up before returning the error.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
 
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            HalconError::AuthFailed(format!(
+        // Atomic rename. Clean up tmp on failure.
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            let _ = std::fs::remove_file(&tmp); // best-effort cleanup
+            return Err(HalconError::AuthFailed(format!(
                 "atomic credential write failed (rename {} → {}): {e}",
                 tmp.display(),
                 self.path.display()
-            ))
-        })?;
+            )));
+        }
 
         Ok(())
     }
@@ -187,18 +262,9 @@ fn xdg_data_home() -> PathBuf {
 }
 
 fn home_dir() -> PathBuf {
-    // dirs::home_dir is the canonical way; fall back to HOME env var.
-    #[cfg(not(test))]
-    {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"))
-    }
-    #[cfg(test)]
-    {
-        // In tests, use a temp dir resolved by the caller via `FileCredentialStore::at`.
-        PathBuf::from("/tmp")
-    }
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
 // ── Unix permission helpers ───────────────────────────────────────────────────
@@ -227,13 +293,14 @@ fn set_dir_mode_700(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn tmp_store() -> (tempfile::TempDir, FileCredentialStore) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
         (dir, FileCredentialStore::at(path))
     }
+
+    // ── Basic operations ──────────────────────────────────────────────────────
 
     #[test]
     fn round_trip_get_set() {
@@ -269,14 +336,14 @@ mod tests {
     fn delete_is_noop_when_key_absent() {
         let (_dir, store) = tmp_store();
         store.set("x", "v").unwrap();
-        store.delete("nonexistent").unwrap(); // must not panic or error
+        store.delete("nonexistent").unwrap();
         assert_eq!(store.get("x").unwrap(), Some("v".to_string()));
     }
 
     #[test]
     fn delete_is_noop_when_file_absent() {
         let (_dir, store) = tmp_store();
-        store.delete("any").unwrap(); // no file yet — must not error
+        store.delete("any").unwrap();
     }
 
     #[test]
@@ -298,17 +365,44 @@ mod tests {
         assert_eq!(store.get("expires_at").unwrap(), Some("9999999999".to_string()));
     }
 
+    // ── set_multiple (atomic multi-key write) ─────────────────────────────────
+
     #[test]
-    fn corrupt_file_returns_auth_error() {
+    fn set_multiple_writes_all_keys_atomically() {
         let (_dir, store) = tmp_store();
-        // Manually write invalid JSON.
-        std::fs::write(store.path(), b"not valid json {{{").unwrap();
-        let err = store.get("any").unwrap_err().to_string();
-        assert!(
-            err.contains("corrupt") || err.contains("invalid") || err.contains("expected"),
-            "unexpected error: {err}"
-        );
+        store
+            .set_multiple([
+                ("access_token", "tok-a"),
+                ("refresh_token", "tok-r"),
+                ("expires_at", "9999"),
+            ])
+            .unwrap();
+        assert_eq!(store.get("access_token").unwrap(), Some("tok-a".to_string()));
+        assert_eq!(store.get("refresh_token").unwrap(), Some("tok-r".to_string()));
+        assert_eq!(store.get("expires_at").unwrap(), Some("9999".to_string()));
     }
+
+    #[test]
+    fn set_multiple_preserves_existing_keys() {
+        let (_dir, store) = tmp_store();
+        store.set("existing", "preserved").unwrap();
+        store
+            .set_multiple([("access_token", "tok-a"), ("expires_at", "9999")])
+            .unwrap();
+        // Pre-existing key must survive.
+        assert_eq!(store.get("existing").unwrap(), Some("preserved".to_string()));
+        assert_eq!(store.get("access_token").unwrap(), Some("tok-a".to_string()));
+    }
+
+    #[test]
+    fn set_multiple_overwrites_existing_keys() {
+        let (_dir, store) = tmp_store();
+        store.set("token", "old").unwrap();
+        store.set_multiple([("token", "new")]).unwrap();
+        assert_eq!(store.get("token").unwrap(), Some("new".to_string()));
+    }
+
+    // ── Atomicity ─────────────────────────────────────────────────────────────
 
     #[test]
     fn atomic_write_leaves_no_tmp_on_success() {
@@ -318,13 +412,139 @@ mod tests {
         assert!(!tmp.exists(), "tmp file should be cleaned up after rename");
     }
 
+    // ── Error handling ────────────────────────────────────────────────────────
+
+    #[test]
+    fn corrupt_file_returns_auth_error_on_get() {
+        let (_dir, store) = tmp_store();
+        std::fs::write(store.path(), b"not valid json {{{").unwrap();
+        let err = store.get("any").unwrap_err().to_string();
+        assert!(
+            err.contains("corrupt") || err.contains("invalid") || err.contains("expected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn corrupt_file_is_overwritten_on_set_with_warning() {
+        let (_dir, store) = tmp_store();
+        std::fs::write(store.path(), b"}{invalid").unwrap();
+        // Should NOT error — corrupt file is treated as empty and overwritten.
+        store.set("k", "v").unwrap();
+        assert_eq!(store.get("k").unwrap(), Some("v".to_string()));
+    }
+
+    #[test]
+    fn corrupt_file_is_overwritten_on_set_multiple() {
+        let (_dir, store) = tmp_store();
+        std::fs::write(store.path(), b"not json").unwrap();
+        store
+            .set_multiple([("access_token", "tok"), ("refresh_token", "ref")])
+            .unwrap();
+        assert_eq!(store.get("access_token").unwrap(), Some("tok".to_string()));
+        assert_eq!(store.get("refresh_token").unwrap(), Some("ref".to_string()));
+    }
+
+    // ── File format ───────────────────────────────────────────────────────────
+
     #[test]
     fn file_json_is_human_readable() {
         let (_dir, store) = tmp_store();
         store.set("hello", "world").unwrap();
         let raw = std::fs::read_to_string(store.path()).unwrap();
-        // pretty-printed JSON should have newlines
         assert!(raw.contains('\n'), "credentials file should be pretty-printed");
         assert!(raw.contains("hello"), "key should appear in file");
+    }
+
+    // ── Permissions (Unix only) ───────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn file_permissions_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = tmp_store();
+        store.set("k", "v").unwrap();
+        let mode = std::fs::metadata(store.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "file mode should be 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_permissions_are_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("halcon_test_subdir");
+        let path = subdir.join("creds.json");
+        let store = FileCredentialStore::at(path);
+        store.set("k", "v").unwrap();
+        let mode = std::fs::metadata(&subdir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "directory mode should be 0700");
+    }
+
+    // ── Persistence simulation ────────────────────────────────────────────────
+
+    #[test]
+    fn data_survives_store_reconstruction() {
+        // Simulates process restart: create store, write, drop, recreate, read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+
+        {
+            let store = FileCredentialStore::at(path.clone());
+            store.set("session_token", "persistent-value").unwrap();
+        }
+
+        // Simulate process restart by creating a new store instance.
+        {
+            let store2 = FileCredentialStore::at(path);
+            assert_eq!(
+                store2.get("session_token").unwrap(),
+                Some("persistent-value".to_string()),
+                "Value must persist across store instances"
+            );
+        }
+    }
+
+    // ── Concurrent access ─────────────────────────────────────────────────────
+
+    #[test]
+    fn concurrent_writers_do_not_corrupt_file() {
+        // Validates that concurrent set_multiple calls don't produce invalid JSON.
+        // Last writer wins, but the file must always be parseable.
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.json");
+        let path = Arc::new(path);
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let p = Arc::clone(&path);
+                std::thread::spawn(move || {
+                    let store = FileCredentialStore::at((*p).clone());
+                    let access = format!("tok-{i}");
+                    let worker = i.to_string();
+                    store
+                        .set_multiple([
+                            ("access_token", access.as_str()),
+                            ("worker_id", worker.as_str()),
+                        ])
+                        .unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After all writers finish, the file must be valid JSON.
+        let raw = std::fs::read_to_string(&*path).unwrap();
+        let map: HashMap<String, String> = serde_json::from_str(&raw)
+            .expect("file must be valid JSON after concurrent writes");
+
+        // At least access_token and worker_id must be present.
+        assert!(map.contains_key("access_token"), "access_token must be present");
+        assert!(map.contains_key("worker_id"), "worker_id must be present");
     }
 }

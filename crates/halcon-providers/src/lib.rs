@@ -32,6 +32,8 @@ pub mod vertex;
 pub mod azure_foundry;
 // US-sso: Cenzontle AI platform provider (OAuth 2.1 PKCE via Zuclubit SSO)
 pub mod cenzontle;
+// Intelligent model routing (intent-based, cost-aware, fallback chain)
+pub mod router;
 
 pub use anthropic::AnthropicProvider;
 pub use azure_foundry::AzureFoundryProvider;
@@ -42,8 +44,11 @@ pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openai_compat::OpenAICompatibleProvider;
-pub use cenzontle::CenzonzleProvider;
+pub use cenzontle::CenzontleProvider;
+#[allow(deprecated)]
+pub use cenzontle::CenzonzleProvider; // backward-compat alias — use CenzontleProvider
 pub use registry::ProviderRegistry;
+pub use router::{IntentClassifier, IntelligentRouter, RoutingDecision, TaskIntent};
 pub use replay::ReplayProvider;
 
 #[cfg(feature = "bedrock")]

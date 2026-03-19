@@ -23,6 +23,11 @@ rand = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# Enable test helper constructors (e.g. FileCredentialStore::at) in integration
+# tests and benchmarks outside this crate.
+test-support = []
+
 [dev-dependencies]
 wiremock = { workspace = true }
 tokio = { workspace = true }

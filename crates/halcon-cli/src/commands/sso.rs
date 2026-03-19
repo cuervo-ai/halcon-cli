@@ -181,10 +181,14 @@ pub async fn refresh_if_needed() -> bool {
         .unwrap_or_default()
         .as_secs();
 
-    // Refresh if expiring within 5 minutes or already expired.
+    // Refresh if expiring within 5 minutes, already expired, or expiry is
+    // unknown (which can occur after a failed `store_tokens` call that wrote
+    // the access token but not the expiry).  Attempting a refresh in the
+    // unknown-expiry case is safe: if the token is still valid the refresh
+    // endpoint will simply return a new one.
     let needs_refresh = match expires_at {
         Some(exp) => exp < now + 300,
-        None => false, // No expiry recorded — assume still valid.
+        None => true,
     };
 
     if !needs_refresh {
@@ -208,7 +212,7 @@ pub async fn refresh_if_needed() -> bool {
 
     match do_refresh(&sso_url, &refresh_token).await {
         Ok((access_token, new_refresh, expires_in)) => {
-            let outcome = store_tokens(&access_token, new_refresh.as_deref(), expires_in);
+            let (outcome, _backend_info) = store_tokens(&access_token, new_refresh.as_deref(), expires_in);
             match outcome {
                 StoreOutcome::Persisted => {
                     tracing::info!("Cenzontle: access token refreshed and persisted");
@@ -275,8 +279,8 @@ async fn login_pkce(sso_url: &str, cenzontle_url: &str) -> Result<()> {
         exchange_code(sso_url, &code, &redirect_uri, &code_verifier).await?;
 
     // 7. Store tokens — report outcome clearly.
-    let outcome = store_tokens(&access_token, refresh_token.as_deref(), expires_in);
-    print_store_outcome(&outcome, &access_token);
+    let (outcome, backend_info) = store_tokens(&access_token, refresh_token.as_deref(), expires_in);
+    print_store_outcome(&outcome, &access_token, &backend_info);
 
     // 8. Show available models.
     show_available_models(cenzontle_url, &access_token).await;
@@ -330,8 +334,8 @@ async fn login_client_credentials(
     let refresh_token = token_resp["refresh_token"].as_str().map(String::from);
     let expires_in = token_resp["expires_in"].as_u64().unwrap_or(900);
 
-    let outcome = store_tokens(&access_token, refresh_token.as_deref(), expires_in);
-    print_store_outcome(&outcome, &access_token);
+    let (outcome, backend_info) = store_tokens(&access_token, refresh_token.as_deref(), expires_in);
+    print_store_outcome(&outcome, &access_token, &backend_info);
     show_available_models(cenzontle_url, &access_token).await;
 
     Ok(())
@@ -435,55 +439,63 @@ async fn do_refresh(
 
 /// Write tokens to the credential store and return the storage outcome.
 ///
+/// All tokens are written atomically via `set_multiple_secrets` — on the Linux
+/// file-store backend this is a single `rename(2)` that prevents partial-write
+/// races where the access token exists but the expiry does not.
+///
 /// This function **never panics and never returns an error** — credential store
 /// failures are captured in [`StoreOutcome::NotPersisted`] so the caller can
 /// display a user-friendly warning without aborting the login flow.
-fn store_tokens(access_token: &str, refresh_token: Option<&str>, expires_in: u64) -> StoreOutcome {
+fn store_tokens(
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_in: u64,
+) -> (StoreOutcome, String) {
     let keystore = KeyStore::new(SERVICE_NAME);
-    let mut failed: Vec<String> = Vec::new();
-
-    if let Err(e) = keystore.set_secret(KEY_ACCESS_TOKEN, access_token) {
-        tracing::warn!(error = %e, key = KEY_ACCESS_TOKEN, "Failed to store Cenzontle access token");
-        failed.push(format!("{KEY_ACCESS_TOKEN}: {e}"));
-    }
-
-    if let Some(rt) = refresh_token {
-        if let Err(e) = keystore.set_secret(KEY_REFRESH_TOKEN, rt) {
-            tracing::warn!(error = %e, key = KEY_REFRESH_TOKEN, "Failed to store Cenzontle refresh token");
-            failed.push(format!("{KEY_REFRESH_TOKEN}: {e}"));
-        }
-    }
+    let backend_info = keystore.backend_info();
 
     let expires_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
         + expires_in;
+    let expires_at_str = expires_at.to_string();
 
-    if let Err(e) = keystore.set_secret(KEY_EXPIRES_AT, &expires_at.to_string()) {
-        tracing::warn!(error = %e, key = KEY_EXPIRES_AT, "Failed to store Cenzontle token expiry");
-        // Expiry failure alone does not block authentication.
+    // Build the entry list for the atomic write.
+    let mut entries: Vec<(&str, &str)> = vec![
+        (KEY_ACCESS_TOKEN, access_token),
+        (KEY_EXPIRES_AT, &expires_at_str),
+    ];
+    if let Some(rt) = refresh_token {
+        entries.push((KEY_REFRESH_TOKEN, rt));
     }
 
-    if failed.is_empty() {
-        tracing::debug!(
-            backend = keystore.backend_info(),
-            "Cenzontle tokens stored successfully"
-        );
-        StoreOutcome::Persisted
-    } else {
-        StoreOutcome::NotPersisted {
-            reason: failed.join("; "),
+    match keystore.set_multiple_secrets(entries) {
+        Ok(()) => {
+            tracing::debug!(backend = %backend_info, "Cenzontle tokens stored successfully");
+            (StoreOutcome::Persisted, backend_info)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, backend = %backend_info,
+                "Failed to persist Cenzontle tokens to credential store");
+            (
+                StoreOutcome::NotPersisted {
+                    reason: e.to_string(),
+                },
+                backend_info,
+            )
         }
     }
 }
 
 /// Print the result of a `store_tokens` call to stdout/stderr.
-fn print_store_outcome(outcome: &StoreOutcome, access_token: &str) {
+///
+/// `backend_info` is passed in so this function does not need to construct a
+/// second `KeyStore` (which triggers a D-Bus probe on Linux for no reason).
+fn print_store_outcome(outcome: &StoreOutcome, access_token: &str, backend_info: &str) {
     match outcome {
         StoreOutcome::Persisted => {
-            let ks = KeyStore::new(SERVICE_NAME);
-            println!("Cenzontle session stored. Backend: {}", ks.backend_info());
+            println!("Cenzontle session stored. Backend: {backend_info}");
         }
         StoreOutcome::NotPersisted { reason } => {
             eprintln!();
@@ -681,6 +693,14 @@ async fn show_available_models(cenzontle_url: &str, access_token: &str) {
 
 // ── Encoding helpers ──────────────────────────────────────────────────────────
 
+/// RFC 3986 percent-encoding for use in OAuth authorization URL query parameters.
+///
+/// Only unreserved characters (ALPHA / DIGIT / "-" / "_" / "." / "~") are left
+/// unencoded.  Spaces are encoded as `%20` — NOT `+` — because OAuth 2.1
+/// authorization URLs are URL query parameters, not `application/x-www-form-urlencoded`
+/// form data.  Using `+` for spaces in the `scope` parameter causes interoperability
+/// failures with strict OAuth servers (RFC 6749 §3.3 explicitly uses space-delimited
+/// scope values in URLs).
 fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + 16);
     for byte in input.bytes() {
@@ -688,7 +708,6 @@ fn percent_encode(input: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char);
             }
-            b' ' => out.push('+'),
             _ => {
                 out.push('%');
                 out.push(
@@ -794,8 +813,9 @@ mod tests {
     }
 
     #[test]
-    fn percent_encode_spaces_as_plus() {
-        assert_eq!(percent_encode("hello world"), "hello+world");
+    fn percent_encode_spaces_as_percent20() {
+        // RFC 3986 §2.1 — spaces in URL query parameters must be %20, not +.
+        assert_eq!(percent_encode("hello world"), "hello%20world");
     }
 
     #[test]
@@ -804,7 +824,10 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_plus_as_space() {
+    fn percent_decode_percent20_as_space() {
+        // Verify the decoder handles the canonical %20 encoding produced by
+        // percent_encode; also keep + decoding for inbound form-encoded values.
+        assert_eq!(percent_decode("hello%20world"), "hello world");
         assert_eq!(percent_decode("hello+world"), "hello world");
     }
 
@@ -841,6 +864,9 @@ mod tests {
         assert!(url.contains("code_challenge=CHALLENGE_HASH"), "missing code_challenge");
         assert!(url.contains("code_challenge_method=S256"), "missing method");
         assert!(url.contains("state=STATE_VALUE"), "missing state");
+        // Scope spaces must be %20 (RFC 3986), not + (form-encoding).
+        assert!(url.contains("openid%20profile"), "scope must use %20 not +");
+        assert!(!url.contains("openid+profile"), "scope must not use form-encoding +");
     }
 
     #[tokio::test]

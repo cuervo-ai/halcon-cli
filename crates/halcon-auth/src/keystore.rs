@@ -69,6 +69,20 @@ impl KeyStore {
         self.manager.set(key, value)
     }
 
+    /// Atomically store multiple secrets in a single write.
+    ///
+    /// On the Linux XDG file-store backend this performs a single atomic
+    /// `rename(2)`.  On OS keyring backends the writes are sequential.
+    ///
+    /// Prefer this over multiple `set_secret` calls when persisting a
+    /// correlated group of credentials (e.g., access + refresh + expiry).
+    pub fn set_multiple_secrets<'a, I>(&self, entries: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        self.manager.set_multiple(entries)
+    }
+
     /// Remove a secret from the credential store.
     ///
     /// No-op if the key does not exist (not an error).

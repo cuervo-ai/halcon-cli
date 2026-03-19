@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] — 2026-03-19
+
+### Security
+
+- **Credential store hardening**: All OAuth tokens (access + refresh + expiry) are now written atomically via a single `rename(2)` syscall on Linux, eliminating the race window where an access token could be read without its associated expiry. Uses `set_multiple_secrets()` new API on `KeyStore`.
+- **RFC 3986 scope encoding**: OAuth 2.1 authorization URL `scope` parameter now correctly uses `%20` for spaces instead of `+` (form-encoding). Using `+` caused interoperability failures with strict OAuth servers (RFC 6749 §3.3).
+- **Concurrent tmp file safety**: `FileCredentialStore` now uses a per-write unique tmp suffix (`tmp.{nanos}{tid}`) preventing concurrent writers from clobbering each other's in-flight temp file during the `chmod 0600` + `rename` window.
+
+### Fixed
+
+- **Token refresh with unknown expiry**: `refresh_if_needed()` now attempts a silent refresh when token expiry is missing from the store (previously skipped, which could leave stale tokens after a partially-failed write).
+- **Credential corruption logging**: `read_map_or_default()` now emits a `warn!` log when the credential file is corrupt instead of silently discarding it, making the issue diagnosable without `RUST_LOG=debug`.
+- **No redundant D-Bus probe on display**: `print_store_outcome(Persisted)` no longer constructs a second `KeyStore` (which triggered a D-Bus probe on Linux headless environments) just to show the backend name.
+- **Exact tokenization compaction thresholds**: Updated context compaction budget calculations for exact tiktoken counts (sprint1 exact tokenizer change).
+
+### Added
+
+- `KeyStore::set_multiple_secrets()` — atomic multi-key credential write, backed by `FileCredentialStore::set_multiple()` on Linux and sequential writes on OS keyring backends.
+- `halcon-auth` crate: `test-support` feature flag enabling `FileCredentialStore::at(path)` for external integration test crates.
+- `IntelligentRouter` + `IntentClassifier` in `halcon-providers::router` — regex-based, sub-microsecond intent routing across providers.
+- `SemanticCache` in `halcon-context` — two-layer (SHA-256 + cosine similarity) in-process LLM response cache with tenant/model isolation and task-type TTLs.
+- Exact tiktoken tokenization, prompt caching hints, fastembed embeddings, TTFT tracing (sprint1).
+
 ## [Unreleased] — Chat Integration + Desktop + Claude Code Provider (2026-02-25)
 
 ### Added

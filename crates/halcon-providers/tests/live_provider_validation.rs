@@ -142,7 +142,7 @@ fn print_result(provider: &str, model: &str, result: &StreamResult) {
 ///   CENZONTLE_ACCESS_TOKEN=<jwt> cargo test -p halcon-providers --test live_provider_validation cenzontle -- --nocapture
 #[tokio::test]
 async fn cenzontle_connectivity() {
-    use halcon_providers::CenzonzleProvider;
+    use halcon_providers::CenzontleProvider;
 
     let token = match std::env::var("CENZONTLE_ACCESS_TOKEN")
         .ok()
@@ -156,7 +156,7 @@ async fn cenzontle_connectivity() {
     };
 
     let base_url = std::env::var("CENZONTLE_BASE_URL").ok();
-    let provider = CenzonzleProvider::new(token, base_url, Vec::new());
+    let provider = CenzontleProvider::new(token, base_url, Vec::new());
 
     eprintln!("\n=== Cenzontle Connectivity Test ===");
 
@@ -194,7 +194,7 @@ async fn cenzontle_connectivity() {
 /// Verify Cenzontle returns usage tokens when stream_options.include_usage=true.
 #[tokio::test]
 async fn cenzontle_usage_tokens() {
-    use halcon_providers::CenzonzleProvider;
+    use halcon_providers::CenzontleProvider;
 
     let token = match std::env::var("CENZONTLE_ACCESS_TOKEN")
         .ok()
@@ -207,7 +207,7 @@ async fn cenzontle_usage_tokens() {
         }
     };
 
-    let provider = CenzonzleProvider::new(token, std::env::var("CENZONTLE_BASE_URL").ok(), Vec::new());
+    let provider = CenzontleProvider::new(token, std::env::var("CENZONTLE_BASE_URL").ok(), Vec::new());
 
     if !provider.is_available().await {
         eprintln!("SKIP: Cenzontle not reachable");
@@ -232,7 +232,7 @@ async fn cenzontle_usage_tokens() {
 /// Verify x-halcon-context header is accepted (backend should not reject it).
 #[tokio::test]
 async fn cenzontle_context_header_accepted() {
-    use halcon_providers::CenzonzleProvider;
+    use halcon_providers::CenzontleProvider;
 
     let token = match std::env::var("CENZONTLE_ACCESS_TOKEN")
         .ok()
@@ -246,7 +246,7 @@ async fn cenzontle_context_header_accepted() {
     };
 
     // Set a CWD so context header is populated
-    let provider = CenzonzleProvider::new(token, std::env::var("CENZONTLE_BASE_URL").ok(), Vec::new());
+    let provider = CenzontleProvider::new(token, std::env::var("CENZONTLE_BASE_URL").ok(), Vec::new());
 
     if !provider.is_available().await {
         eprintln!("SKIP: Cenzontle not reachable");

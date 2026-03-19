@@ -53,6 +53,11 @@ pub use embedding::{
 pub fn embedding_engine() -> Box<dyn EmbeddingEngine> {
     embedding::EmbeddingEngineFactory::from_env()
 }
+pub mod semantic_cache;
+pub use semantic_cache::{
+    CacheOutcome, CacheResult, SemanticCache,
+    TTL_CODE_GEN, TTL_CONVERSATION, TTL_DEFAULT, TTL_RESEARCH, TTL_SUMMARIZATION,
+};
 pub use semantic_store::SemanticStore;
 pub use vector_store::{MemoryEntry, SearchResult, VectorMemoryStore};
 pub use sliding_window::SlidingWindow;

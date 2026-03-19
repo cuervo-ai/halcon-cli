@@ -33,6 +33,8 @@
 
 use halcon_core::error::{HalconError, Result};
 use tracing::debug;
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 use crate::file_store::FileCredentialStore;
 
@@ -147,6 +149,48 @@ impl CredentialManager {
                     .as_ref()
                     .expect("file_store must be set for LinuxFileStore backend")
                     .set(key, value)
+            }
+        }
+    }
+
+    /// Atomically store multiple key-value pairs in a single write.
+    ///
+    /// On the file-store backend this is a single `rename(2)` — all keys
+    /// are visible together or not at all.  On OS keyring backends the writes
+    /// are sequential (the keyring API has no bulk-write primitive), which is
+    /// still an improvement over calling `set()` in a loop because failures
+    /// are collected rather than early-returning on the first error.
+    ///
+    /// Use this when writing a correlated group of secrets (e.g., all three
+    /// OAuth token fields) to avoid partial-write races on Linux.
+    pub fn set_multiple<'a, I>(&self, entries: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        match &self.backend {
+            CredentialBackend::LinuxFileStore => {
+                self.file_store
+                    .as_ref()
+                    .expect("file_store must be set for LinuxFileStore backend")
+                    .set_multiple(entries)
+            }
+            // For OS keyring backends, collect entries and write sequentially.
+            // The keyring protocol has no bulk-write primitive; collect errors
+            // and return the first one (all-or-nothing semantics best-effort).
+            _ => {
+                let pairs: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
+                let mut first_err: Option<halcon_core::error::HalconError> = None;
+                for (key, value) in pairs {
+                    if let Err(e) = self.set(key, value) {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+                match first_err {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                }
             }
         }
     }
