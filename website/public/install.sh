@@ -1119,18 +1119,14 @@ configure_halcon() {
                 ;;
         esac
     elif [ "$_SYS_CENZONTLE_CONFIGURED" = "true" ]; then
-        ok "Cenzontle: active (token found in $(
-            case "$_SYS_OS" in
-                Darwin) echo "macOS Keychain" ;;
-                *)
-                    if command -v secret-tool >/dev/null 2>&1; then
-                        echo "D-Bus Secret Service"
-                    else
-                        echo "XDG file store"
-                    fi
-                    ;;
-            esac
-        ))"
+        if [ "$_SYS_OS" = "Darwin" ]; then
+            _cz_backend="macOS Keychain"
+        elif command -v secret-tool >/dev/null 2>&1; then
+            _cz_backend="D-Bus Secret Service"
+        else
+            _cz_backend="XDG file store"
+        fi
+        ok "Cenzontle: active (token found in ${_cz_backend})"
     fi
 }
 
