@@ -106,6 +106,11 @@ pub struct CenzontleProvider {
     /// Reported to Cenzontle via x-halcon-context so all LLM calls within a
     /// single halcon invocation are grouped into the same session.
     session_id: String,
+    /// Set to `true` when the provider was constructed via `from_token()` and the
+    /// model list was successfully fetched from the API.  When true, `is_available()`
+    /// returns immediately without making another network call — the successful model
+    /// fetch already proved that the endpoint is reachable and the token is valid.
+    connection_verified: bool,
 }
 
 impl std::fmt::Debug for CenzontleProvider {
@@ -165,6 +170,9 @@ impl CenzontleProvider {
             // One UUID per provider instance = one UUID per halcon process invocation.
             // Cenzontle groups all LLM calls with the same session_id together.
             session_id: Uuid::new_v4().to_string(),
+            // When constructed with new(), connection is unverified.
+            // from_token() will set this to true after a successful model fetch.
+            connection_verified: false,
         }
     }
 
@@ -192,7 +200,12 @@ impl CenzontleProvider {
             info!(count = models.len(), "Cenzontle: discovered models");
         }
 
-        Some(Self::new(access_token, Some(base), models))
+        let mut provider = Self::new(access_token, Some(base), models);
+        // Mark connection verified — a successful model fetch proves the API
+        // is reachable and the token is valid, so is_available() can skip the
+        // extra /v1/auth/me round-trip.
+        provider.connection_verified = !provider.models.is_empty();
+        Some(provider)
     }
 }
 
@@ -447,6 +460,15 @@ impl ModelProvider for CenzontleProvider {
     }
 
     async fn is_available(&self) -> bool {
+        // Fast path: if we already successfully fetched models via from_token(),
+        // the API is reachable and the token is valid — no extra round-trip needed.
+        // This eliminates the redundant GET /v1/auth/me that was always called after
+        // ensure_cenzontle_models() during startup.
+        if self.connection_verified {
+            debug!("Cenzontle: is_available skipped — connection already verified by model fetch");
+            return true;
+        }
+
         let url = format!("{}/v1/auth/me", self.base_url);
         self.client
             .get(&url)

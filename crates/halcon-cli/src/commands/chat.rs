@@ -134,11 +134,9 @@ pub async fn run(
 
     let mut registry = provider_factory::build_registry(&config);
 
-    // Ensure Ollama is available as a last-resort local fallback.
-    provider_factory::ensure_local_fallback(&mut registry).await;
-
-    // Populate Cenzontle model list from the API (no-op if Cenzontle not registered).
-    provider_factory::ensure_cenzontle_models(&mut registry).await;
+    // Probe Ollama + fetch Cenzontle models in parallel to minimize startup latency.
+    // Previously sequential (4-12s); now parallel (max of each, typically ≤2s with disk cache).
+    provider_factory::ensure_startup_providers(&mut registry).await;
 
     // ── Auth gate ────────────────────────────────────────────────────────────
     // If no real AI provider is registered (no valid token anywhere), show the
@@ -154,8 +152,7 @@ pub async fn run(
             if gate.credentials_added {
                 // Rebuild registry with the freshly stored credentials.
                 registry = provider_factory::build_registry(&config);
-                provider_factory::ensure_local_fallback(&mut registry).await;
-                provider_factory::ensure_cenzontle_models(&mut registry).await;
+                provider_factory::ensure_startup_providers(&mut registry).await;
             }
         }
     }

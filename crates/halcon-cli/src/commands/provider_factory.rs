@@ -351,6 +351,52 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
 ///
 /// Call this after `build_registry()` when an async context is available.
 /// If the Cenzontle provider is not registered (no token) this is a no-op.
+/// TTL for the Cenzontle model list disk cache (1 hour).
+const CENZONTLE_MODEL_CACHE_TTL_SECS: u64 = 3600;
+
+/// Load the Cenzontle model list from the disk cache if it's still fresh.
+///
+/// Returns `Some(models)` when a valid, non-expired cache exists.
+/// Returns `None` on any error (cache miss, expired, parse error) — caller fetches from API.
+fn load_cenzontle_model_cache() -> Option<Vec<halcon_core::types::ModelInfo>> {
+    let cache_path = dirs::home_dir()?.join(".halcon").join("cenzontle-models.json");
+
+    let meta = std::fs::metadata(&cache_path).ok()?;
+    let age = meta.modified().ok()?.elapsed().unwrap_or_default();
+    if age.as_secs() > CENZONTLE_MODEL_CACHE_TTL_SECS {
+        tracing::debug!(age_secs = age.as_secs(), "Cenzontle model cache expired");
+        return None;
+    }
+
+    let json = std::fs::read_to_string(&cache_path).ok()?;
+    let models: Vec<halcon_core::types::ModelInfo> = serde_json::from_str(&json).ok()?;
+    if models.is_empty() {
+        return None;
+    }
+
+    tracing::debug!(count = models.len(), "Cenzontle: model list loaded from disk cache");
+    Some(models)
+}
+
+/// Save the Cenzontle model list to the disk cache.
+fn save_cenzontle_model_cache(models: &[halcon_core::types::ModelInfo]) {
+    let Some(cache_path) = dirs::home_dir().map(|h| h.join(".halcon").join("cenzontle-models.json")) else {
+        return;
+    };
+    match serde_json::to_string(models) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&cache_path, json) {
+                tracing::debug!(error = %e, "Cenzontle: failed to write model cache");
+            } else {
+                tracing::debug!(count = models.len(), "Cenzontle: model list saved to disk cache");
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Cenzontle: failed to serialize model list for cache");
+        }
+    }
+}
+
 pub async fn ensure_cenzontle_models(registry: &mut ProviderRegistry) {
     // If cenzontle isn't registered, skip.
     if registry.get("cenzontle").is_none() {
@@ -377,10 +423,23 @@ pub async fn ensure_cenzontle_models(registry: &mut ProviderRegistry) {
     let Some(token) = token else { return };
     let base_url = std::env::var("CENZONTLE_BASE_URL").ok();
 
+    // Fast path: use disk cache if still fresh (< 1 hour old).
+    // This avoids a GET /v1/llm/models API call on every startup — saves 2-10s
+    // especially when the Azure Container Apps backend is cold or slow.
+    if let Some(cached_models) = load_cenzontle_model_cache() {
+        let provider = CenzontleProvider::new(token, base_url, cached_models);
+        registry.register(Arc::new(provider));
+        tracing::debug!("Cenzontle provider: re-registered with cached model list");
+        return;
+    }
+
+    // Cache miss — fetch from API.
     if let Some(provider) = CenzontleProvider::from_token(token, base_url).await {
+        // Persist the model list so the next startup uses the cache.
+        save_cenzontle_model_cache(provider.supported_models());
         // Re-register with populated model list.
         registry.register(Arc::new(provider));
-        tracing::debug!("Cenzontle provider models populated");
+        tracing::debug!("Cenzontle provider models populated from API");
     }
 }
 
@@ -402,6 +461,80 @@ pub async fn ensure_local_fallback(registry: &mut ProviderRegistry) {
         tracing::info!("Auto-detected local Ollama — registered as fallback provider");
     } else {
         tracing::debug!("Ollama not reachable at localhost:11434, skipping local fallback");
+    }
+}
+
+/// Run the Ollama probe and Cenzontle model fetch **in parallel** to minimize startup latency.
+///
+/// Previously these were sequential: Ollama probe (~2s) + Cenzontle model fetch (~2-10s) = 4-12s.
+/// By running in parallel, startup cost is `max(ollama_latency, cenzontle_latency)` ≈ 2-10s.
+/// With the disk cache active, the Cenzontle step resolves in <1ms so total = Ollama probe only.
+pub async fn ensure_startup_providers(registry: &mut ProviderRegistry) {
+    let needs_ollama = registry.get("ollama").is_none();
+    let needs_cenzontle = registry.get("cenzontle").is_some();
+
+    if !needs_ollama && !needs_cenzontle {
+        return; // Nothing to do
+    }
+
+    // Extract cenzontle token + base_url before entering async block (registry not movable).
+    let cenzontle_token: Option<String> = if needs_cenzontle {
+        std::env::var("CENZONTLE_ACCESS_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                let keystore = halcon_auth::KeyStore::new("halcon-cli");
+                match keystore.get_secret("cenzontle:access_token") {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Cenzontle: credential read failed (parallel probe)");
+                        None
+                    }
+                }
+            })
+    } else {
+        None
+    };
+    let cenzontle_base = std::env::var("CENZONTLE_BASE_URL").ok();
+
+    // ── Run Ollama and Cenzontle in parallel ──────────────────────────────────
+    let ollama_fut = async {
+        if !needs_ollama {
+            return None;
+        }
+        let provider = OllamaProvider::new(None, HttpConfig::default());
+        if provider.is_available().await {
+            Some(provider)
+        } else {
+            None
+        }
+    };
+
+    let cenzontle_fut = async {
+        let Some(token) = cenzontle_token else { return None };
+
+        // Fast path: use the disk cache if still fresh.
+        if let Some(cached_models) = load_cenzontle_model_cache() {
+            let p = CenzontleProvider::new(token, cenzontle_base, cached_models);
+            return Some(p);
+        }
+
+        // Cache miss — fetch from the API.
+        let provider = CenzontleProvider::from_token(token, cenzontle_base).await?;
+        save_cenzontle_model_cache(provider.supported_models());
+        Some(provider)
+    };
+
+    let (ollama_result, cenzontle_result) = tokio::join!(ollama_fut, cenzontle_fut);
+
+    // Register results (no I/O here — fast sequential operations).
+    if let Some(p) = ollama_result {
+        registry.register(Arc::new(p));
+        tracing::info!("Auto-detected local Ollama — registered as fallback provider");
+    }
+    if let Some(p) = cenzontle_result {
+        registry.register(Arc::new(p));
+        tracing::debug!("Cenzontle provider ready (parallel startup)");
     }
 }
 
