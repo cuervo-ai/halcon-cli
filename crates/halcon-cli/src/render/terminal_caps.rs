@@ -399,7 +399,7 @@ mod tests {
     fn rgb_to_256_gray() {
         let index = rgb_to_256(128, 128, 128);
         // Should be in grayscale range (232-255)
-        assert!(index >= 232 && index <= 255);
+        assert!(index >= 232);
     }
 
     #[cfg(feature = "tui")]

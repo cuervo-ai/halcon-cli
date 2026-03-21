@@ -350,7 +350,8 @@ mod tests {
 └── serde v1.0";
         let stats = DependencyGraphTool::parse_cargo_tree_stats(output);
         assert!(stats.total_count > 0);
-        assert!(stats.cycle_hints.contains(&"socket2".to_string()) || stats.cycle_hints.len() >= 0);
+        // cycle_hints may or may not contain "socket2" depending on cargo's output
+        assert!(stats.total_count > 0);
     }
 
     #[test]

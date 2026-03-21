@@ -210,8 +210,8 @@ mod tests {
         let current = pulse.current();
         // Should be different due to modulation (unless exactly at zero phase)
         // We can't assert exact values due to timing, but structure is testable
-        let [r, g, b] = current.srgb8();
-        assert!(r <= 255 && g <= 255 && b <= 255); // Sanity check
+        let [_r, _g, _b] = current.srgb8();
+        // srgb8() returns [u8; 3] — values are inherently in 0..=255
     }
 
     #[test]
