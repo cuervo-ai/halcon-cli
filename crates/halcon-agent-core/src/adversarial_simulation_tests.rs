@@ -279,7 +279,7 @@ mod tests {
         let mut rounds = 0u32;
         for round in 1..=max_rounds {
             // Tool "claims" success but state unchanged (tiny drift only)
-            let noise: f32 = rng.gen_range(-0.005_f32..0.005_f32);
+            let noise: f32 = rng.random_range(-0.005_f32..0.005_f32);
             confidence = (confidence + noise).clamp(0.0, 1.0);
             rounds = round;
         }

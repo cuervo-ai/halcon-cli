@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn goal_verification_engine_detects_achieved() {
-        let parser = GoalSpecParser::default();
+        let _parser = GoalSpecParser::default();
         // Build a simple spec with only a ToolInvoked criterion
         let spec = GoalSpec::new(
             "invoke grep",

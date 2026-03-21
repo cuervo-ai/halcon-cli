@@ -78,7 +78,7 @@ mod tests {
 
         for _ in 0u64..50_000 {
             let strategy = learner.select().to_string();
-            let reward: f64 = rng.gen_range(0.0..1.0);
+            let reward: f64 = rng.random_range(0.0..1.0);
             learner.record_outcome(&strategy, reward, Uuid::new_v4());
             *arm_counts.entry(strategy).or_insert(0) += 1;
         }
@@ -107,7 +107,7 @@ mod tests {
         let n: u64 = 50_000;
         for _ in 0..n {
             let s = learner.select().to_string();
-            learner.record_outcome(&s, rng.gen_range(0.0..1.0), Uuid::new_v4());
+            learner.record_outcome(&s, rng.random_range(0.0..1.0), Uuid::new_v4());
         }
         assert_eq!(learner.total_pulls(), n, "total pulls must equal n");
     }
@@ -137,9 +137,9 @@ mod tests {
         for _ in 0u64..5_000 {
             let strategy = learner.select().to_string();
             let reward = if strategy == "goal_driven" {
-                (0.8 + rng.gen_range(-0.05_f64..0.05_f64)).clamp(0.0_f64, 1.0_f64)
+                (0.8 + rng.random_range(-0.05_f64..0.05_f64)).clamp(0.0_f64, 1.0_f64)
             } else {
-                (0.2 + rng.gen_range(-0.05_f64..0.05_f64)).clamp(0.0_f64, 1.0_f64)
+                (0.2 + rng.random_range(-0.05_f64..0.05_f64)).clamp(0.0_f64, 1.0_f64)
             };
             learner.record_outcome(&strategy, reward, Uuid::new_v4());
         }
@@ -159,7 +159,7 @@ mod tests {
 
         for _ in 0u64..10_000 {
             let s = learner.select().to_string();
-            learner.record_outcome(&s, rng.gen_range(0.0..1.0), Uuid::new_v4());
+            learner.record_outcome(&s, rng.random_range(0.0..1.0), Uuid::new_v4());
         }
 
         // All arms explored
@@ -243,7 +243,7 @@ mod tests {
 
         for round in 1..=max_rounds {
             let pre = confidence;
-            let delta: f32 = rng.gen_range(-0.02_f32..0.15);
+            let delta: f32 = rng.random_range(-0.02_f32..0.15);
             confidence = (pre + delta).clamp(0.0, 1.0);
 
             if confidence >= 0.8 {
@@ -293,7 +293,7 @@ mod tests {
         ];
 
         for _ in 0..1_000 {
-            let idx = rng.gen_range(0..signals.len());
+            let idx = rng.random_range(0..signals.len());
             tracker.record_signal(&signals[idx]);
             let roi = tracker.rolling_oscillation_index();
             assert!(roi >= 0.0 && roi <= 1.0, "rolling OI out of [0,1]: {}", roi);
@@ -315,7 +315,7 @@ mod tests {
         let mut confidence = 0.5f32;
 
         for _ in 0..1_000u32 {
-            let noise: f32 = rng.gen_range(-0.03..0.03);
+            let noise: f32 = rng.random_range(-0.03..0.03);
             confidence = (confidence + noise).clamp(0.0, 1.0);
 
             let raw_signal = if noise > 0.01 {
@@ -406,7 +406,7 @@ mod tests {
         let mut gas_samples: Vec<f32> = Vec::new();
 
         for round in 1..=max_rounds {
-            let delta: f32 = rng.gen_range(0.005..0.05);
+            let delta: f32 = rng.random_range(0.005..0.05);
             confidence = (confidence + delta).clamp(0.0, 1.0);
             if round % 10 == 0 {
                 let gas = GoalAlignmentScore::compute(confidence, round, max_rounds, false);
