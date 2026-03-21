@@ -730,12 +730,18 @@ main() {
         printf "    ${BOLD}halcon chat --tui --full --expert${RESET}       ${CYAN}# TUI completo con Cenzontle${RESET}\n"
         printf "    ${BOLD}halcon chat${RESET}                             ${CYAN}# modo clásico${RESET}\n"
         printf "    ${BOLD}halcon auth status${RESET}                      ${CYAN}# verificar token${RESET}\n"
+        printf "\n  ${BOLD}Cenzontle Agent Orchestration (v0.3.11):${RESET}\n"
+        printf "    ${BOLD}halcon cenzontle agent \"analiza este repo\"${RESET}          ${CYAN}# ejecutar agente${RESET}\n"
+        printf "    ${BOLD}halcon cenzontle agent --context \"optimiza\"${RESET}         ${CYAN}# con contexto local${RESET}\n"
+        printf "    ${BOLD}halcon cenzontle tools${RESET}                              ${CYAN}# MCP tools disponibles${RESET}\n"
+        printf "    ${BOLD}halcon cenzontle search \"architecture\"${RESET}              ${CYAN}# RAG knowledge search${RESET}\n"
+        printf "    ${BOLD}halcon cenzontle agents${RESET}                             ${CYAN}# agentes registrados${RESET}\n"
         printf "\n  ${BOLD}Otros proveedores (opcional):${RESET}\n"
         printf "    ${BOLD}halcon -p anthropic chat${RESET}                ${CYAN}# Claude directo${RESET}\n"
         printf "    ${BOLD}halcon -p ollama chat${RESET}                   ${CYAN}# local, sin API key${RESET}\n"
     else
         # ── Interactive auth gate notice (v0.3.10+) ──────────────────────────
-        printf "\n  ${CYAN}${BOLD}⚡ Auth wizard integrado (v0.3.10)${RESET}\n"
+        printf "\n  ${CYAN}${BOLD}⚡ Auth wizard integrado (v0.3.11)${RESET}\n"
         printf "  Al ejecutar ${BOLD}halcon chat${RESET} por primera vez, se abrirá automáticamente\n"
         printf "  un asistente interactivo para configurar tu proveedor de IA.\n\n"
         printf "  ${BOLD}Solo ejecuta:${RESET}\n"
@@ -757,6 +763,8 @@ main() {
 
     printf "\n  ${BOLD}Características clave:${RESET}\n"
     printf "    ${BOLD}halcon chat --tui --full --expert${RESET}   ${CYAN}# TUI completo + todos los agentes${RESET}\n"
+    printf "    ${BOLD}halcon cenzontle agent \"prompt\"${RESET}     ${CYAN}# agente multi-modelo (Cenzontle)${RESET}\n"
+    printf "    ${BOLD}halcon cenzontle tools${RESET}               ${CYAN}# MCP tools (RAG, LLM, agents)${RESET}\n"
     printf "    ${BOLD}halcon auth status${RESET}                  ${CYAN}# proveedores configurados${RESET}\n"
     printf "    ${BOLD}halcon doctor${RESET}                       ${CYAN}# diagnóstico del sistema${RESET}\n"
     printf "    ${BOLD}halcon update${RESET}                       ${CYAN}# actualizar (wizard integrado)${RESET}\n"
@@ -1259,7 +1267,7 @@ MEMORY_MD
 #   1. Write .update-check stamp → suppresses background check for 24h
 #      (the user just installed the latest; no point re-checking immediately)
 #   2. Clear stale .update-available and related files → prevents the
-#      v0.3.10 interactive update prompt from triggering right after install
+#      interactive update prompt from triggering right after install
 _stamp_fresh_install() {
     local halcon_dir="$1"
     mkdir -p "$halcon_dir" 2>/dev/null || true
@@ -1297,6 +1305,12 @@ _write_config() {
 #    halcon -p openai    chat --tui --full --expert
 #    halcon -p deepseek  chat --tui --full --expert   # cheapest
 #    halcon -p ollama    chat --tui --full --expert   # local / no API key
+#
+#  Cenzontle Agent Orchestration (v0.3.11):
+#    halcon cenzontle agent "analiza este repo"       # multi-agent execution
+#    halcon cenzontle agent --context "optimiza"       # with local project context
+#    halcon cenzontle tools                            # list MCP tools
+#    halcon cenzontle search "query"                   # RAG knowledge search
 #
 #  Add API keys:
 #    halcon auth login anthropic
