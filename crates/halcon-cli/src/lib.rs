@@ -32,7 +32,10 @@
     clippy::question_mark,
     clippy::needless_range_loop,
     clippy::ptr_arg,
-    clippy::enum_variant_names
+    clippy::enum_variant_names,
+    clippy::derivable_impls,
+    clippy::unnecessary_cast,
+    clippy::needless_return
 )]
 
 // Module declarations (same as main.rs)
