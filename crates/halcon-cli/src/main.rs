@@ -321,6 +321,18 @@ enum Commands {
         #[command(subcommand)]
         action: ScheduleAction,
     },
+
+    /// Cenzontle agent orchestration — delegate tasks to the multi-agent backend
+    ///
+    /// Connects to a running Cenzontle instance to execute agent tasks, query
+    /// MCP tools, and search the knowledge base via RAG.
+    ///
+    /// Requires authentication: set CENZONTLE_ACCESS_TOKEN or run `halcon login cenzontle`.
+    #[cfg(feature = "cenzontle-agents")]
+    Cenzontle {
+        #[command(subcommand)]
+        action: commands::cenzontle::CenzontleAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1067,6 +1079,10 @@ async fn main() -> Result<()> {
                 ScheduleAction::Enable { id } => commands::schedule::enable(&db, &id),
                 ScheduleAction::Run { id } => commands::schedule::run_now(&db, &id),
             }
+        }
+        #[cfg(feature = "cenzontle-agents")]
+        Some(Commands::Cenzontle { action }) => {
+            commands::cenzontle::run(action).await
         }
         None => {
             // Default: start interactive chat

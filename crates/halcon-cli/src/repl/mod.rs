@@ -1589,6 +1589,30 @@ impl Repl {
             output_tokens: Some(0),
         });
 
+        // Enumerate all registered providers + their models so the TUI model selector
+        // has a full list from the start, not just models discovered at runtime.
+        {
+            let mut all_models: Vec<(String, String, String)> = Vec::new();
+            for name in self.registry.list() {
+                if let Some(provider) = self.registry.get(name) {
+                    for m in provider.supported_models() {
+                        let label = format!("{}/{}", name, m.id);
+                        all_models.push((name.to_string(), m.id.clone(), label));
+                    }
+                }
+            }
+            // Sort: current provider first, then alphabetically.
+            let current_provider = self.provider.clone();
+            all_models.sort_by(|a, b| {
+                let a_primary = a.0 == current_provider;
+                let b_primary = b.0 == current_provider;
+                b_primary.cmp(&a_primary).then(a.2.cmp(&b.2))
+            });
+            if !all_models.is_empty() {
+                let _ = ui_tx.send(UiEvent::AvailableProviders { models: all_models });
+            }
+        }
+
         let session_start = std::time::Instant::now();
 
         // Phase 4: Create task manager for non-blocking agent execution.
@@ -1704,6 +1728,36 @@ impl Repl {
                                     }
                                 }
                             }
+                        }
+                        // Model selector: switch provider/model at runtime for next round.
+                        ControlEvent::SwitchModel { provider, model } => {
+                            tracing::info!(
+                                old_provider = %self.provider,
+                                old_model = %self.model,
+                                new_provider = %provider,
+                                new_model = %model,
+                                "Switching model via TUI model selector"
+                            );
+                            self.provider = provider.clone();
+                            self.model = model.clone();
+                            // Notify TUI of the confirmed switch.
+                            let _ = ui_tx.send(UiEvent::ModelSelected {
+                                model: model.clone(),
+                                provider: provider.clone(),
+                                reason: "user_selected".to_string(),
+                            });
+                            let _ = ui_tx.send(UiEvent::StatusUpdate {
+                                provider: Some(provider),
+                                model: Some(model),
+                                round: None,
+                                tokens: None,
+                                cost: None,
+                                session_id: None,
+                                elapsed_ms: None,
+                                tool_count: None,
+                                input_tokens: None,
+                                output_tokens: None,
+                            });
                         }
                         // Other control events (Pause/Resume/Step) are handled by agent loop,
                         // but we need to consume them here to prevent queue buildup.
@@ -2591,6 +2645,40 @@ impl Repl {
             let n = self.mcp_manager.registered_tool_count();
             if n > 0 {
                 tracing::info!(tool_count = n, "MCP tools registered into agent loop");
+            }
+        }
+
+        // Cenzontle MCP bridge: auto-discover and register Cenzontle's MCP tools
+        // when the cenzontle provider is active. This gives the agent loop access to
+        // RAG, agent orchestration, and other Cenzontle capabilities as native tools.
+        #[cfg(feature = "cenzontle-agents")]
+        {
+            static CENZONTLE_MCP_INIT: std::sync::Once = std::sync::Once::new();
+            let should_init = self.provider == "cenzontle"
+                || self.registry.get("cenzontle").is_some();
+            if should_init {
+                CENZONTLE_MCP_INIT.call_once(|| {
+                    // We can't await inside call_once, so spawn a blocking init.
+                    // For the first message, tools may not be registered yet.
+                    // Subsequent messages will have them.
+                    tracing::debug!("Cenzontle MCP bridge: will initialize on next opportunity");
+                });
+
+                // Attempt lazy init via the agent client if a token is available.
+                if let Some(token) = super::commands::cenzontle::resolve_access_token_silent() {
+                    let client = std::sync::Arc::new(
+                        halcon_providers::CenzontleAgentClient::new(token, None),
+                    );
+                    let mut bridge = bridges::CenzontleMcpManager::new(client);
+                    bridge.ensure_initialized(&mut self.tool_registry).await;
+                    if bridge.tool_count() > 0 {
+                        use crate::render::sink::RenderSink;
+                        sink.info(&format!(
+                            "[cenzontle] {} MCP tools registered",
+                            bridge.tool_count()
+                        ));
+                    }
+                }
             }
         }
 

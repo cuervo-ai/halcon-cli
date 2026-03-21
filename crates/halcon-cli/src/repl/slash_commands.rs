@@ -311,6 +311,7 @@ impl Repl {
             self.config.security.tbac_enabled,
             None, // perm_awaiter: slash commands run outside TUI
             std::sync::Arc::new(self.config.policy.clone()),
+            Some(&self.registry), // provider registry for per-task provider override
         )
         .await
         {
@@ -1187,6 +1188,7 @@ impl Repl {
             self.config.security.tbac_enabled,
             None, // perm_awaiter: slash commands run outside TUI
             std::sync::Arc::new(self.config.policy.clone()),
+            Some(&self.registry), // provider registry for per-task provider override
         )
         .await
         {

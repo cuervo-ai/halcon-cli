@@ -115,6 +115,9 @@ completion-validator = []
 ## When enabled, agent_bridge uses halcon-agent-core's loop_driver instead of
 ## the REPL loop.
 gdem-primary = ["halcon-agent-core"]
+## Enables Cenzontle agent orchestration, MCP bridge, and RAG integration.
+## When enabled, `halcon cenzontle` subcommands become available.
+cenzontle-agents = ["halcon-providers/cenzontle-agents"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

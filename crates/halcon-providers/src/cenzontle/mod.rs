@@ -16,6 +16,10 @@
 //! token in the OS keychain automatically.
 
 pub mod types;
+#[cfg(feature = "cenzontle-agents")]
+pub mod agent_client;
+#[cfg(feature = "cenzontle-agents")]
+pub mod agent_types;
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -232,6 +236,16 @@ impl CenzontleProvider {
             connection_verified: false,
             circuit_breaker: Arc::new(CircuitBreaker::default()),
         }
+    }
+
+    /// Access token (JWT) used for API authentication.
+    pub fn access_token(&self) -> &str {
+        &self.access_token
+    }
+
+    /// Base URL of the Cenzontle instance.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Construct a provider by fetching models from the Cenzontle API.

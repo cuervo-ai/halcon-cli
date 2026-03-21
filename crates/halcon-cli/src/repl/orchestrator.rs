@@ -245,6 +245,11 @@ pub async fn run_orchestrator(
     // When None, sub-agents auto-approve all Destructive tools (non-interactive).
     perm_awaiter: Option<crate::render::sink::PermissionAwaiter>,
     policy: std::sync::Arc<halcon_core::types::PolicyConfig>,
+    // Optional provider registry for per-task provider override.
+    // When a SubAgentTask has `provider: Some("cenzontle")`, the orchestrator
+    // looks up that provider from this registry. Falls back to parent provider
+    // if the requested provider is not found or this is None.
+    provider_registry: Option<&halcon_providers::ProviderRegistry>,
 ) -> Result<OrchestratorResult> {
     let orch_start = Instant::now();
     let budget = SharedBudget::new(parent_limits);
@@ -414,7 +419,23 @@ pub async fn run_orchestrator(
         let futures: Vec<_> = eligible_tasks
             .iter()
             .map(|task| {
-                let provider = Arc::clone(provider);
+                // Per-task provider override: if the task specifies a provider name,
+                // look it up in the registry. Fall back to parent provider if not found.
+                let provider = if let Some(ref provider_name) = task.provider {
+                    provider_registry
+                        .and_then(|r| r.get(provider_name))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            tracing::warn!(
+                                task_id = %task.task_id,
+                                requested_provider = %provider_name,
+                                "Sub-agent requested provider not found, falling back to parent"
+                            );
+                            Arc::clone(provider)
+                        })
+                } else {
+                    Arc::clone(provider)
+                };
                 let event_tx = event_tx.clone();
                 let task_id = task.task_id;
                 let agent_type = task.agent_type;
@@ -1806,7 +1827,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            test_policy(),
+            test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 1);
@@ -1864,7 +1885,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            test_policy(),
+            test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1922,7 +1943,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            test_policy(),
+            test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -1961,7 +1982,7 @@ mod tests {
             &limits, &config, &routing,
             None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            test_policy(),
+            test_policy(), None,
         ).await.unwrap();
 
         // Collect all events.
@@ -2026,7 +2047,7 @@ mod tests {
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            test_policy(),
+            test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -2075,7 +2096,7 @@ mod tests {
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
             &[], true, false, None,
-            test_policy(),
+            test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 2);
@@ -2388,7 +2409,7 @@ mod tests {
         let result = run_orchestrator(
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
-            &[], true, false, None, test_policy(),
+            &[], true, false, None, test_policy(), None,
         ).await.unwrap();
 
         // All 5 must succeed despite the concurrency cap of 1.
@@ -2426,7 +2447,7 @@ mod tests {
         let result = run_orchestrator(
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
-            &[], true, false, None, test_policy(),
+            &[], true, false, None, test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 8, "all 8 tasks must complete with cap=3");
@@ -2479,7 +2500,7 @@ mod tests {
         let result = run_orchestrator(
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
-            &[], true, false, None, test_policy(),
+            &[], true, false, None, test_policy(), None,
         ).await.unwrap();
 
         // Intra-wave budget enforcement must stop before all 6 tasks execute.
@@ -2531,7 +2552,7 @@ mod tests {
         let result = run_orchestrator(
             Uuid::new_v4(), tasks, &provider, &tool_registry, &event_tx,
             &limits, &config, &routing, None, None, &[], "echo", "/tmp", None,
-            &[], true, false, None, test_policy(),
+            &[], true, false, None, test_policy(), None,
         ).await.unwrap();
 
         assert_eq!(result.total_count, 4, "unlimited budget must complete all tasks");

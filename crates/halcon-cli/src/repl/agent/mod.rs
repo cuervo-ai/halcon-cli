@@ -1193,6 +1193,7 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
                 false,
                 perm_awaiter_for_orch,
                 policy.clone(),
+                registry, // provider registry for per-task provider override
             )
             .await;
 

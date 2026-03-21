@@ -24,3 +24,6 @@ pub mod trace;
 pub mod update;
 pub mod sso;
 pub mod users;
+pub mod context_gather;
+#[cfg(feature = "cenzontle-agents")]
+pub mod cenzontle;

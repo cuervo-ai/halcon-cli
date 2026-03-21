@@ -13,6 +13,8 @@ pub(crate) mod runtime;
 pub mod search;
 pub(crate) mod task;
 pub mod task_backlog;
+#[cfg(feature = "cenzontle-agents")]
+pub(crate) mod cenzontle_mcp_bridge;
 pub mod task_scheduler;
 
 // Re-exports
@@ -21,3 +23,5 @@ pub use dev_gateway::DevGateway;
 pub(crate) use mcp_manager::McpResourceManager;
 pub(crate) use runtime::CliToolRuntime;
 pub(crate) use task::TaskBridge;
+#[cfg(feature = "cenzontle-agents")]
+pub(crate) use cenzontle_mcp_bridge::CenzontleMcpManager;

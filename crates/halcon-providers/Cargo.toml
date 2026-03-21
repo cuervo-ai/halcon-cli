@@ -36,6 +36,8 @@ gcp_auth = { workspace = true, optional = true }
 bedrock = ["aws-sigv4"]
 # Enable Google Vertex AI provider (streamRawPredict + ADC auth)
 vertex = ["gcp_auth"]
+# Enable Cenzontle agent orchestration, MCP bridge, and RAG client
+cenzontle-agents = []
 
 [[bin]]
 name = "mock-claude"

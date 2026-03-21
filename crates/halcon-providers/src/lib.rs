@@ -45,6 +45,10 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openai_compat::OpenAICompatibleProvider;
 pub use cenzontle::CenzontleProvider;
+#[cfg(feature = "cenzontle-agents")]
+pub use cenzontle::agent_client::CenzontleAgentClient;
+#[cfg(feature = "cenzontle-agents")]
+pub use cenzontle::agent_types;
 #[allow(deprecated)]
 pub use cenzontle::CenzonzleProvider; // backward-compat alias — use CenzontleProvider
 pub use registry::ProviderRegistry;
