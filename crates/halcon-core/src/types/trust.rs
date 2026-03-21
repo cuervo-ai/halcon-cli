@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Determined at the end of each agent loop round in `result_assembly.rs`.
 /// Displayed by render sinks as a visible badge so users understand whether
 /// the response is backed by fresh tool evidence or synthesized from context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "trust_level", rename_all = "snake_case")]
 pub enum ResponseTrust {
     /// Response is backed by tool calls executed **in this round**.
@@ -36,6 +36,7 @@ pub enum ResponseTrust {
     },
     /// No tool evidence available. Response based on model training only.
     /// Lowest confidence — cannot be verified against runtime data.
+    #[default]
     Unverified,
 }
 
@@ -87,12 +88,6 @@ impl ResponseTrust {
             };
         }
 
-        Self::Unverified
-    }
-}
-
-impl Default for ResponseTrust {
-    fn default() -> Self {
         Self::Unverified
     }
 }

@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Clock that can be real-time or deterministic (for replay).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum ExecutionClock {
     /// Uses `Utc::now()` — normal production mode.
+    #[default]
     RealTime,
     /// Returns `base + offset` where offset increments by 1ms per call.
     Deterministic {
@@ -47,16 +48,11 @@ impl ExecutionClock {
     }
 }
 
-impl Default for ExecutionClock {
-    fn default() -> Self {
-        Self::RealTime
-    }
-}
-
 /// UUID generator that can be random or seeded (for replay determinism).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum UuidGenerator {
     /// Uses `Uuid::new_v4()` — normal production mode.
+    #[default]
     Random,
     /// Produces deterministic UUIDs from a seed + counter.
     Seeded {
@@ -98,12 +94,6 @@ impl UuidGenerator {
                 Uuid::from_bytes(bytes)
             }
         }
-    }
-}
-
-impl Default for UuidGenerator {
-    fn default() -> Self {
-        Self::Random
     }
 }
 

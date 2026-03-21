@@ -1253,6 +1253,7 @@ pub async fn execute_sequential_tool(
         }
     }
 
+    #[allow(unused_mut)]
     let mut tool_input = ToolInput {
         tool_use_id: tool_call.id.clone(),
         arguments: tool_call.input.clone(),

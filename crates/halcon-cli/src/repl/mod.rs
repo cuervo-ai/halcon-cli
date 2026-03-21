@@ -3204,6 +3204,7 @@ impl Repl {
                 // (Pause/Step/Cancel) remain functional across agent loop failures.
                 // Previously `?` would drop ctrl_rx on Err, leaving self.ctrl_rx = None
                 // for the rest of the session.
+                #[allow(unused_mut)]
                 let mut agent_loop_result = agent::run_agent_loop(ctx).await;
 
                 // Phase 43: restore control channel receiver for reuse across TUI messages.
@@ -3614,6 +3615,7 @@ impl Repl {
                             policy: std::sync::Arc::new(self.config.policy.clone()),
                         };
 
+                        #[allow(unused_mut)]
                         let mut retry_loop_result = agent::run_agent_loop(retry_ctx).await;
                         #[cfg(feature = "tui")]
                         if let Ok(ref mut r) = retry_loop_result {
