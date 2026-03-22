@@ -63,6 +63,9 @@ jobs:
     name: Dependency Audit (cargo-audit)
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
+    # Advisory only — upstream CVEs should not block the pipeline.
+    # Review findings in GitHub Security tab.
+    continue-on-error: true
     permissions:
       contents: read
       checks: write
@@ -99,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Trivy (filesystem scan)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: .
