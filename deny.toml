@@ -40,6 +40,7 @@ allow = [
     "OFL-1.1",
     "Unicode-3.0",
     "LicenseRef-UFL-1.0",
+    "CDLA-Permissive-2.0",
 ]
 
 # Crates without a detectable license or with licenses not in the allow list
