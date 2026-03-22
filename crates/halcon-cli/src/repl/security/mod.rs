@@ -18,6 +18,10 @@ pub mod subagent_contract;
 pub(crate) mod tool_policy;
 pub(crate) mod tool_trust;
 
+// Trust chain gates (Gate 1-3)
+pub mod config_trust;
+pub mod workspace_trust;
+
 // Re-exports for public types used by callers outside security/
 
 // C-2: files migrated from repl/ root
