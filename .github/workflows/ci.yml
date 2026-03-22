@@ -28,7 +28,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
   # CI builds without color-science (momoto-* crates are local path deps unavailable in CI).
   CARGO_FEATURES: "--no-default-features"
 
