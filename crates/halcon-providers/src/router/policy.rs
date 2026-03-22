@@ -293,6 +293,7 @@ impl FallbackChain {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::super::intent::{IntentClassifier, IntentResult, TaskIntent};
     use super::*;
 
