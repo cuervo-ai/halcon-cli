@@ -436,19 +436,29 @@ pub fn status() -> Result<()> {
     println!("  claude_code: {claude_code_status}");
 
     // Cenzontle uses SSO tokens, not API keys — check its dedicated keychain entries.
-    let cenzontle_token = keystore
-        .get_secret("cenzontle:access_token")
-        .ok()
-        .flatten()
-        .is_some();
+    // Unlike simple API keys, JWT tokens expire. We validate by hitting /v1/auth/me.
+    let cenzontle_token = keystore.get_secret("cenzontle:access_token").ok().flatten();
     let cenzontle_env = std::env::var("CENZONTLE_ACCESS_TOKEN")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let cenzontle_status: String = match (cenzontle_token, cenzontle_env) {
-        (true, true) => "logged in (SSO keychain + $CENZONTLE_ACCESS_TOKEN)".into(),
-        (true, false) => "logged in (SSO keychain)".into(),
-        (false, true) => "set ($CENZONTLE_ACCESS_TOKEN)".into(),
-        (false, false) => "not logged in  -> run `halcon auth login cenzontle`".into(),
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let cenzontle_status: String = match (&cenzontle_token, &cenzontle_env) {
+        (Some(token), _) | (_, Some(token)) => {
+            let source = if cenzontle_token.is_some() && cenzontle_env.is_some() {
+                "SSO keychain + $CENZONTLE_ACCESS_TOKEN"
+            } else if cenzontle_token.is_some() {
+                "SSO keychain"
+            } else {
+                "$CENZONTLE_ACCESS_TOKEN"
+            };
+            // Validate token is still accepted by the backend
+            if validate_cenzontle_token(token) {
+                format!("logged in ({source})  -> halcon -p cenzontle chat")
+            } else {
+                format!("token expired ({source})  -> run `halcon auth login cenzontle`")
+            }
+        }
+        (None, None) => "not logged in  -> run `halcon auth login cenzontle`".into(),
     };
     println!("  cenzontle: {cenzontle_status}");
 
@@ -474,6 +484,35 @@ pub fn status() -> Result<()> {
         println!("  {provider}: {status}");
     }
     Ok(())
+}
+
+/// Validate a Cenzontle JWT token by hitting GET /v1/auth/me.
+///
+/// Returns `true` if the token is accepted (HTTP 200).
+/// Returns `false` on 401/403 (expired/invalid) or network error.
+/// Uses a 5-second timeout to avoid blocking the status command.
+fn validate_cenzontle_token(token: &str) -> bool {
+    use std::time::Duration;
+
+    let base_url = std::env::var("CENZONTLE_BASE_URL").unwrap_or_else(|_| {
+        "https://ca-cenzontle-backend.graypond-e35bfdd8.eastus2.azurecontainerapps.io".to_string()
+    });
+    let url = format!("{base_url}/v1/auth/me");
+
+    // Synchronous HTTP call (auth status is a CLI command, not async runtime)
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build();
+
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return false, // can't build client → treat as invalid
+    };
+
+    match client.get(&url).bearer_auth(token).send() {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false, // network error → treat as expired
+    }
 }
 
 /// Resolve the API key for a provider, checking keychain then env var.
