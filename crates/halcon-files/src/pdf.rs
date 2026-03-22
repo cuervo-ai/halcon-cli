@@ -156,7 +156,7 @@ mod inner {
         #[test]
         fn empty_text_returns_diagnostic() {
             // Simulate empty extraction result (as with image-only PDFs).
-            let path = std::path::Path::new("dummy.pdf");
+            let _path = std::path::Path::new("dummy.pdf");
             // extract_pdf with all-whitespace text: build a minimal valid PDF bytes that
             // pdf-extract parses but has no text. Instead, test the logic inline.
             let result = extract_pdf_text_layer_empty_message(1234);

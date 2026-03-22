@@ -67,9 +67,6 @@ skip = [
     # Common version conflicts in the ecosystem
     { name = "bitflags", version = "1" },
     { name = "syn", version = "1" },
-    { name = "proc-macro2", version = "1" },
-    { name = "quote", version = "1" },
-    { name = "unicode-ident", version = "1" },
 ]
 skip-tree = []
 
