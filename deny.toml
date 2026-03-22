@@ -37,7 +37,14 @@ allow = [
     "Unicode-DFS-2016",
     "CC0-1.0",
     "0BSD",
+    "OFL-1.1",
+    "Unicode-3.0",
 ]
+
+# Custom/non-SPDX licenses that are permissive
+[[licenses.exceptions]]
+name = "epaint_default_fonts"
+allow = ["LicenseRef-UFL-1.0"]
 # Crates without a detectable license or with licenses not in the allow list
 # are denied by default in cargo-deny v2 (allow-list mode).
 # Copyleft licenses (GPL, LGPL, AGPL) are not in the allow list → denied.

@@ -115,9 +115,10 @@ mod tests {
         let _b = ks.backend();
     }
 
-    // Integration round-trip — only runs when the test environment has a working
-    // credential backend (skips gracefully otherwise via the file-store fallback).
+    // Integration round-trip — requires a working credential backend (macOS
+    // Keychain or Linux D-Bus secret service). Skipped in CI / headless Linux.
     #[test]
+    #[ignore = "requires credential backend (keychain/D-Bus)"]
     fn set_get_delete_round_trip() {
         let ks = KeyStore::new("halcon-test-keystore");
         let key = "__test_round_trip__";
