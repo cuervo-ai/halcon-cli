@@ -707,9 +707,115 @@ pub async fn connect_mcp_servers(
     mcp_config: &McpConfig,
     tool_registry: &mut ToolRegistry,
 ) -> Vec<Arc<tokio::sync::Mutex<halcon_mcp::McpHost>>> {
+    use crate::repl::security::config_trust::{McpTrustDecision, McpTrustStore};
+    use std::io::IsTerminal;
+
     let mut hosts = Vec::new();
+    let workspace = std::env::current_dir().unwrap_or_default();
+    let is_interactive = std::io::stdin().is_terminal();
+    let mut mcp_store = McpTrustStore::load();
 
     for (name, server_config) in &mcp_config.servers {
+        // ── MCP Trust Gate (Gate 3) ────────────────────────────────────
+        // Serialize the full server config to compute a hash. If ANY field
+        // changes (command, args, env), the hash changes and re-approval
+        // is required — mitigates CVE-2025-54136 (MCPoison).
+        let config_json = serde_json::to_string(&serde_json::json!({
+            "command": server_config.command,
+            "args": server_config.args,
+            "env": server_config.env,
+        }))
+        .unwrap_or_default();
+
+        let trust_decision = mcp_store.check(&workspace, name, &config_json);
+
+        match trust_decision {
+            McpTrustDecision::Allowed => {
+                tracing::debug!(server = name, "MCP server approved (config hash match)");
+            }
+            McpTrustDecision::Denied => {
+                tracing::info!(server = name, "MCP server denied — skipping");
+                continue;
+            }
+            McpTrustDecision::Changed => {
+                if is_interactive {
+                    eprintln!();
+                    eprintln!("  MCP Server Config Changed: {name}");
+                    eprintln!(
+                        "  Command: {} {}",
+                        server_config.command,
+                        server_config.args.join(" ")
+                    );
+                    eprint!("  The config for this MCP server has changed. Allow? [y/N] ");
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                    let mut input = String::new();
+                    let approved = std::io::stdin().read_line(&mut input).is_ok()
+                        && matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                    let decision = if approved {
+                        McpTrustDecision::Allowed
+                    } else {
+                        McpTrustDecision::Denied
+                    };
+                    mcp_store.set_trust(
+                        &workspace,
+                        name,
+                        &config_json,
+                        &format!("{} {}", server_config.command, server_config.args.join(" ")),
+                        decision.clone(),
+                    );
+                    let _ = mcp_store.save();
+                    if decision == McpTrustDecision::Denied {
+                        continue;
+                    }
+                } else {
+                    tracing::warn!(
+                        server = name,
+                        "MCP server config changed — skipping in non-interactive mode"
+                    );
+                    continue;
+                }
+            }
+            McpTrustDecision::Unknown => {
+                if is_interactive {
+                    eprintln!();
+                    eprintln!("  New MCP Server: {name}");
+                    eprintln!(
+                        "  Command: {} {}",
+                        server_config.command,
+                        server_config.args.join(" ")
+                    );
+                    eprint!("  Allow this MCP server to connect? [y/N] ");
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                    let mut input = String::new();
+                    let approved = std::io::stdin().read_line(&mut input).is_ok()
+                        && matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+                    let decision = if approved {
+                        McpTrustDecision::Allowed
+                    } else {
+                        McpTrustDecision::Denied
+                    };
+                    mcp_store.set_trust(
+                        &workspace,
+                        name,
+                        &config_json,
+                        &format!("{} {}", server_config.command, server_config.args.join(" ")),
+                        decision.clone(),
+                    );
+                    let _ = mcp_store.save();
+                    if decision == McpTrustDecision::Denied {
+                        continue;
+                    }
+                } else {
+                    // Non-interactive: skip unknown MCP servers (fail-closed)
+                    tracing::debug!(
+                        server = name,
+                        "Unknown MCP server in non-interactive mode — skipping"
+                    );
+                    continue;
+                }
+            }
+        }
+
         tracing::debug!(server = name, command = %server_config.command, "Starting MCP server");
 
         let mut host = match halcon_mcp::McpHost::new(

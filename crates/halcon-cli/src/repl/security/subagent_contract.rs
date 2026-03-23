@@ -374,6 +374,35 @@ impl SubAgentContractValidator {
             }
         }
 
+        // 6. Prompt injection detection — reject outputs that attempt to
+        // override the coordinator's instructions. This prevents a compromised
+        // sub-agent from injecting directives into the coordinator's context.
+        {
+            let injection_patterns = [
+                "ignore previous instructions",
+                "ignore all instructions",
+                "ignore the above",
+                "disregard previous",
+                "you are now",
+                "new instructions:",
+                "system prompt:",
+                "SYSTEM:",
+                "<system>",
+                "override:",
+            ];
+            let injection_found = injection_patterns
+                .iter()
+                .any(|pat| lower.contains(&pat.to_lowercase()));
+            if injection_found {
+                tracing::warn!(
+                    step_type = ?contract.step_type,
+                    output_preview = &trimmed[..trimmed.len().min(200)],
+                    "SubAgentContract: prompt injection attempt detected in sub-agent output"
+                );
+                return ValidationResult::rejected(RejectionReason::NoSubstantiveContent);
+            }
+        }
+
         ValidationResult::valid()
     }
 
