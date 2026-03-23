@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -155,6 +156,22 @@ pub async fn run(
                 provider_factory::ensure_startup_providers(&mut registry).await;
             }
         }
+    }
+
+    // ── Trust gate ───────────────────────────────────────────────────────────
+    // Evaluate workspace trust, HALCON.md fingerprint, and MCP server approval
+    // BEFORE creating the session. This is the security boundary between
+    // "user opened a directory" and "agent can execute in it".
+    let is_interactive = std::io::stdin().is_terminal();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let trust_result = super::trust_gate::evaluate_trust_chain(&cwd, is_interactive)?;
+
+    if let Some(ref restricted) = trust_result.restricted_mode {
+        eprintln!();
+        eprintln!("  ⚠  Workspace not trusted — running in restricted mode");
+        eprintln!("     Only read-only tools are available.");
+        eprintln!("     Run `halcon trust grant` to trust this workspace.");
+        eprintln!();
     }
 
     // Frontier update: in classic (non-TUI) mode, show an interactive update prompt

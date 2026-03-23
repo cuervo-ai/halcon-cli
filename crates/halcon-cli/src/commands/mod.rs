@@ -25,5 +25,6 @@ pub mod status;
 pub mod theme;
 pub mod tools;
 pub mod trace;
+pub mod trust_gate;
 pub mod update;
 pub mod users;

@@ -87,6 +87,8 @@ libc = { workspace = true }
 git2 = { workspace = true }
 openssl = { workspace = true, optional = true }
 base64 = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
 ratatui = { workspace = true, optional = true }
 tui-textarea = { workspace = true, optional = true }
 arboard = { version = "3.4", optional = true } # Cross-platform clipboard (Phase A3)

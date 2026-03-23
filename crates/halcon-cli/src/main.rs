@@ -304,6 +304,12 @@ enum Commands {
         /// Auth token (auto-generated if omitted)
         #[arg(long, env = "HALCON_API_TOKEN")]
         token: Option<String>,
+
+        /// Connect to Cenzontle bridge for remote supervision.
+        /// Establishes outbound WebSocket to api-cenzontle.zuclubit.com.
+        /// Requires: `halcon login cenzontle` first.
+        #[arg(long, value_name = "TARGET")]
+        bridge: Option<String>,
     },
 
     /// Theme generation and optimization
@@ -1110,8 +1116,18 @@ async fn main() -> Result<()> {
             PluginAction::Remove { id, force } => commands::plugin::remove(&config, &id, force),
             PluginAction::Status => commands::plugin::status(&config),
         },
-        Some(Commands::Serve { host, port, token }) => {
-            commands::serve::run(&host, port, token).await
+        Some(Commands::Serve {
+            host,
+            port,
+            token,
+            bridge,
+        }) => {
+            if let Some(target) = bridge {
+                // Start serve + bridge relay to Cenzontle
+                commands::serve::run_with_bridge(&host, port, token, &target).await
+            } else {
+                commands::serve::run(&host, port, token).await
+            }
         }
         Some(Commands::Audit { action }) => match action {
             AuditAction::Export {
