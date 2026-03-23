@@ -28,19 +28,23 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &mpsc::Sender<UiC
         match outcome {
             PermissionOutcome::Approved => {
                 state.chat.permission_modal = None;
-                let _ = cmd_tx.try_send(UiCommand::ResolvePermission {
+                if let Err(e) = cmd_tx.try_send(UiCommand::ResolvePermission {
                     session_id,
                     request_id: modal.request_id,
                     approve: true,
-                });
+                }) {
+                    tracing::error!("Failed to send permission approval: {e}");
+                }
             }
             PermissionOutcome::Denied => {
                 state.chat.permission_modal = None;
-                let _ = cmd_tx.try_send(UiCommand::ResolvePermission {
+                if let Err(e) = cmd_tx.try_send(UiCommand::ResolvePermission {
                     session_id,
                     request_id: modal.request_id,
                     approve: false,
-                });
+                }) {
+                    tracing::error!("Failed to send permission denial: {e}");
+                }
             }
             PermissionOutcome::Pending => {}
         }
@@ -600,16 +604,21 @@ fn render_input_area(
             // Cache for potential retry if the turn fails with recoverable=true.
             state.chat.last_message = Some((content.clone(), orchestrate));
             state.chat.retry_count = 0;
-            let _ = cmd_tx.try_send(UiCommand::SendChatMessage {
+            if let Err(e) = cmd_tx.try_send(UiCommand::SendChatMessage {
                 session_id,
                 content,
                 orchestrate,
                 attachments,
-            });
+            }) {
+                tracing::error!("Failed to send chat message: {e}");
+                state.chat.is_streaming = false;
+            }
         }
 
         if is_busy && ui.button("Cancel").clicked() {
-            let _ = cmd_tx.try_send(UiCommand::CancelChatExecution { session_id });
+            if let Err(e) = cmd_tx.try_send(UiCommand::CancelChatExecution { session_id }) {
+                tracing::warn!("Failed to send cancellation: {e}");
+            }
         }
     });
 }

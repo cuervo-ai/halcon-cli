@@ -393,7 +393,9 @@ pub async fn resolve_permission(
 
     // Forward decision to executor via perm_senders.
     if let Some(tx) = state.perm_senders.get(&session_id) {
-        let _ = tx.send((request_id, approved));
+        if let Err(e) = tx.send((request_id, approved)) {
+            tracing::error!(session_id = %session_id, request_id = %request_id, "Permission decision channel closed: {e}");
+        }
     }
 
     state.broadcast(WsServerEvent::PermissionResolved {

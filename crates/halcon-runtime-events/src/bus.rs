@@ -97,7 +97,9 @@ impl EventBus {
         let event = RuntimeEvent::new(session_id, kind);
         // `send` returns Err if there are no receivers — that is fine; the bus
         // may have zero subscribers during early startup or in test runs.
-        let _ = self.sender.send(event);
+        if self.sender.send(event).is_err() {
+            tracing::trace!("Event bus: no subscribers (dropped event)");
+        }
     }
 
     /// Subscribe to the event stream, receiving all future events.
