@@ -33,9 +33,9 @@
 //! be the source of truth, with static as safety net.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use halcon_core::types::ModelInfo;
 

@@ -159,7 +159,7 @@ impl VectorMemory {
     /// If the store exceeds `max_episodes`, the oldest entries are evicted.
     pub fn store(&self, mut episode: Episode, embedding: Vec<f32>) {
         episode.embedding = Some(embedding);
-        let mut episodes = self.episodes.lock().unwrap();
+        let mut episodes = self.episodes.lock().unwrap_or_else(|e| e.into_inner());
         episodes.push(episode);
         // Evict oldest entries if over capacity.
         let max = self.config.max_episodes;
@@ -174,7 +174,7 @@ impl VectorMemory {
     /// Results are sorted descending by composite relevance score (similarity × recency decay).
     pub fn retrieve(&self, query_embedding: &[f32]) -> Vec<RetrievedEpisode> {
         let now = Utc::now();
-        let episodes = self.episodes.lock().unwrap();
+        let episodes = self.episodes.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut scored: Vec<(f32, f32, usize)> = episodes
             .iter()
@@ -208,7 +208,7 @@ impl VectorMemory {
 
     /// Total number of stored episodes.
     pub fn len(&self) -> usize {
-        self.episodes.lock().unwrap().len()
+        self.episodes.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -228,20 +228,20 @@ impl VectorMemory {
 
     /// The most recent N episodes regardless of similarity (for context injection).
     pub fn recent(&self, n: usize) -> Vec<Episode> {
-        let episodes = self.episodes.lock().unwrap();
+        let episodes = self.episodes.lock().unwrap_or_else(|e| e.into_inner());
         episodes.iter().rev().take(n).cloned().collect()
     }
 
     /// Clear all episodes (e.g., on logout or explicit memory wipe).
     pub fn clear(&self) {
-        self.episodes.lock().unwrap().clear();
+        self.episodes.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Serialise all episodes to zstd-compressed JSON bytes for persistence.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         // Strip embeddings before serialising (they'll be recomputed on load).
         let episodes: Vec<Episode> = {
-            let eps = self.episodes.lock().unwrap();
+            let eps = self.episodes.lock().unwrap_or_else(|e| e.into_inner());
             eps.iter()
                 .map(|e| {
                     let mut e2 = e.clone();
@@ -262,7 +262,7 @@ impl VectorMemory {
         let decompressed = zstd::decode_all(bytes)?;
         let episodes: Vec<Episode> = serde_json::from_slice(&decompressed)?;
         let count = episodes.len();
-        let mut store = self.episodes.lock().unwrap();
+        let mut store = self.episodes.lock().unwrap_or_else(|e| e.into_inner());
         store.extend(episodes);
         Ok(count)
     }

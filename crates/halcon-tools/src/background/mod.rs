@@ -50,7 +50,7 @@ impl ProcessRegistry {
 
     /// Register a new background process. Returns error if at capacity.
     pub fn register(&self, process: BackgroundProcess) -> Result<(), String> {
-        let mut procs = self.processes.lock().unwrap();
+        let mut procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
 
         // Clean up finished processes first.
         procs.retain(|_, p| !p.finished);
@@ -69,7 +69,7 @@ impl ProcessRegistry {
 
     /// Get a reference to a process, updating its buffers from the child.
     pub fn get_output(&self, job_id: &str) -> Option<(String, String, bool, Option<i32>, u64)> {
-        let procs = self.processes.lock().unwrap();
+        let procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         procs.get(job_id).map(|p| {
             (
                 p.stdout_buf.clone(),
@@ -90,7 +90,7 @@ impl ProcessRegistry {
         finished: bool,
         exit_code: Option<i32>,
     ) {
-        let mut procs = self.processes.lock().unwrap();
+        let mut procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = procs.get_mut(job_id) {
             p.stdout_buf.push_str(stdout);
             p.stderr_buf.push_str(stderr);
@@ -103,7 +103,7 @@ impl ProcessRegistry {
 
     /// Kill a background process. Returns (was_running, exit_code).
     pub fn kill(&self, job_id: &str) -> Option<(bool, Option<i32>)> {
-        let mut procs = self.processes.lock().unwrap();
+        let mut procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = procs.get_mut(job_id) {
             let was_running = !p.finished;
             if let Some(ref mut child) = p.child {
@@ -118,13 +118,13 @@ impl ProcessRegistry {
 
     /// Take the child process out for async waiting.
     pub fn take_child(&self, job_id: &str) -> Option<Child> {
-        let mut procs = self.processes.lock().unwrap();
+        let mut procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         procs.get_mut(job_id).and_then(|p| p.child.take())
     }
 
     /// List all job IDs with their running status.
     pub fn list(&self) -> Vec<(String, bool, u64)> {
-        let procs = self.processes.lock().unwrap();
+        let procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         procs
             .values()
             .map(|p| {
@@ -139,7 +139,7 @@ impl ProcessRegistry {
 
     /// Remove finished processes.
     pub fn cleanup(&self) -> usize {
-        let mut procs = self.processes.lock().unwrap();
+        let mut procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         let before = procs.len();
         procs.retain(|_, p| !p.finished);
         before - procs.len()
@@ -149,7 +149,7 @@ impl ProcessRegistry {
 impl Drop for ProcessRegistry {
     fn drop(&mut self) {
         // Kill all remaining child processes.
-        let mut procs = self.processes.lock().unwrap();
+        let mut procs = self.processes.lock().unwrap_or_else(|e| e.into_inner());
         for p in procs.values_mut() {
             if let Some(ref mut child) = p.child {
                 let _ = child.start_kill();

@@ -45,6 +45,7 @@ halcon-search = { path = "../halcon-search" }
 halcon-multimodal = { workspace = true }
 halcon-agent-core = { workspace = true, optional = true }
 
+dotenvy = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

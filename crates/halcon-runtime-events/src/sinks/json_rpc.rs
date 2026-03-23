@@ -93,7 +93,7 @@ impl MemoryJsonSink {
 
     /// Return all emitted lines as a `Vec<String>`.
     pub fn lines(&self) -> Vec<String> {
-        let buf = self.buffer.lock().unwrap();
+        let buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let s = std::str::from_utf8(&buf).unwrap_or("");
         s.lines()
             .filter(|l| !l.is_empty())

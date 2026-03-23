@@ -403,7 +403,7 @@ try_cargo_install() {
     warn "No precompiled binary available for your platform."
     info "Falling back to cargo install (this will compile from source, may take 2-5 minutes)..."
 
-    if cargo install --git "https://github.com/${REPO_OWNER}/${REPO_NAME}" --locked --no-default-features halcon-cli; then
+    if cargo install --git "https://github.com/${REPO_OWNER}/${REPO_NAME}" --locked halcon-cli; then
         success "Installed via cargo install"
         return 0
     else
@@ -845,6 +845,33 @@ EOF
         success "macOS Gatekeeper signature applied"
     fi
 
+    header "Cleaning up old binaries"
+
+    # Remove stale binaries from other locations to prevent PATH conflicts
+    local other_locations=("/usr/local/bin" "$HOME/.cargo/bin" "$HOME/.local/bin")
+    for loc in "${other_locations[@]}"; do
+        local other_bin="$loc/${BINARY_NAME}"
+        # Skip the install dir itself and skip if file doesn't exist
+        [ "$loc" = "$INSTALL_DIR" ] && continue
+        [ ! -f "$other_bin" ] && continue
+        # Remove old binary to avoid PATH conflicts
+        if rm -f "$other_bin" 2>/dev/null; then
+            success "Removed old binary at $other_bin"
+        else
+            warn "Could not remove old binary at $other_bin (may need sudo)"
+        fi
+    done
+    # Also remove legacy cuervo binaries
+    for loc in "${other_locations[@]}"; do
+        for legacy in "cuervo" "cuervo-desktop"; do
+            [ -f "$loc/$legacy" ] && rm -f "$loc/$legacy" 2>/dev/null && success "Removed legacy $loc/$legacy"
+        done
+    done
+    # Remove versioned backups
+    for bak in "$INSTALL_DIR/${BINARY_NAME}".*.bak "$INSTALL_DIR/${BINARY_NAME}".bak.*; do
+        [ -f "$bak" ] && rm -f "$bak" 2>/dev/null && success "Removed backup $bak"
+    done
+
     header "Verification"
 
     local installed_binary="$INSTALL_DIR/${BINARY_NAME}"
@@ -854,6 +881,19 @@ EOF
         success "Installation verified: $installed_version"
     else
         error "Binary not executable at $installed_binary"
+    fi
+
+    # Verify no conflicting binaries remain
+    local all_halcon
+    all_halcon="$(which -a "${BINARY_NAME}" 2>/dev/null | sort -u || true)"
+    local count
+    count="$(echo "$all_halcon" | grep -c . || true)"
+    if [ "$count" -gt 1 ]; then
+        warn "Multiple halcon binaries detected in PATH:"
+        echo "$all_halcon" | while read -r p; do
+            echo "    $p"
+        done
+        warn "Consider removing extras to avoid version conflicts."
     fi
 
     # ── Frontier tools ────────────────────────────────────────────────────────

@@ -137,7 +137,7 @@ fn get_or_create_session(server: &McpHttpServer, headers: &HeaderMap) -> String 
 
     // Prune expired sessions and touch the current one.
     let ttl = server.inner.session_ttl;
-    let mut sessions = server.inner.sessions.lock().unwrap();
+    let mut sessions = server.inner.sessions.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     sessions.retain(|_, last| now.duration_since(*last) < ttl);
     sessions.insert(session_id.clone(), now);

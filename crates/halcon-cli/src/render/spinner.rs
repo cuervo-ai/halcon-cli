@@ -63,7 +63,7 @@ impl Spinner {
 
                 // Show total elapsed since invoke started (not since spinner appeared).
                 let elapsed = invoke_start.elapsed().as_secs_f64();
-                let lbl = label_clone.lock().unwrap().clone();
+                let lbl = label_clone.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 {
                     let mut out = io::stderr().lock();
                     let _ = write!(out, "\r  {primary}{frame}{r} {lbl} {dim}({elapsed:.1}s){r}",);

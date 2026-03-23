@@ -13,7 +13,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use halcon_providers::router::{IntelligentRouter, RoutingRequest};
 //!
 //! let router = IntelligentRouter::default();

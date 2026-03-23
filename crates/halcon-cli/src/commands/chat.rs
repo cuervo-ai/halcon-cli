@@ -475,7 +475,9 @@ fn print_exit_hooks(repl: &Repl, flags: &FeatureFlags) {
                     .join(format!("{session_id}.jsonl"))
             });
             if let Some(ref tp) = tp {
-                let _ = std::fs::create_dir_all(tp.parent().unwrap());
+                if let Some(parent) = tp.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 write_trace_jsonl(repl, tp);
             }
             tp

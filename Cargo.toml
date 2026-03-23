@@ -23,13 +23,16 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.12"
+version = "0.3.13"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
 repository = "https://github.com/cuervo-ai/halcon-cli"
 
 [workspace.dependencies]
+# Environment
+dotenvy = "0.15"
+
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "time", "sync", "signal", "process", "fs"] }
 tokio-util = { version = "0.7", features = ["codec"] }

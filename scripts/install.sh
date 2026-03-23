@@ -693,6 +693,34 @@ main() {
         esac
     fi
 
+    # ─── Clean up duplicate binaries ─────────────────────────────────────────
+    # Remove stale halcon binaries from other PATH locations to prevent
+    # version conflicts (e.g., ~/.local/bin vs /usr/local/bin).
+    for _loc in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin" "/usr/local/bin"; do
+        _other="${_loc}/${BINARY_NAME}"
+        [ "$_loc" = "$INSTALL_DIR" ] && continue
+        [ ! -f "$_other" ] && continue
+        if rm -f "$_other" 2>/dev/null; then
+            ok "Removed old binary: $_other"
+        elif command -v sudo >/dev/null 2>&1 && sudo rm -f "$_other" 2>/dev/null; then
+            ok "Removed old binary: $_other (via sudo)"
+        else
+            warn "Old binary at $_other may cause PATH conflicts — remove manually"
+        fi
+    done
+    # Remove legacy cuervo binaries
+    for _legacy in "cuervo" "cuervo-desktop"; do
+        for _loc in "$HOME/.local/bin" "$HOME/.cargo/bin" "/usr/local/bin"; do
+            [ -f "$_loc/$_legacy" ] && rm -f "$_loc/$_legacy" 2>/dev/null && ok "Removed legacy: $_loc/$_legacy"
+        done
+    done
+    # Remove versioned backups
+    for _loc in "$INSTALL_DIR" "/usr/local/bin" "$HOME/.local/bin"; do
+        for _bak in "$_loc/${BINARY_NAME}".*.bak "$_loc/${BINARY_NAME}".bak.*; do
+            [ -f "$_bak" ] && rm -f "$_bak" 2>/dev/null && ok "Removed backup: $_bak"
+        done
+    done
+
     # ─── Verify installation ─────────────────────────────────────────────────
     if "${DEST}" --version >/dev/null 2>&1; then
         ok "Halcon CLI ${VERSION} ready"

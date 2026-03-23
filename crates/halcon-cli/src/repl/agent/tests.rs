@@ -4494,13 +4494,10 @@ fn compaction_60_percent_threshold_fires_earlier_than_70() {
     let compactor = ContextCompactor::new(config);
 
     // pipeline_budget = 100_000 tokens.
-    // 60% threshold = 60_000 tokens. 70% threshold = 70_000 tokens.
-    // At 65_000 tokens (65% utilization):
-    //   Old threshold (70%): 65_000 < 70_000 → NO compact.
-    //   New threshold (60%): 65_000 >= 60_000 → compact.
+    // 60% threshold = 60_000 tokens.
+    // BPE: "word ".repeat(N) ≈ N+1 tokens.
     let pipeline_budget: u32 = 100_000;
-    // 65_000 tokens × 4 chars/token = 260_000 chars.
-    let text_65k = "x".repeat(260_000);
+    let text_65k = "word ".repeat(65_000);
     let msgs = vec![halcon_core::types::ChatMessage {
         role: halcon_core::types::Role::User,
         content: halcon_core::types::MessageContent::Text(text_65k),
@@ -4512,8 +4509,8 @@ fn compaction_60_percent_threshold_fires_earlier_than_70() {
         "60% threshold: 65K tokens must trigger compaction on 100K budget"
     );
 
-    // Verify exact boundary: 59_999 tokens = 239_996 chars — just below threshold.
-    let text_just_below = "x".repeat(239_996);
+    // Verify exact boundary: 59_998 repeats ≈ 59_999 tokens — just below 60_000 threshold.
+    let text_just_below = "word ".repeat(59_998);
     let msgs_below = vec![halcon_core::types::ChatMessage {
         role: halcon_core::types::Role::User,
         content: halcon_core::types::MessageContent::Text(text_just_below),

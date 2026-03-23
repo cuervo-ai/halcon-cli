@@ -280,7 +280,54 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("  Verification: {}", ver_out.trim());
     }
 
+    // Clean up duplicate binaries in other PATH locations to prevent version conflicts.
+    // The active binary is at current_exe; remove stale copies elsewhere.
+    clean_duplicate_binaries(&current_exe);
+
     Ok(())
+}
+
+/// Remove duplicate `halcon` binaries from well-known locations that are NOT
+/// the active binary. Prevents PATH shadowing after updates.
+fn clean_duplicate_binaries(active: &Path) {
+    let active = canonicalize_best_effort(active);
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = [
+        PathBuf::from("/usr/local/bin/halcon"),
+        home.join(".local/bin/halcon"),
+        home.join(".cargo/bin/halcon"),
+    ];
+    for candidate in &candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        let candidate = canonicalize_best_effort(candidate);
+        if candidate == active {
+            continue;
+        }
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => println!("  Removed stale binary: {}", candidate.display()),
+            Err(e) => {
+                // Permission denied is expected for /usr/local/bin without sudo
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    println!(
+                        "  Note: old binary at {} needs manual removal (sudo rm)",
+                        candidate.display()
+                    );
+                }
+                // Other errors silently ignored (file vanished, etc.)
+            }
+        }
+    }
+    // Also clean legacy "cuervo" binaries
+    for legacy in ["cuervo", "cuervo-desktop"] {
+        for dir in ["/usr/local/bin", &home.join(".local/bin").to_string_lossy().into_owned(), &home.join(".cargo/bin").to_string_lossy().into_owned()] {
+            let p = PathBuf::from(dir).join(legacy);
+            if p.exists() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -198,8 +198,12 @@ mod tests {
         assert!(match_result || !match_result, "ct_eq must return a bool");
     }
 
+    // Serialize env var tests to prevent parallel env pollution.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn load_token_roles_from_env_empty_when_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure env var is not set for this test.
         std::env::remove_var("HALCON_TOKEN_ROLES");
         let map = load_token_roles_from_env();
@@ -208,6 +212,7 @@ mod tests {
 
     #[test]
     fn load_token_roles_from_env_parses_valid_entries() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let token = generate_token();
         std::env::set_var("HALCON_TOKEN_ROLES", format!("{token}:Admin"));
         let map = load_token_roles_from_env();
@@ -218,6 +223,7 @@ mod tests {
 
     #[test]
     fn load_token_roles_from_env_skips_malformed_entries() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("HALCON_TOKEN_ROLES", "nocoarseformat,validtoken:Admin");
         let map = load_token_roles_from_env();
         std::env::remove_var("HALCON_TOKEN_ROLES");

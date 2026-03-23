@@ -88,7 +88,7 @@ impl Default for CiSink {
 
 impl RenderSink for CiSink {
     fn stream_text(&self, text: &str) {
-        let mut buf = self.stream_buf.lock().unwrap();
+        let mut buf = self.stream_buf.lock().unwrap_or_else(|e| e.into_inner());
         buf.push_str(text);
     }
 
@@ -102,7 +102,7 @@ impl RenderSink for CiSink {
 
     fn stream_done(&self) {
         let text = {
-            let mut buf = self.stream_buf.lock().unwrap();
+            let mut buf = self.stream_buf.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *buf)
         };
         let round = self.current_round.load(Ordering::Relaxed);
@@ -122,12 +122,12 @@ impl RenderSink for CiSink {
     }
 
     fn stream_reset(&self) {
-        let mut buf = self.stream_buf.lock().unwrap();
+        let mut buf = self.stream_buf.lock().unwrap_or_else(|e| e.into_inner());
         buf.clear();
     }
 
     fn stream_full_text(&self) -> String {
-        self.stream_buf.lock().unwrap().clone()
+        self.stream_buf.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn tool_start(&self, name: &str, input: &serde_json::Value) {
@@ -221,7 +221,7 @@ impl RenderSink for CiSink {
 
     fn session_started(&self, session_id: &str) {
         {
-            let mut s = self.session_id.lock().unwrap();
+            let mut s = self.session_id.lock().unwrap_or_else(|e| e.into_inner());
             *s = session_id.to_string();
         }
         self.emit(json!({
@@ -254,7 +254,7 @@ impl RenderSink for CiSink {
         self.total_output_tokens
             .fetch_add(output_tokens as usize, Ordering::Relaxed);
         {
-            let mut c = self.total_cost_usd.lock().unwrap();
+            let mut c = self.total_cost_usd.lock().unwrap_or_else(|e| e.into_inner());
             *c += cost;
         }
         self.rounds_total.store(round, Ordering::Relaxed);
@@ -330,12 +330,12 @@ impl CiSink {
     /// Called explicitly from main.rs after the agent loop returns so that
     /// the full token / cost data is available.
     pub fn emit_session_end(&self) {
-        let session_id = self.session_id.lock().unwrap().clone();
+        let session_id = self.session_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let rounds = self.rounds_total.load(Ordering::Relaxed);
         let input_tokens = self.total_input_tokens.load(Ordering::Relaxed);
         let output_tokens = self.total_output_tokens.load(Ordering::Relaxed);
         let tokens_used = input_tokens + output_tokens;
-        let cost_usd = *self.total_cost_usd.lock().unwrap();
+        let cost_usd = *self.total_cost_usd.lock().unwrap_or_else(|e| e.into_inner());
         self.emit(json!({
             "type": "session_end",
             "session_id": session_id,

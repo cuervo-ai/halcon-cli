@@ -1,6 +1,6 @@
 //! CLI commands for managing cron-based scheduled agent tasks.
 //!
-//! ```
+//! ```text
 //! halcon schedule add --name "security-scan" --cron "0 2 * * 1" \
 //!                     --instruction "Scan for vulnerabilities in main branch"
 //! halcon schedule list

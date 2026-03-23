@@ -160,7 +160,7 @@ impl SemanticCache {
 
         let key = sha256_key(query_text, model, tenant_id);
 
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
 
         // Layer 1: exact hash lookup.
@@ -182,7 +182,7 @@ impl SemanticCache {
         // We drop the lock, embed, then re-acquire.
         drop(inner);
         let query_vec = self.engine.embed(query_text);
-        let inner = self.inner.lock().expect("cache lock poisoned");
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut best_sim = 0.0_f32;
         let mut best_key: Option<String> = None;
@@ -240,7 +240,7 @@ impl SemanticCache {
         let embedding = self.engine.embed(query_text);
         let expires_at = Instant::now() + ttl;
 
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.semantic_index.push(SemanticEntry {
             key: key.clone(),
             tenant_id: tenant_id.to_string(),
@@ -263,7 +263,7 @@ impl SemanticCache {
     /// memory-constrained environments.
     pub fn evict_expired(&self) {
         let now = Instant::now();
-        let mut inner = self.inner.lock().expect("cache lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.exact.retain(|_, entry| entry.expires_at > now);
         // Collect live keys into a set first to avoid a simultaneous mutable +
         // immutable borrow of `inner` inside the closure.
@@ -274,7 +274,7 @@ impl SemanticCache {
     /// Number of live (non-expired) entries in the exact-match layer.
     pub fn len(&self) -> usize {
         let now = Instant::now();
-        let inner = self.inner.lock().expect("cache lock poisoned");
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.exact.values().filter(|e| e.expires_at > now).count()
     }
 

@@ -143,7 +143,7 @@ impl SemanticToolRouter {
     ///
     /// Call this once per tool at startup. The index will be rebuilt on the next query.
     pub fn register(&self, name: impl Into<String>, description: impl Into<String>) {
-        let mut tools = self.tools.lock().unwrap();
+        let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
         let name = name.into();
         // Avoid duplicates — update description if already registered.
         if let Some(existing) = tools.iter_mut().find(|t| t.name == name) {
@@ -156,7 +156,7 @@ impl SemanticToolRouter {
                 embedding: None,
             });
         }
-        *self.index_dirty.lock().unwrap() = true;
+        *self.index_dirty.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     /// Register many tools at once (name, description) pairs.
@@ -168,14 +168,14 @@ impl SemanticToolRouter {
 
     /// Remove a tool from the registry.
     pub fn deregister(&self, name: &str) {
-        let mut tools = self.tools.lock().unwrap();
+        let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
         tools.retain(|t| t.name != name);
-        *self.index_dirty.lock().unwrap() = true;
+        *self.index_dirty.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     /// Return the number of registered tools.
     pub fn tool_count(&self) -> usize {
-        self.tools.lock().unwrap().len()
+        self.tools.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Query the router for the top-k tools most relevant to `intent`.
@@ -194,8 +194,8 @@ impl SemanticToolRouter {
 
         // 3. Compute cosine similarities (linear scan over normalised embeddings).
         //    For <= 10k tools this is fast enough; HNSW adds complexity without benefit.
-        let tools = self.tools.lock().unwrap();
-        let embeddings = self.index_embeddings.lock().unwrap();
+        let tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
+        let embeddings = self.index_embeddings.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut scored: Vec<(f32, usize)> = embeddings
             .iter()
@@ -244,7 +244,7 @@ impl SemanticToolRouter {
     /// Embed all tools that don't yet have an embedding, then rebuild index.
     async fn ensure_embeddings(&self) -> Result<()> {
         let names_needing_embed: Vec<(usize, String)> = {
-            let tools = self.tools.lock().unwrap();
+            let tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
             tools
                 .iter()
                 .enumerate()
@@ -253,7 +253,7 @@ impl SemanticToolRouter {
                 .collect()
         };
 
-        if names_needing_embed.is_empty() && !*self.index_dirty.lock().unwrap() {
+        if names_needing_embed.is_empty() && !*self.index_dirty.lock().unwrap_or_else(|e| e.into_inner()) {
             return Ok(());
         }
 
@@ -262,7 +262,7 @@ impl SemanticToolRouter {
             match self.get_or_embed(&description).await {
                 Ok(mut emb) => {
                     normalise(&mut emb);
-                    self.tools.lock().unwrap()[idx].embedding = Some(emb);
+                    self.tools.lock().unwrap_or_else(|e| e.into_inner())[idx].embedding = Some(emb);
                 }
                 Err(e) => {
                     warn!(tool_idx = idx, error = %e, "Failed to embed tool description — tool will be invisible to router");
@@ -272,14 +272,14 @@ impl SemanticToolRouter {
 
         // Rebuild the flat embedding index.
         {
-            let tools = self.tools.lock().unwrap();
-            let mut idx = self.index_embeddings.lock().unwrap();
+            let tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let mut idx = self.index_embeddings.lock().unwrap_or_else(|e| e.into_inner());
             *idx = tools
                 .iter()
                 .map(|t| t.embedding.clone().unwrap_or_default())
                 .collect();
         }
-        *self.index_dirty.lock().unwrap() = false;
+        *self.index_dirty.lock().unwrap_or_else(|e| e.into_inner()) = false;
         debug!(
             tool_count = self.tool_count(),
             "SemanticToolRouter index rebuilt"
@@ -291,7 +291,7 @@ impl SemanticToolRouter {
     async fn get_or_embed(&self, text: &str) -> Result<Vec<f32>> {
         // Check cache first.
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(emb) = cache.get(text) {
                 return Ok(emb.clone());
             }
@@ -302,7 +302,7 @@ impl SemanticToolRouter {
 
         // Store in cache.
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.put(text.to_string(), emb.clone());
         }
 

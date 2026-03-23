@@ -310,11 +310,10 @@ mod tests {
 
     #[test]
     fn needs_compaction_above_threshold() {
-        // 200k tokens * 0.80 = 160k threshold. Each token ~4 chars.
-        // So we need ~640k chars to trigger.
+        // 1000 * 0.80 = 800 token threshold.
+        // BPE: "word " ≈ 1 token. Use 801 repeats to exceed 800.
         let compactor = ContextCompactor::new(make_config(true, 0.80, 4, 1000));
-        // 1000 * 0.80 = 800 token threshold = 3200 chars
-        let big_text = "x".repeat(4000);
+        let big_text = "word ".repeat(801);
         let messages = vec![text_msg(Role::User, &big_text)];
         assert!(compactor.needs_compaction(&messages));
     }
@@ -322,7 +321,7 @@ mod tests {
     #[test]
     fn needs_compaction_disabled() {
         let compactor = ContextCompactor::new(make_config(false, 0.80, 4, 1000));
-        let big_text = "x".repeat(4000);
+        let big_text = "word ".repeat(801); // Would exceed threshold if enabled
         let messages = vec![text_msg(Role::User, &big_text)];
         assert!(!compactor.needs_compaction(&messages));
     }
@@ -330,34 +329,33 @@ mod tests {
     // --- Fix B: needs_compaction_with_budget ---
 
     /// Demonstrates the mismatch: old needs_compaction() uses 200K config → no trigger.
-    /// New needs_compaction_with_budget(64K×0.8=51.2K, 70%) → triggers correctly.
+    /// New needs_compaction_with_budget(64K×0.8=51.2K, 60%) → triggers correctly.
     #[test]
     fn compaction_with_budget_fires_for_small_context_window() {
         // Compactor configured with stale 200K (old default).
         let compactor = ContextCompactor::new(make_config(true, 0.80, 4, 200_000));
-        // ~14K tokens = 56K chars (> 60% of 51.2K pipeline_budget for 64K model).
-        let big_text = "x".repeat(56_000);
+        // BPE: "word " ≈ 1 token. 7000 repeats = ~7000 tokens.
+        let big_text = "word ".repeat(7000);
         let messages = vec![text_msg(Role::User, &big_text)];
 
-        // Old method: threshold = 80% × 200K = 160K → NOT triggered (14K < 160K).
+        // Old method: threshold = 80% × 200K = 160K → NOT triggered (7K < 160K).
         assert!(!compactor.needs_compaction(&messages));
 
-        // Fix B method: threshold = 60% × 51200 = 30720 → TRIGGERED (36K > 30.7K).
-        // 56000 chars / 4 = 14000 tokens. Threshold = 60% × 51200 = 30720. 14K < 30720.
-        // Need bigger text: 31K tokens = 124K chars.
-        let big_text2 = "x".repeat(124_001);
+        // Fix B method: threshold = 60% × 51200 = 30720.
+        // Need > 30720 tokens.
+        let big_text2 = "word ".repeat(30_721);
         let messages2 = vec![text_msg(Role::User, &big_text2)];
         let pipeline_budget = (64_000_u32 as f64 * 0.80) as u32; // 51200
         assert!(
             compactor.needs_compaction_with_budget(&messages2, pipeline_budget),
-            "Should trigger compaction: 31K tokens > 60% × 51.2K = 30.7K threshold"
+            "Should trigger compaction: 30721 tokens > 60% × 51.2K = 30720 threshold"
         );
     }
 
     #[test]
     fn compaction_with_budget_disabled_when_zero_budget() {
         let compactor = ContextCompactor::new(make_config(true, 0.80, 4, 200_000));
-        let big_text = "x".repeat(500_000);
+        let big_text = "word ".repeat(500_000);
         let messages = vec![text_msg(Role::User, &big_text)];
         // Budget of 0 = disabled.
         assert!(!compactor.needs_compaction_with_budget(&messages, 0));
@@ -367,11 +365,9 @@ mod tests {
     fn compaction_with_budget_60_percent_threshold() {
         let compactor = ContextCompactor::new(make_config(true, 0.80, 4, 10_000));
         // pipeline_budget = 8000 tokens. 60% threshold = (8000 * 0.60) as usize = 4800 tokens.
-        // estimate_tokens uses div_ceil(4): N chars → ceil(N/4) tokens.
-        // For 4799 tokens: need chars where ceil(chars/4) = 4799 → chars ≤ 19196 (19196 → 4799).
-        // For 4800 tokens: need chars where ceil(chars/4) = 4800 → chars = 19200 → ceil = 4800.
-        let just_below = "x".repeat(19_196); // ceil(19196/4) = 4799 tokens — below threshold
-        let just_above = "x".repeat(19_200); // ceil(19200/4) = 4800 tokens — at threshold
+        // BPE: "word ".repeat(N) ≈ N+1 tokens.
+        let just_below = "word ".repeat(4798); // 4799 tokens — below threshold
+        let just_above = "word ".repeat(4799); // 4800 tokens — at threshold
         let msgs_below = vec![text_msg(Role::User, &just_below)];
         let msgs_above = vec![text_msg(Role::User, &just_above)];
         assert!(
@@ -438,11 +434,12 @@ mod tests {
     #[test]
     fn estimate_message_tokens_basic() {
         let messages = vec![
-            text_msg(Role::User, "hello"),      // 5 chars → 2 tokens
-            text_msg(Role::Assistant, "world"), // 5 chars → 2 tokens
+            text_msg(Role::User, "hello"),
+            text_msg(Role::Assistant, "world"),
         ];
         let tokens = ContextCompactor::estimate_message_tokens(&messages);
-        assert_eq!(tokens, 4); // 10 chars / 4 = 2.5 → ceil = 4 (2+2)
+        // BPE: "hello" = 1 token, "world" = 1 token
+        assert_eq!(tokens, 2);
     }
 
     #[test]

@@ -136,7 +136,7 @@ impl Tool for TaskTrackTool {
             HalconError::InvalidInput("task_track requires 'action' string".into())
         })?;
 
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
 
         match action {
             "add" => {

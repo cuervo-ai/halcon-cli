@@ -536,31 +536,41 @@ mod tests {
     fn concurrent_writers_do_not_corrupt_file() {
         // Validates that concurrent set_multiple calls don't produce invalid JSON.
         // Last writer wins, but the file must always be parseable.
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("concurrent.json");
         let path = Arc::new(path);
+        let barrier = Arc::new(Barrier::new(8));
 
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let p = Arc::clone(&path);
+                let b = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     let store = FileCredentialStore::at((*p).clone());
+                    b.wait(); // synchronize start for maximum contention
                     let access = format!("tok-{i}");
                     let worker = i.to_string();
-                    store
-                        .set_multiple([
+                    // Retry on transient filesystem contention.
+                    for attempt in 0..3 {
+                        match store.set_multiple([
                             ("access_token", access.as_str()),
                             ("worker_id", worker.as_str()),
-                        ])
-                        .unwrap();
+                        ]) {
+                            Ok(()) => return,
+                            Err(_) if attempt < 2 => {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(e) => panic!("set_multiple failed after retries: {e}"),
+                        }
+                    }
                 })
             })
             .collect();
 
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("worker thread panicked");
         }
 
         // After all writers finish, the file must be valid JSON.

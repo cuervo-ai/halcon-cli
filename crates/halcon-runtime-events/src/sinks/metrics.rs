@@ -351,7 +351,7 @@ impl MetricsSink {
 
     /// Reset all accumulated metrics (useful between sessions in long-running processes).
     pub fn reset(&self) {
-        *self.store.lock().expect("MetricsSink lock poisoned") = DiagnosticsStore::default();
+        *self.store.lock().unwrap_or_else(|e| e.into_inner()) = DiagnosticsStore::default();
     }
 }
 

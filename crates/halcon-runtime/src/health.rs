@@ -42,19 +42,19 @@ impl AgentHealthTracker {
 
     /// Initialize tracking for an agent.
     pub fn track(&self, id: Uuid) {
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write().unwrap_or_else(|e| e.into_inner());
         states.entry(id).or_insert_with(HealthState::new);
     }
 
     /// Remove tracking for an agent.
     pub fn untrack(&self, id: &Uuid) {
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write().unwrap_or_else(|e| e.into_inner());
         states.remove(id);
     }
 
     /// Record a successful health check or invocation.
     pub fn record_success(&self, id: &Uuid) {
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = states.get_mut(id) {
             state.success_count += 1;
             state.last_check = Utc::now();
@@ -64,7 +64,7 @@ impl AgentHealthTracker {
 
     /// Record a failed health check or invocation.
     pub fn record_failure(&self, id: &Uuid, reason: &str) {
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = states.get_mut(id) {
             state.failure_count += 1;
             state.last_check = Utc::now();
@@ -83,7 +83,7 @@ impl AgentHealthTracker {
 
     /// Get the current health for a given agent.
     pub fn current(&self, id: &Uuid) -> AgentHealth {
-        let states = self.states.read().unwrap();
+        let states = self.states.read().unwrap_or_else(|e| e.into_inner());
         states
             .get(id)
             .map(|s| s.current.clone())
@@ -94,7 +94,7 @@ impl AgentHealthTracker {
 
     /// Get all tracked health states.
     pub fn all_states(&self) -> HashMap<Uuid, AgentHealth> {
-        let states = self.states.read().unwrap();
+        let states = self.states.read().unwrap_or_else(|e| e.into_inner());
         states
             .iter()
             .map(|(k, v)| (*k, v.current.clone()))
@@ -103,7 +103,7 @@ impl AgentHealthTracker {
 
     /// Get detailed state for an agent.
     pub fn state(&self, id: &Uuid) -> Option<HealthState> {
-        let states = self.states.read().unwrap();
+        let states = self.states.read().unwrap_or_else(|e| e.into_inner());
         states.get(id).cloned()
     }
 }

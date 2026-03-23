@@ -295,18 +295,18 @@ impl SharedContext {
     }
 
     pub fn set(&self, key: String, value: serde_json::Value) {
-        let mut store = self.store.write().unwrap();
+        let mut store = self.store.write().unwrap_or_else(|e| e.into_inner());
         store.insert(key, value);
     }
 
     pub fn get(&self, key: &str) -> Option<serde_json::Value> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         store.get(key).cloned()
     }
 
     /// Get a snapshot of the context for the given keys.
     pub fn snapshot(&self, keys: &[String]) -> HashMap<String, serde_json::Value> {
-        let store = self.store.read().unwrap();
+        let store = self.store.read().unwrap_or_else(|e| e.into_inner());
         keys.iter()
             .filter_map(|k| store.get(k).map(|v| (k.clone(), v.clone())))
             .collect()

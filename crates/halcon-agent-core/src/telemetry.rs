@@ -112,7 +112,7 @@ impl ToolTelemetry {
             round,
             timestamp: Utc::now(),
         };
-        self.records.lock().unwrap().push(record);
+        self.records.lock().unwrap_or_else(|e| e.into_inner()).push(record);
         id
     }
 
@@ -125,7 +125,7 @@ impl ToolTelemetry {
         is_error: bool,
         token_cost: u32,
     ) {
-        let mut recs = self.records.lock().unwrap();
+        let mut recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(rec) = recs.iter_mut().find(|r| r.id == id) {
             rec.finalize(post_confidence, latency_ms, is_error, token_cost);
         }
@@ -133,12 +133,12 @@ impl ToolTelemetry {
 
     /// All records in this session (cloned).
     pub fn all_records(&self) -> Vec<InvocationRecord> {
-        self.records.lock().unwrap().clone()
+        self.records.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Per-tool aggregated statistics.
     pub fn tool_stats(&self) -> HashMap<String, ToolStats> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let mut stats: HashMap<String, ToolStats> = HashMap::new();
         for r in recs.iter() {
             let s = stats.entry(r.tool_name.clone()).or_default();
@@ -158,7 +158,7 @@ impl ToolTelemetry {
 
     /// Average success delta for a given tool across all recorded invocations.
     pub fn avg_delta_for_tool(&self, tool_name: &str) -> Option<f32> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         let deltas: Vec<f32> = recs
             .iter()
             .filter(|r| r.tool_name == tool_name)
@@ -173,7 +173,7 @@ impl ToolTelemetry {
 
     /// Last N records (most recent first), useful for critic.
     pub fn recent(&self, n: usize) -> Vec<InvocationRecord> {
-        let recs = self.records.lock().unwrap();
+        let recs = self.records.lock().unwrap_or_else(|e| e.into_inner());
         recs.iter().rev().take(n).cloned().collect()
     }
 

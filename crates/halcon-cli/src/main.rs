@@ -800,6 +800,9 @@ fn install_panic_hook() {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (silently ignored when absent).
+    let _ = dotenvy::dotenv();
+
     // Install panic hook early so any subsequent panic restores the terminal cleanly.
     install_panic_hook();
 
