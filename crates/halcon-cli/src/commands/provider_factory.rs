@@ -599,6 +599,15 @@ async fn precheck_providers_with_explicit(
             // provider's best model automatically rather than silently propagating a model
             // that will fail deep in the agent loop.
             let resolved_model = if p.validate_model(model).is_ok() {
+                let model_info = p.supported_models().iter().find(|m| m.id == model);
+                tracing::info!(
+                    provider = primary,
+                    model = model,
+                    supports_tools = model_info.map(|m| m.supports_tools).unwrap_or(false),
+                    context_window = model_info.map(|m| m.context_window).unwrap_or(0),
+                    source = if explicit_model { "explicit -m flag" } else { "config default" },
+                    "Model selection: validated"
+                );
                 model.to_string()
             } else {
                 // Model not found on this provider. Resolution order:

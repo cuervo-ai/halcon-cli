@@ -712,6 +712,45 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         "Resolved compaction model for provider"
     );
 
+    // ── Runtime model validation (Phase H1: Tool Enforcement) ─────────────
+    // Verify the selected model's capabilities BEFORE entering the agent loop.
+    // This prevents silent degradation when a no-tools model is used for tool-intensive tasks.
+    let model_info = provider
+        .supported_models()
+        .iter()
+        .find(|m| m.id == request.model)
+        .cloned();
+    let model_supports_tools = model_info.as_ref().map(|m| m.supports_tools).unwrap_or(false);
+    let has_tools_in_request = !request.tools.is_empty();
+
+    // When true, cached_tools will be emptied below to prevent tool injection.
+    let force_no_tools = has_tools_in_request && !model_supports_tools;
+    if force_no_tools {
+        tracing::warn!(
+            model = %request.model,
+            provider = provider.name(),
+            tool_count = request.tools.len(),
+            "Model does not support tools — running in direct-response mode (tools stripped)"
+        );
+        render_sink.info(&format!(
+            "[model] '{}' does not support tools — running in direct-response mode",
+            request.model
+        ));
+    } else if model_info.is_none() {
+        tracing::warn!(
+            model = %request.model,
+            provider = provider.name(),
+            "Model not found in provider's supported list — proceeding with caution"
+        );
+    } else {
+        tracing::debug!(
+            model = %request.model,
+            supports_tools = model_supports_tools,
+            context_window = model_info.as_ref().map(|m| m.context_window).unwrap_or(0),
+            "Runtime model validation passed"
+        );
+    }
+
     // Cache tools outside the loop — tool definitions never change between rounds.
     // Phase 38: Apply intent-based tool selection when dynamic_tool_selection is enabled.
     // Conversational intent (greetings, simple Q&A) returns vec![] — the model responds
@@ -760,6 +799,17 @@ pub async fn run_agent_loop(ctx: AgentContext<'_>) -> Result<AgentLoopResult> {
         // Invalid schemas are logged and excluded — prevents confusing API-level errors.
         super::schema_validator::preflight_validate(env_filtered)
     };
+
+    // Phase H1: enforce tool stripping for models without FUNCTION_CALLING capability.
+    if force_no_tools && !cached_tools.is_empty() {
+        tracing::info!(
+            stripped = cached_tools.len(),
+            model = %request.model,
+            "Tool enforcement: stripped all tools (model lacks FUNCTION_CALLING)"
+        );
+        cached_tools.clear();
+    }
+
     // B1: InputNormalizer — normalize the raw user message before any scoring.
     // Unicode control chars stripped, whitespace collapsed, language detected.
     // The normalized query is passed to BoundaryDecisionEngine instead of raw user_msg.
