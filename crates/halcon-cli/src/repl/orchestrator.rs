@@ -729,7 +729,16 @@ pub async fn run_orchestrator(
                     let effective_sink: &dyn crate::render::sink::RenderSink =
                         if let Some(ref s) = sub_sink_holder { s } else { &silent_sink };
 
-                    let default_planning_config = halcon_core::types::PlanningConfig::default();
+                    // Wave 11 fix: Sub-agents MUST NOT run planning. They have focused
+                    // single-tool instructions from the orchestrator. Planning wastes
+                    // the sub-agent's time budget (7.8K tokens of text "plan" from deepseek)
+                    // and causes rounds=0 because the model "answers" during planning
+                    // instead of calling tools in the main loop.
+                    let default_planning_config = {
+                        let mut cfg = halcon_core::types::PlanningConfig::default();
+                        cfg.adaptive = false; // Disable planning for sub-agents
+                        cfg
+                    };
                     let default_orch_config = OrchestratorConfig::default();
                     let sub_agent_speculator = super::tool_speculation::ToolSpeculator::new();
                     // Phase 1: Sub-agents get their own permission pipeline with shared state
