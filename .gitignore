@@ -197,4 +197,23 @@ test.txt
 game.js
 index.html
 output.html
+
+# ── Root-level analysis/remediation artifacts ────────
+BEFORE_AFTER_*.md
+CENZONTLE_*.md
+COMPLETE_REMEDIATION_*.md
+DELETION_LOG*.md
+EXECUTIVE_SUMMARY_*.md
+GAP_ANALYSIS*.md
+PHASED_REFACTOR_*.md
+PRODUCTION_HARDENING_*.md
+RUNTIME_ACTIVATION_*.md
+TARGET_ARCHITECTURE*.md
+URL_CHANGE_*.md
+REMEDI*.md
+install_and_validate.sh
+verify_installation.sh
+
+# ── Snapshot test updates (review before committing) ──
+*.snap.new
 style.css
