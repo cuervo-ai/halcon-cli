@@ -26,8 +26,9 @@ pub struct ReplCacheState {
     /// into the next fresh `ModelSelector` via `with_quality_seeds()`. This ensures `balanced`
     /// routing uses accumulated quality data across all messages within the session, not just
     /// the current message (previously reset to neutral every turn because ModelSelector is
-    /// created fresh per message). Tuple: `(success_count, failure_count, total_reward)`.
-    pub model_quality: HashMap<String, (u32, u32, f64)>,
+    /// created fresh per message).
+    /// Wave 10: Extended tuple: `(success, failure, reward, tool_expected, tool_successful)`.
+    pub model_quality: HashMap<String, (u32, u32, f64, u32, u32)>,
 
     /// Temporary dry-run mode override for the next handle_message call.
     pub dry_run_override: Option<DryRunMode>,
@@ -129,7 +130,7 @@ mod tests {
         cache.last_timeline = Some("timeline_json".to_string());
         cache
             .model_quality
-            .insert("model1".to_string(), (5, 2, 0.8));
+            .insert("model1".to_string(), (5, 2, 0.8, 0, 0));
         cache.block_tool("bash".to_string(), "test".to_string());
 
         assert!(cache.has_timeline());

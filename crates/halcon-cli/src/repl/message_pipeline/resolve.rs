@@ -91,9 +91,10 @@ impl ResolveStage {
                         let cached = cache
                             .model_quality
                             .entry(model_id)
-                            .or_insert((0u32, 0u32, 0.0f64));
+                            .or_insert((0u32, 0u32, 0.0f64, 0u32, 0u32));
                         if success > cached.0 {
-                            *cached = (success, failure, reward);
+                            // Preserve existing compliance data (fields 3,4) from session
+                            *cached = (success, failure, reward, cached.3, cached.4);
                         }
                     }
                     tracing::info!(

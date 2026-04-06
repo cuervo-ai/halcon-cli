@@ -39,6 +39,10 @@ struct ModelPerformanceStats {
     failure_count: u32,
     /// Cumulative reward signal from the reward pipeline (Phase 2).
     total_reward: f64,
+    /// Wave 10: Rounds where tools were available and model was expected to use them.
+    tool_rounds_expected: u32,
+    /// Wave 10: Rounds where model actually emitted tool_use and tools executed.
+    tool_rounds_successful: u32,
 }
 
 impl ModelPerformanceStats {
@@ -61,6 +65,38 @@ impl ModelPerformanceStats {
         // `2.0 - 2*avg` → at avg=1.0: mult=0.0 (free), at avg=0.5: mult=1.0 (neutral),
         // at avg=0.0: mult=2.0 (double cost penalty). Clamp to [0.5, 2.0] for stability.
         (2.0 - 2.0 * self.avg_reward()).clamp(0.5, 2.0)
+    }
+
+    /// Wave 10: Tool-use compliance rate [0.0, 1.0].
+    ///
+    /// Measures how often this model correctly emits tool_use when tools are available.
+    /// Returns 1.0 (optimistic prior) when no data — unknown models are not penalized.
+    /// After ≥3 expected rounds, the rate reflects real behavior.
+    fn tool_compliance_rate(&self) -> f64 {
+        if self.tool_rounds_expected < 3 {
+            return 1.0; // Not enough data → optimistic prior
+        }
+        self.tool_rounds_successful as f64 / self.tool_rounds_expected as f64
+    }
+
+    /// Wave 10: Multiplier applied to model score for tool-heavy tasks.
+    ///
+    /// Models with high compliance get no penalty (1.0).
+    /// Models with low compliance get heavy penalty (0.1).
+    /// Only applied when the request includes tools.
+    fn tool_compliance_multiplier(&self) -> f64 {
+        let rate = self.tool_compliance_rate();
+        if rate >= 0.9 {
+            1.0
+        } else if rate >= 0.7 {
+            0.8
+        } else if rate >= 0.5 {
+            0.5
+        } else if rate >= 0.3 {
+            0.2
+        } else {
+            0.1
+        }
     }
 }
 
@@ -193,6 +229,42 @@ impl ModelSelector {
         }
     }
 
+    /// Wave 10: Record a tool-use compliance observation.
+    ///
+    /// Called after each round where tools were available in the request.
+    /// `successful` = true when the model emitted tool_use AND at least 1 tool executed.
+    /// `successful` = false when the model returned end_turn without using tools.
+    ///
+    /// NOT called for synthesis rounds (tools stripped) or conversational rounds.
+    pub fn record_tool_compliance(&self, model_id: &str, successful: bool) {
+        if let Ok(mut stats) = self.quality_stats.lock() {
+            let entry = stats.entry(model_id.to_string()).or_default();
+            entry.tool_rounds_expected += 1;
+            if successful {
+                entry.tool_rounds_successful += 1;
+            }
+            tracing::debug!(
+                model = %model_id,
+                compliance_rate = entry.tool_compliance_rate(),
+                expected = entry.tool_rounds_expected,
+                successful = entry.tool_rounds_successful,
+                "ModelSelector: tool compliance updated"
+            );
+        }
+    }
+
+    /// Wave 10: Get tool compliance rate for a model. Returns 1.0 if unknown.
+    pub fn tool_compliance_rate_for(&self, model_id: &str) -> f64 {
+        if let Ok(stats) = self.quality_stats.lock() {
+            stats
+                .get(model_id)
+                .map(|s| s.tool_compliance_rate())
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    }
+
     /// Check for provider-level quality degradation (Phase 7).
     ///
     /// Returns `Some(warning_message)` when the provider appears to be degraded:
@@ -255,15 +327,23 @@ impl ModelSelector {
     /// via `with_quality_seeds()` so quality tracking accumulates across messages within a session
     /// (rather than resetting to neutral every message).
     ///
-    /// Tuple layout: `(success_count, failure_count, total_reward)` — matches `ModelPerformanceStats`.
-    pub fn snapshot_quality_stats(&self) -> HashMap<String, (u32, u32, f64)> {
+    /// Tuple layout: `(success_count, failure_count, total_reward, tool_expected, tool_successful)`.
+    /// Wave 10: Extended with compliance fields. Backward compatible: callers that destructure
+    /// the old 3-field tuple will get a compile error prompting update.
+    pub fn snapshot_quality_stats(&self) -> HashMap<String, (u32, u32, f64, u32, u32)> {
         if let Ok(stats) = self.quality_stats.lock() {
             stats
                 .iter()
                 .map(|(k, v)| {
                     (
                         k.clone(),
-                        (v.success_count, v.failure_count, v.total_reward),
+                        (
+                            v.success_count,
+                            v.failure_count,
+                            v.total_reward,
+                            v.tool_rounds_expected,
+                            v.tool_rounds_successful,
+                        ),
                     )
                 })
                 .collect()
@@ -279,13 +359,19 @@ impl ModelSelector {
     /// adjustments without waiting for new outcomes this message.
     ///
     /// Models not present in the snapshot start with the neutral prior (avg_reward = 0.5).
-    pub fn with_quality_seeds(self, seeds: HashMap<String, (u32, u32, f64)>) -> Self {
+    pub fn with_quality_seeds(self, seeds: HashMap<String, (u32, u32, f64, u32, u32)>) -> Self {
         if let Ok(mut stats) = self.quality_stats.lock() {
-            for (model_id, (success_count, failure_count, total_reward)) in seeds {
+            for (
+                model_id,
+                (success_count, failure_count, total_reward, tool_expected, tool_successful),
+            ) in seeds
+            {
                 let entry = stats.entry(model_id).or_default();
                 entry.success_count = success_count;
                 entry.failure_count = failure_count;
                 entry.total_reward = total_reward;
+                entry.tool_rounds_expected = tool_expected;
+                entry.tool_rounds_successful = tool_successful;
             }
         }
         self
@@ -1583,14 +1669,14 @@ mod tests {
         selector.record_outcome("model-b", 0.2, false);
         let snapshot = selector.snapshot_quality_stats();
         assert_eq!(snapshot.len(), 2);
-        let (succ_a, fail_a, reward_a) = snapshot["model-a"];
+        let (succ_a, fail_a, reward_a, _te_a, _ts_a) = snapshot["model-a"];
         assert_eq!(succ_a, 2);
         assert_eq!(fail_a, 0);
         assert!(
             (reward_a - 1.7).abs() < 0.01,
             "total reward should be 0.9+0.8=1.7, got {reward_a}"
         );
-        let (succ_b, fail_b, _) = snapshot["model-b"];
+        let (succ_b, fail_b, _, _te_b, _ts_b) = snapshot["model-b"];
         assert_eq!(succ_b, 0);
         assert_eq!(fail_b, 1);
     }

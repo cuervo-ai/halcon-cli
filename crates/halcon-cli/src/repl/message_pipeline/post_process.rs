@@ -130,10 +130,13 @@ impl PostProcessStage {
         if let Some(ref adb) = async_db {
             let adb_clone = adb.clone();
             let prov = provider_name.to_string();
+            // Wave 10: Snapshot includes compliance fields but DB schema only stores (s, f, r).
+            // Compliance data persists within the session via cache; cross-session persistence
+            // is deferred to Wave 11.
             let snapshot: Vec<(String, u32, u32, f64)> = cache
                 .model_quality
                 .iter()
-                .map(|(k, &(s, f, r))| (k.clone(), s, f, r))
+                .map(|(k, &(s, f, r, _te, _ts))| (k.clone(), s, f, r))
                 .collect();
             tokio::spawn(async move {
                 if let Err(e) = adb_clone.save_model_quality_stats(&prov, snapshot).await {
