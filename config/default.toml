@@ -98,9 +98,12 @@ blocked_patterns = [
 ]
 
 [reasoning]
+# Enable the ReasoningEngine for quality-aware model selection, UCB1 learning,
+# and adaptive retry logic. Previously required --expert flag.
+enabled = true
 # Adversarial LoopCritic: a second LLM call after the agent loop evaluates whether
 # the original goal was truly achieved. Catches hallucinated/fabricated synthesis.
-# Adds ~1–3s latency. Off by default; set true to enable.
+# Adds ~1–3s latency.
 enable_loop_critic = true
 # Max seconds for the LoopCritic evaluation. Critic is skipped if it times out.
 critic_timeout_secs = 30
@@ -109,6 +112,11 @@ critic_timeout_secs = 30
 pii_detection = true
 pii_action = "warn"
 audit_enabled = true
+# Maximum seconds to wait for a permission prompt before auto-denying the tool.
+# 0 = unlimited wait (legacy behavior). Recommended: 60 for interactive, 30 for CI.
+# When triggered: tool is denied with reason "permission_timeout", user is notified.
+# Wave 3: Activated at 60s to resolve CR-2 (unbounded permission wait).
+permission_timeout_secs = 60
 
 [security.analysis_mode]
 # When true, bash commands matching analysis_tool_whitelist patterns auto-approve
@@ -148,6 +156,12 @@ analysis_tool_whitelist = [
 [storage]
 max_sessions = 1000
 max_session_age_days = 90
+
+[agent.routing]
+paloma_enabled = true
+strategy = "balanced"
+mode = "failover"
+max_retries = 1
 
 [logging]
 level = "info"

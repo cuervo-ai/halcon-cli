@@ -9,19 +9,19 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use halcon_core::types::{ContentBlock, DomainEvent, EventPayload, PermissionDecision, PermissionLevel, ToolInput};
+use halcon_core::types::{ContentBlock, DomainEvent, EventPayload, PermissionLevel, ToolInput};
 use halcon_core::EventSender;
 use halcon_storage::{AsyncDatabase, ToolExecutionMetric, TraceStep, TraceStepType};
 use halcon_tools::ToolRegistry;
 
-use crate::repl::adaptive_prompt::RiskLevel as AdaptiveRiskLevel;
-use crate::repl::conversational_permission::ConversationalPermissionHandler;
-use crate::repl::security::idempotency::DryRunMode;
 use super::{
     canonicalize_name, execute_one_tool, generate_file_edit_preview, resolve_tool_from_registry,
     synthetic_dry_run_result, CompletedToolUse, ToolExecResult, ToolExecutionConfig,
 };
 use crate::render::sink::RenderSink;
+use crate::repl::adaptive_prompt::RiskLevel as AdaptiveRiskLevel;
+use crate::repl::conversational_permission::ConversationalPermissionHandler;
+use crate::repl::security::idempotency::DryRunMode;
 
 /// Execute a single tool sequentially (with permission check).
 #[allow(clippy::too_many_arguments)]
@@ -29,7 +29,9 @@ pub async fn execute_sequential_tool(
     tool_call: &CompletedToolUse,
     registry: &ToolRegistry,
     permissions: &mut ConversationalPermissionHandler,
-    permission_pipeline: Option<&mut crate::repl::security::permission_pipeline::PermissionPipeline>,
+    permission_pipeline: Option<
+        &mut crate::repl::security::permission_pipeline::PermissionPipeline,
+    >,
     working_dir: &str,
     tool_timeout: Duration,
     event_tx: &EventSender,
@@ -83,10 +85,13 @@ pub async fn execute_sequential_tool(
     // ── Permission authorization via unified pipeline ──────────────────────
     // Pre-authorization UI: risk assessment + diff preview for destructive tools.
     if perm_level >= PermissionLevel::Destructive {
-        let _ = event_tx.send(DomainEvent::new(EventPayload::PermissionRequested {
-            tool: tool_call.name.clone(),
-            level: perm_level,
-        }));
+        halcon_core::emit_event(
+            event_tx,
+            DomainEvent::new(EventPayload::PermissionRequested {
+                tool: tool_call.name.clone(),
+                level: perm_level,
+            }),
+        );
     }
     if perm_level == PermissionLevel::Destructive {
         let handler = ConversationalPermissionHandler::new(true);
@@ -105,25 +110,49 @@ pub async fn execute_sequential_tool(
     }
 
     // Unified permission pipeline: TBAC → Blacklist → Safety → Denial → Conversational.
-    use crate::repl::security::permission_pipeline::{self, PipelineDecision, PermissionContext};
-    let pipeline_result = if let Some(pipeline) = permission_pipeline {
-        // Phase 1.4: Use PermissionPipeline::check() — THE single authority.
-        let ctx = PermissionContext {
-            tool_name: &tool_call.name,
-            perm_level,
-            input: &tool_input,
-        };
-        pipeline.check(&ctx, permissions).await
+    // CR-2 fix: Wrap permission check with configurable timeout to prevent unbounded blocking.
+    use crate::repl::security::permission_pipeline::{self, PermissionContext, PipelineDecision};
+    let perm_timeout_secs = exec_config.permission_timeout_secs.unwrap_or(0);
+    let pipeline_future = async {
+        if let Some(pipeline) = permission_pipeline {
+            let ctx = PermissionContext {
+                tool_name: &tool_call.name,
+                perm_level,
+                input: &tool_input,
+            };
+            pipeline.check(&ctx, permissions).await
+        } else {
+            permission_pipeline::authorize_tool(
+                &tool_call.name,
+                perm_level,
+                &tool_input,
+                permissions,
+                None,
+            )
+            .await
+        }
+    };
+    let pipeline_result = if perm_timeout_secs > 0 {
+        match tokio::time::timeout(Duration::from_secs(perm_timeout_secs), pipeline_future).await {
+            Ok(decision) => decision,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    tool = %tool_call.name,
+                    timeout_secs = perm_timeout_secs,
+                    "Permission prompt timed out — auto-denying tool"
+                );
+                PipelineDecision::Deny {
+                    reason: format!(
+                        "Permission prompt timed out after {perm_timeout_secs}s. \
+                         Configure security.permission_timeout_secs to adjust."
+                    ),
+                    gate: "timeout",
+                }
+            }
+        }
     } else {
-        // Fallback for tests/legacy callers without pipeline (deprecated path).
-        permission_pipeline::authorize_tool(
-            &tool_call.name,
-            perm_level,
-            &tool_input,
-            permissions,
-            None,
-        )
-        .await
+        // Legacy behavior: no timeout (perm_timeout_secs = 0)
+        pipeline_future.await
     };
 
     // Post-authorization UI: state transition.
@@ -135,14 +164,24 @@ pub async fn execute_sequential_tool(
     match pipeline_result {
         PipelineDecision::Deny { reason, gate } => {
             tracing::info!(tool = %tool_call.name, gate = gate, "Permission denied: {reason}");
-            let _ = event_tx.send(DomainEvent::new(EventPayload::PermissionDenied {
-                tool: tool_call.name.clone(),
-                level: perm_level,
-            }));
+            halcon_core::emit_event(
+                event_tx,
+                DomainEvent::new(EventPayload::PermissionDenied {
+                    tool: tool_call.name.clone(),
+                    level: perm_level,
+                }),
+            );
             if let Some(db) = trace_db {
                 let context_id = uuid::Uuid::new_v4();
                 let _ = db
-                    .save_policy_decision(&session_id, &context_id, &tool_call.name, "denied", None, None)
+                    .save_policy_decision(
+                        &session_id,
+                        &context_id,
+                        &tool_call.name,
+                        "denied",
+                        None,
+                        None,
+                    )
                     .await;
             }
             render_sink.tool_denied(&tool_call.name);
@@ -165,14 +204,24 @@ pub async fn execute_sequential_tool(
         PipelineDecision::Allow(_authorized_input) => {
             // Permission granted — emit event and persist.
             if perm_level >= PermissionLevel::Destructive {
-                let _ = event_tx.send(DomainEvent::new(EventPayload::PermissionGranted {
-                    tool: tool_call.name.clone(),
-                    level: perm_level,
-                }));
+                halcon_core::emit_event(
+                    event_tx,
+                    DomainEvent::new(EventPayload::PermissionGranted {
+                        tool: tool_call.name.clone(),
+                        level: perm_level,
+                    }),
+                );
                 if let Some(db) = trace_db {
                     let context_id = uuid::Uuid::new_v4();
                     let _ = db
-                        .save_policy_decision(&session_id, &context_id, &tool_call.name, "granted", None, None)
+                        .save_policy_decision(
+                            &session_id,
+                            &context_id,
+                            &tool_call.name,
+                            "granted",
+                            None,
+                            None,
+                        )
                         .await;
                 }
             }
@@ -253,15 +302,25 @@ pub async fn execute_sequential_tool(
 
     record_tool_metric(trace_db, &result, session_id, is_error);
 
-    let _ = event_tx.send(DomainEvent::new(EventPayload::ToolExecuted {
-        tool: tool_call.name.clone(),
-        permission: perm_level,
-        duration_ms: result.duration_ms,
-        success: !is_error,
-    }));
+    halcon_core::emit_event(
+        event_tx,
+        DomainEvent::new(EventPayload::ToolExecuted {
+            tool: tool_call.name.clone(),
+            permission: perm_level,
+            duration_ms: result.duration_ms,
+            success: !is_error,
+        }),
+    );
 
     render_sink.tool_output(&result.content_block, result.duration_ms);
-    record_trace_result(trace_db, session_id, trace_step_index, tool_call, &result, is_error);
+    record_trace_result(
+        trace_db,
+        session_id,
+        trace_step_index,
+        tool_call,
+        &result,
+        is_error,
+    );
 
     result
 }

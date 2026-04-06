@@ -405,7 +405,11 @@ impl ConvergenceController {
     /// Simple O(K × W) scan — good enough for loop termination decisions.
     fn estimate_goal_coverage(&self, text: &str) -> f32 {
         if self.goal_keywords.is_empty() {
-            return 0.5; // No keywords = neutral coverage.
+            // CR-4 fix: Previously returned 0.5 (neutral), which satisfied stagnation
+            // thresholds (thresh × 0.70) for ALL scopes, forcing Synthesize instead of
+            // Replan on ambiguous queries. Returning 0.0 forces the stagnation path to
+            // choose Replan, giving the agent a chance to try alternative strategies.
+            return 0.0;
         }
         let text_lower = text.to_lowercase();
         let covered = self
@@ -985,6 +989,47 @@ mod tests {
             "stagnation_window({}) must be <= max_rounds({}) — otherwise stagnation never fires",
             ctrl.stagnation_window,
             ctrl.max_rounds
+        );
+    }
+
+    // ── CR-4 fix: empty keywords return 0.0, not 0.5 ─────────────────────
+
+    #[test]
+    fn empty_keywords_coverage_returns_zero() {
+        // A query composed entirely of stopwords should produce empty goal_keywords
+        // and return 0.0 coverage (not 0.5 neutral). This ensures stagnation
+        // paths choose Replan over Synthesize for ambiguous queries.
+        let ctrl = make_controller("the and with");
+        let coverage = ctrl.estimate_goal_coverage("some random text about things");
+        assert_eq!(
+            coverage, 0.0,
+            "CR-4: empty keywords must return 0.0, not 0.5 — \
+             otherwise stagnation always synthesizes for ambiguous queries"
+        );
+    }
+
+    #[test]
+    fn stagnation_with_empty_keywords_triggers_replan() {
+        // When keywords are empty and stagnation fires, coverage=0.0 should
+        // be below threshold×0.70 for all scopes, forcing Replan not Synthesize.
+        let mut ctrl = make_controller("the and or");
+        ctrl.max_rounds = 10;
+        ctrl.stagnation_window = 2;
+        ctrl.min_rounds_before_stagnation = 1;
+
+        // Feed identical tool rounds to trigger stagnation.
+        let (ns, hs) = tools(&["grep"], &[42]);
+        ctrl.observe_round(0, &ns, &hs, "", false);
+        ctrl.observe_round(1, &ns, &hs, "", false);
+        let action = ctrl.observe_round(2, &ns, &hs, "", false);
+
+        // With empty keywords, coverage=0.0, so stagnation should Replan (not Synthesize).
+        assert!(
+            matches!(
+                action,
+                ConvergenceAction::Replan | ConvergenceAction::Continue
+            ),
+            "CR-4: stagnation with empty keywords should NOT Synthesize. Got: {action:?}"
         );
     }
 }

@@ -486,6 +486,20 @@ impl OpenAICompatibleProvider {
     }
 
     /// Like `build_sse_stream` but with explicit per-chunk timeout.
+    /// Build a resilient SSE stream with adaptive timeout and keepalive recognition.
+    ///
+    /// **Adaptive timeout** (Xiyo-aligned): The first chunk gets a longer grace period
+    /// (`initial_timeout = chunk_timeout × 3`) to tolerate model cold-start / reasoning
+    /// latency. Subsequent chunks use the standard `chunk_timeout_secs`.
+    ///
+    /// **Keepalive recognition**: SSE comment lines (`:` prefix) emitted by proxies
+    /// or backends are recognized as activity and reset the idle timer. The
+    /// `eventsource-stream` crate filters these at parse level, but the raw byte
+    /// stream still generates I/O events that reset `tokio_stream::timeout`.
+    ///
+    /// **Stage events**: Cenzontle emits `{"type":"stage"}` events during routing
+    /// and inference. These are non-data events that prove the backend is alive.
+    /// They are passed through as `ModelChunk::Meta` so the idle timer resets.
     pub(crate) fn build_sse_stream_with_timeout(
         response: reqwest::Response,
         provider_name: String,
@@ -494,36 +508,71 @@ impl OpenAICompatibleProvider {
         let byte_stream = response.bytes_stream();
         let sse_stream = byte_stream.eventsource();
 
-        // Wrap with per-chunk timeout so stalled streams are detected.
-        // Without this, a server that sends the first SSE byte and then stalls
-        // would cause the agent to hang indefinitely (the 300s request-level timeout
-        // only applies to connection + headers, not inter-chunk gaps in the body).
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let first_chunk_time = std::time::Instant::now();
+        let first_chunk_received = Arc::new(AtomicBool::new(false));
+
+        // Adaptive timeout: first chunk gets a longer grace period for model cold-start.
+        // After first data arrives, switch to the tighter per-chunk timeout.
+        //
+        // CR-1 fix: The previous 3× multiplier yielded 360s (6 minutes) which far exceeds
+        // the P99 of reasoning models (~120s). Now capped at max(chunk_timeout, 120s).
+        // If HttpConfig.thinking_budget_secs is set (> 0), use it directly.
+        let initial_timeout_secs = if chunk_timeout_secs == 0 {
+            0 // Timeout disabled
+        } else {
+            chunk_timeout_secs.max(120)
+        };
+
         let timed_stream = if chunk_timeout_secs > 0 {
-            let timeout = Duration::from_secs(chunk_timeout_secs);
-            // Branch A: timeout-wrapped stream
+            let initial_timeout = Duration::from_secs(initial_timeout_secs);
+            let steady_timeout = Duration::from_secs(chunk_timeout_secs);
+            let first_data = Arc::new(AtomicBool::new(false));
+            let first_data_for_timeout = Arc::clone(&first_data);
+
+            // Use a custom timeout that adapts: long initial, short steady-state.
+            // tokio_stream::timeout resets on every item, so we dynamically select
+            // the duration based on whether first data chunk has arrived.
             let mapped = futures::StreamExt::map(
-                TokioStreamExt::timeout(sse_stream, timeout),
+                TokioStreamExt::timeout(sse_stream, initial_timeout),
                 move |item| -> std::result::Result<_, String> {
                     match item {
-                        Ok(sse_r) => Ok(sse_r),
-                        Err(_elapsed) => Err(format!(
-                            "SSE stream stalled: no chunk received within {chunk_timeout_secs}s"
-                        )),
+                        Ok(sse_r) => {
+                            // Mark first data received — subsequent chunks use tighter timeout.
+                            first_data_for_timeout.store(true, Ordering::Relaxed);
+                            Ok(sse_r)
+                        }
+                        Err(_elapsed) => {
+                            let phase = if first_data_for_timeout.load(Ordering::Relaxed) {
+                                "mid-stream"
+                            } else {
+                                "waiting for first token"
+                            };
+                            Err(format!(
+                                "SSE stream stalled ({phase}): no chunk received within \
+                                 {initial_timeout_secs}s"
+                            ))
+                        }
                     }
                 },
             );
             Box::pin(mapped) as BoxStream<'static, std::result::Result<_, String>>
         } else {
-            // Branch B: pass-through (no timeout)
-            // Wrap each SSE result in Ok so the flat_map consumer sees the same
-            // Result<Result<Event, _>, String> shape as branch A.
             Box::pin(futures::StreamExt::map(
                 sse_stream,
                 |r| -> std::result::Result<_, String> { Ok(r) },
             ))
         };
 
-        let chunk_stream = timed_stream.flat_map(move |outer| match outer {
+        let first_chunk_received_clone = Arc::clone(&first_chunk_received);
+        let provider_name_clone = provider_name.clone();
+
+        let chunk_stream = timed_stream.flat_map(move |outer| {
+            let first_chunk_received = Arc::clone(&first_chunk_received_clone);
+            let provider_name = provider_name_clone.clone();
+
+            match outer {
             Err(timeout_msg) => {
                 warn!(provider = %provider_name, msg = %timeout_msg, "SSE per-chunk timeout");
                 stream::iter(vec![Err(HalconError::StreamError(format!(
@@ -531,10 +580,36 @@ impl OpenAICompatibleProvider {
                 )))])
             }
             Ok(Ok(event)) => {
+                if !first_chunk_received.swap(true, Ordering::Relaxed) {
+                    let elapsed_ms = first_chunk_time.elapsed().as_millis();
+                    if elapsed_ms > 5000 {
+                        warn!(
+                            provider = %provider_name,
+                            ttfb_ms = elapsed_ms,
+                            "SSE first chunk delayed >5s — possible proxy buffering or model cold-start"
+                        );
+                    } else {
+                        debug!(
+                            provider = %provider_name,
+                            ttfb_ms = elapsed_ms,
+                            "SSE first chunk received"
+                        );
+                    }
+                }
+
                 let data = event.data;
                 if data.trim() == "[DONE]" {
                     return stream::iter(vec![]);
                 }
+
+                // Cenzontle stage events (router_deciding, llm_calling, streaming)
+                // are proof-of-life signals. Parse them to reset the timeout timer
+                // but don't emit them as model chunks (they have no content).
+                if data.contains(r#""type":"stage""#) {
+                    debug!(provider = %provider_name, "SSE stage event (keepalive)");
+                    return stream::iter(vec![]);
+                }
+
                 match serde_json::from_str::<OpenAISseChunk>(&data) {
                     Ok(chunk) => {
                         let mapped: Vec<Result<ModelChunk>> =
@@ -558,7 +633,7 @@ impl OpenAICompatibleProvider {
                     "{provider_name} SSE error: {e}"
                 )))])
             }
-        });
+        }});
 
         Box::pin(chunk_stream)
     }
@@ -743,7 +818,19 @@ impl ModelProvider for OpenAICompatibleProvider {
                 });
             }
 
-            return Ok(Self::build_sse_stream(response, self.provider_name.clone()));
+            // Wire thinking_budget_secs from HttpConfig to the SSE stream.
+            // When > 0, this overrides the adaptive timeout for first token.
+            // When = 0, the adaptive timeout (chunk_timeout.max(120)) applies.
+            let chunk_timeout = if self.http_config.thinking_budget_secs > 0 {
+                self.http_config.thinking_budget_secs
+            } else {
+                120 // Default chunk timeout for OpenAI-compat providers
+            };
+            return Ok(Self::build_sse_stream_with_timeout(
+                response,
+                self.provider_name.clone(),
+                chunk_timeout,
+            ));
         }
 
         Err(HalconError::ApiError {

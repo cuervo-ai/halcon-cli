@@ -103,16 +103,35 @@ fn tokenizer_hint_for_model(model_id: &str) -> TokenizerHint {
 ///   Resets to 0 on any successful response.
 /// - `open_until_unix_ms`: if > 0 and < now, circuit is "open" → fail fast.
 ///   Set to `now + 60s` when `consecutive_failures` exceeds `CB_THRESHOLD`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CircuitBreaker {
     consecutive_failures: AtomicU32,
     open_until_unix_ms: AtomicU64,
+    /// Wave 5 (AP-3): Configurable threshold instead of hardcoded constant.
+    threshold: u32,
+    /// Wave 5 (AP-3): Configurable open duration (ms) instead of hardcoded constant.
+    open_base_ms: u64,
 }
 
-/// Number of consecutive failures before opening the circuit (fail fast for 60s).
-const CB_THRESHOLD: u32 = 5;
-/// How long the circuit stays open after tripping (milliseconds).
-const CB_OPEN_MS: u64 = 60_000;
+impl Default for CircuitBreaker {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: AtomicU32::new(0),
+            open_until_unix_ms: AtomicU64::new(0),
+            threshold: CB_THRESHOLD_DEFAULT,
+            open_base_ms: CB_OPEN_BASE_MS_DEFAULT,
+        }
+    }
+}
+
+/// Number of consecutive failures before opening the circuit (fail fast).
+/// Wave 5 (AP-3 fix): Now used as fallback only. Prefer ResilienceConfig values.
+const CB_THRESHOLD_DEFAULT: u32 = 5;
+/// Base duration the circuit stays open after tripping (milliseconds).
+/// Wave 5 (AP-3 fix): Fallback. Prefer ResilienceConfig.circuit_breaker.open_duration_secs × 1000.
+const CB_OPEN_BASE_MS_DEFAULT: u64 = 60_000;
+/// Maximum jitter added to the open duration (milliseconds).
+const CB_JITTER_MAX_MS: u64 = 15_000;
 
 impl CircuitBreaker {
     fn is_open(&self) -> bool {
@@ -129,17 +148,21 @@ impl CircuitBreaker {
 
     fn record_failure(&self) {
         let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if n >= CB_THRESHOLD {
-            let until = std::time::SystemTime::now()
+        if n >= self.threshold {
+            let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis() as u64
-                + CB_OPEN_MS;
+                .as_millis() as u64;
+            let jitter = now_ms % CB_JITTER_MAX_MS;
+            let until = now_ms + self.open_base_ms + jitter;
             self.open_until_unix_ms.store(until, Ordering::Relaxed);
             warn!(
                 failures = n,
+                threshold = self.threshold,
+                open_base_ms = self.open_base_ms,
                 open_until_unix_ms = until,
-                "Cenzontle: circuit breaker opened"
+                jitter_ms = jitter,
+                "Cenzontle: circuit breaker opened (configurable, Wave 5)"
             );
         }
     }
@@ -242,6 +265,14 @@ impl CenzontleProvider {
             connection_verified: false,
             circuit_breaker: Arc::new(CircuitBreaker::default()),
         }
+    }
+
+    /// Override the connection_verified flag.
+    ///
+    /// Set to `true` when a valid model cache exists (proves recent API success),
+    /// eliminating the need for a /v1/auth/me probe in `is_available()`.
+    pub fn set_connection_verified(&mut self, verified: bool) {
+        self.connection_verified = verified;
     }
 
     /// Access token (JWT) used for API authentication.
@@ -542,6 +573,13 @@ impl ModelProvider for CenzontleProvider {
                     .header("x-halcon-context", &halcon_ctx)
                     .header("x-request-id", &request_id)
                     .header("idempotency-key", &idempotency_key)
+                    // ── Anti-buffering headers for Cloudflare + Azure ────────────────
+                    // X-Accel-Buffering: tell nginx/Azure to disable response buffering
+                    // Cache-Control: prevent CDN/proxy caching of streaming responses
+                    // Connection: keep-alive for long-lived SSE connections
+                    .header("x-accel-buffering", "no")
+                    .header("cache-control", "no-cache, no-store, must-revalidate")
+                    .header("connection", "keep-alive")
                     .json(&chat_request)
                     .send(),
             )
@@ -649,10 +687,17 @@ impl ModelProvider for CenzontleProvider {
 
             // Hand off the response body to the OpenAI-compat SSE parser with
             // per-chunk timeout so stalled Azure backends are detected quickly.
+            // CR-1: Use thinking_budget_secs from HttpConfig when set (> 0).
+            // Otherwise fall back to 45s per-chunk (135s→max(45,120)=120s initial grace).
+            let chunk_timeout = if self.http_config.thinking_budget_secs > 0 {
+                self.http_config.thinking_budget_secs
+            } else {
+                45 // Legacy default for Cenzontle
+            };
             return Ok(OpenAICompatibleProvider::build_sse_stream_with_timeout(
                 response,
                 PROVIDER_NAME.to_string(),
-                120, // 120s per-chunk timeout — stall detection without ending long generations
+                chunk_timeout,
             ));
         }
 
@@ -673,14 +718,62 @@ impl ModelProvider for CenzontleProvider {
         }
 
         let url = format!("{}/v1/auth/me", self.base_url);
-        self.client
-            .get(&url)
-            .bearer_auth(&self.access_token)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+
+        // Retry once with 1s backoff for transient failures (DNS blip, cold start).
+        // Inspired by Xiyo's stale-while-error pattern: a single network glitch
+        // should not cascade into "provider unavailable".
+        for attempt in 0..2u8 {
+            match self
+                .client
+                .get(&url)
+                .bearer_auth(&self.access_token)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    if attempt > 0 {
+                        debug!("Cenzontle: is_available succeeded on retry (attempt {attempt})");
+                    }
+                    return true;
+                }
+                Ok(r) => {
+                    // Non-success HTTP status (401, 403, etc.) — don't retry, token is invalid.
+                    debug!(
+                        status = r.status().as_u16(),
+                        "Cenzontle: is_available got non-success status"
+                    );
+                    return false;
+                }
+                Err(e) if attempt == 0 => {
+                    // First attempt failed with network error — retry after short delay.
+                    debug!(
+                        error = %e,
+                        "Cenzontle: is_available transient failure, retrying in 1s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    // Second attempt also failed.
+                    debug!(error = %e, "Cenzontle: is_available failed after retry");
+
+                    // Stale-while-error (Xiyo pattern): if we have non-empty models,
+                    // that proves a recent successful API interaction (the model fetch
+                    // or a cached model list). Treat the provider as available rather
+                    // than immediately cascading to fallback — the actual API call
+                    // will get a proper error with retry logic in invoke().
+                    if !self.models.is_empty() {
+                        warn!(
+                            "Cenzontle: /v1/auth/me probe failed but models exist \
+                             (stale-while-error) — treating as available"
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     fn estimate_cost(&self, _request: &ModelRequest) -> TokenCost {

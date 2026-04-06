@@ -534,6 +534,13 @@ pub struct ReasoningConfig {
     /// Example: `reflector_provider = "openai"` in `[reasoning]` section.
     #[serde(default)]
     pub reflector_provider: Option<String>,
+
+    /// Wave 6: Use UnifiedEvaluator as primary (replaces reflexion per-round LLM call).
+    /// When false (default): UnifiedEvaluator runs in shadow mode (log-only).
+    /// When true: UnifiedEvaluator replaces reflexion for per-round evaluation.
+    /// The post-loop LoopCritic is unaffected by this flag.
+    #[serde(default)]
+    pub use_unified_evaluator: bool,
 }
 
 fn reasoning_threshold_default() -> f64 {
@@ -564,6 +571,7 @@ impl Default for ReasoningConfig {
             planner_provider: None,
             reflector_model: None,
             reflector_provider: None,
+            use_unified_evaluator: false,
         }
     }
 }
@@ -627,6 +635,29 @@ impl Default for GeneralConfig {
             temperature: 0.0,
             working_directory: None,
         }
+    }
+}
+
+impl GeneralConfig {
+    /// Resolve the effective default model considering the provider.
+    ///
+    /// If `default_model` was not explicitly set (still matches the anthropic default)
+    /// but `default_provider` was changed, use the provider's own default model.
+    /// This prevents the silent failure where `default_provider=openai` tries to use
+    /// `claude-sonnet-4-5-20250929` against the OpenAI API.
+    pub fn effective_model(&self, models: &ModelsConfig) -> String {
+        // If user explicitly set a model, respect it.
+        let anthropic_default = "claude-sonnet-4-5-20250929";
+        if self.default_model != anthropic_default || self.default_provider == "anthropic" {
+            return self.default_model.clone();
+        }
+        // User changed provider but didn't change model — use provider's default.
+        if let Some(provider_cfg) = models.providers.get(&self.default_provider) {
+            if let Some(ref provider_model) = provider_cfg.default_model {
+                return provider_model.clone();
+            }
+        }
+        self.default_model.clone()
     }
 }
 
@@ -747,6 +778,12 @@ pub struct HttpConfig {
     pub max_retries: u32,
     /// Base delay in milliseconds for exponential backoff.
     pub retry_base_delay_ms: u64,
+    /// Maximum seconds to wait for the first token from a reasoning model.
+    /// 0 = use adaptive default (chunk_timeout × 3). Default: 0.
+    /// Recommended: 120 for reasoning models. Standard models get min(this, 30).
+    /// Resolves: CR-1 (360s timeout for first token).
+    #[serde(default)]
+    pub thinking_budget_secs: u64,
 }
 
 impl Default for HttpConfig {
@@ -756,6 +793,7 @@ impl Default for HttpConfig {
             request_timeout_secs: 300,
             max_retries: 3,
             retry_base_delay_ms: 1000,
+            thinking_budget_secs: 0, // 0 = adaptive (chunk_timeout × 3). Set 120 for bounded.
         }
     }
 }
@@ -878,6 +916,11 @@ impl Default for ToolsConfig {
 pub struct SandboxConfig {
     /// Enable sandbox (rlimits on Unix).
     pub enabled: bool,
+    /// Enable OS-level sandboxing (macOS sandbox-exec, Linux unshare).
+    /// When true, bash commands run inside an OS sandbox that restricts
+    /// filesystem writes, network access, and sensitive environment variables.
+    #[serde(default = "default_os_sandbox")]
+    pub use_os_sandbox: bool,
     /// Maximum output bytes before truncation.
     pub max_output_bytes: usize,
     /// Maximum memory in MB for child processes (0 = unlimited).
@@ -888,10 +931,15 @@ pub struct SandboxConfig {
     pub max_file_size_bytes: u64,
 }
 
+fn default_os_sandbox() -> bool {
+    false
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            use_os_sandbox: false,
             max_output_bytes: 100_000,
             max_memory_mb: 512,
             max_cpu_secs: 60,
@@ -980,6 +1028,12 @@ pub struct SecurityConfig {
     /// See `[security.analysis_mode]` in config.toml.
     #[serde(default)]
     pub analysis_mode: AnalysisModeConfig,
+    /// Maximum seconds to wait for an interactive permission prompt before auto-denying.
+    /// 0 = unlimited (legacy behavior). Default: 0 (backward compatible).
+    /// Recommended: 60 for interactive sessions, 30 for CI.
+    /// Resolves: CR-2 (unbounded permission wait).
+    #[serde(default)]
+    pub permission_timeout_secs: u64,
 }
 
 /// Analysis mode configuration.
@@ -1108,6 +1162,7 @@ impl Default for SecurityConfig {
             session_grant_ttl_secs: 300,
             scan_system_prompts: false, // opt-in: system prompts are internal
             analysis_mode: AnalysisModeConfig::default(),
+            permission_timeout_secs: 0, // 0 = unlimited (legacy). Set 60 for bounded.
         }
     }
 }
@@ -1242,6 +1297,114 @@ pub struct CompactionConfig {
     pub keep_recent: usize,
     /// Max context window tokens (0 = auto-detect from model).
     pub max_context_tokens: u32,
+
+    // ── Semantic compaction (Fase 1) ────────────────────────────────
+    /// Enable LLM-based semantic compaction instead of placeholder.
+    /// When false, the system uses placeholder compaction (current behavior).
+    #[serde(default)]
+    pub semantic_compaction: bool,
+    /// Fraction of context window to use as pipeline budget (0.5-1.0).
+    #[serde(default = "default_utilization_factor")]
+    pub utilization_factor: f32,
+    /// Fraction of pipeline budget allocated to summary (S_max = B * proportion).
+    #[serde(default = "default_summary_proportion")]
+    pub summary_proportion: f32,
+    /// Minimum summary token budget.
+    #[serde(default = "default_summary_floor")]
+    pub summary_floor: u32,
+    /// Maximum summary token budget.
+    #[serde(default = "default_summary_cap")]
+    pub summary_cap: u32,
+    /// Maximum tokens for protected context block.
+    #[serde(default = "default_protected_context_cap")]
+    pub protected_context_cap: u32,
+    /// Tool results exceeding this token estimate are truncated inline.
+    #[serde(default = "default_tool_result_truncation_threshold")]
+    pub tool_result_truncation_threshold: u32,
+    /// Tokens of preview preserved after truncation.
+    #[serde(default = "default_tool_result_preview_size")]
+    pub tool_result_preview_size: u32,
+    /// Timeout in seconds for the LLM summary invocation.
+    #[serde(default = "default_compaction_timeout_secs")]
+    pub compaction_timeout_secs: u64,
+    /// Consecutive LLM failures before circuit breaker opens.
+    #[serde(default = "default_max_circuit_breaker_failures")]
+    pub max_circuit_breaker_failures: u32,
+
+    // ── Fase 2: persistence, eviction, re-read ────────────────────────
+    /// Enable tool result persistence to disk for recovery after compaction.
+    #[serde(default)]
+    pub tool_result_persistence: bool,
+    /// Minimum token estimate to trigger disk persistence (smaller results stay inline).
+    #[serde(default = "default_persist_threshold_tokens")]
+    pub persist_threshold_tokens: u32,
+    /// Maximum total bytes on disk per session for persisted tool results.
+    #[serde(default = "default_max_persist_bytes")]
+    pub max_persist_bytes: u64,
+    /// Enable eviction of old tool results (replaces content with compact summaries).
+    #[serde(default)]
+    pub tool_result_eviction: bool,
+    /// Messages to keep from eviction (measured from end of message list).
+    #[serde(default = "default_eviction_keep_recent")]
+    pub eviction_keep_recent: usize,
+    /// Enable file re-read after compaction.
+    #[serde(default)]
+    pub file_reread: bool,
+    /// Fraction of pipeline budget allocated to file re-reads (0.0-0.20).
+    #[serde(default = "default_reread_budget_fraction")]
+    pub reread_budget_fraction: f32,
+    /// Maximum tokens per individual file re-read.
+    #[serde(default = "default_reread_per_file_cap")]
+    pub reread_per_file_cap: u32,
+    /// Maximum files to re-read per compaction event.
+    #[serde(default = "default_reread_max_files")]
+    pub reread_max_files: usize,
+}
+
+fn default_utilization_factor() -> f32 {
+    0.80
+}
+fn default_summary_proportion() -> f32 {
+    0.05
+}
+fn default_summary_floor() -> u32 {
+    1000
+}
+fn default_summary_cap() -> u32 {
+    4000
+}
+fn default_protected_context_cap() -> u32 {
+    500
+}
+fn default_tool_result_truncation_threshold() -> u32 {
+    8000
+}
+fn default_tool_result_preview_size() -> u32 {
+    2000
+}
+fn default_compaction_timeout_secs() -> u64 {
+    30
+}
+fn default_max_circuit_breaker_failures() -> u32 {
+    3
+}
+fn default_persist_threshold_tokens() -> u32 {
+    4000
+}
+fn default_max_persist_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+fn default_eviction_keep_recent() -> usize {
+    6
+}
+fn default_reread_budget_fraction() -> f32 {
+    0.05
+}
+fn default_reread_per_file_cap() -> u32 {
+    2000
+}
+fn default_reread_max_files() -> usize {
+    5
 }
 
 impl Default for CompactionConfig {
@@ -1251,6 +1414,25 @@ impl Default for CompactionConfig {
             threshold_fraction: 0.80,
             keep_recent: 4,
             max_context_tokens: 200_000,
+            semantic_compaction: false,
+            utilization_factor: default_utilization_factor(),
+            summary_proportion: default_summary_proportion(),
+            summary_floor: default_summary_floor(),
+            summary_cap: default_summary_cap(),
+            protected_context_cap: default_protected_context_cap(),
+            tool_result_truncation_threshold: default_tool_result_truncation_threshold(),
+            tool_result_preview_size: default_tool_result_preview_size(),
+            compaction_timeout_secs: default_compaction_timeout_secs(),
+            max_circuit_breaker_failures: default_max_circuit_breaker_failures(),
+            tool_result_persistence: false,
+            persist_threshold_tokens: default_persist_threshold_tokens(),
+            max_persist_bytes: default_max_persist_bytes(),
+            tool_result_eviction: false,
+            eviction_keep_recent: default_eviction_keep_recent(),
+            file_reread: false,
+            reread_budget_fraction: default_reread_budget_fraction(),
+            reread_per_file_cap: default_reread_per_file_cap(),
+            reread_max_files: default_reread_max_files(),
         }
     }
 }
@@ -1290,6 +1472,12 @@ pub struct AgentLimits {
     /// Default 0.6: ask when plan confidence < 60% and destructive tools are involved.
     #[serde(default = "default_clarification_threshold")]
     pub clarification_threshold: f64,
+    /// Maximum seconds for a single agent round (invoke + tools + evaluation).
+    /// 0 = unlimited. When exceeded mid-round, the round completes its current operation
+    /// but no further tools are dispatched. Default: 0 (unlimited, backward compatible).
+    /// Recommended: 300 for interactive sessions.
+    #[serde(default)]
+    pub round_timeout_secs: u64,
 }
 
 fn default_clarification_threshold() -> f64 {
@@ -1325,6 +1513,7 @@ impl Default for AgentLimits {
             max_concurrent_agents: default_max_concurrent_agents(),
             max_cost_usd: 0.0,
             clarification_threshold: default_clarification_threshold(),
+            round_timeout_secs: 0, // 0 = unlimited (backward compatible). Recommended: 300.
         }
     }
 }
@@ -1345,6 +1534,10 @@ pub struct RoutingConfig {
     /// Provider names to race in speculative mode.
     #[serde(default)]
     pub speculation_providers: Vec<String>,
+    /// Enable Paloma FFR (formally-verified routing). Default: false.
+    /// When true, the agent loop consults PalomaRouter before ModelSelector.
+    #[serde(default)]
+    pub paloma_enabled: bool,
 }
 
 fn default_routing_mode() -> String {
@@ -1359,6 +1552,7 @@ impl Default for RoutingConfig {
             fallback_models: Vec::new(),
             max_retries: 1,
             speculation_providers: Vec::new(),
+            paloma_enabled: false,
         }
     }
 }

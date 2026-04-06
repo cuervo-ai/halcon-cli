@@ -102,6 +102,10 @@ pub(super) enum ProviderRoundOutcome {
     EarlyReturn(Box<ProviderEarlyReturnData>),
     /// Tool-use path — continue to post_batch phase.
     ToolUse(ProviderRoundOutput),
+    /// D1: Provider returned empty response (no text, no tools) after tool results were
+    /// injected. The caller should retry the round instead of breaking the loop, since
+    /// the model may have timed out or returned a transient empty response.
+    EmptyResponse,
 }
 
 /// Run the provider invocation phase for one iteration of the agent loop.
@@ -206,59 +210,105 @@ pub(super) async fn run(
         }
     }
 
-    // Pre-invocation output headroom guard (RC-1a).
+    // ── Xiyo Frontier: Unified pre-invocation gate (Phase 3) ────────────────
     //
-    // Prevent mid-word response truncation by refusing to invoke the model when the
-    // remaining token budget is insufficient for a complete response.  The provider
-    // will truncate its output the moment cumulative usage exceeds max_total_tokens,
-    // so we must verify BEFORE streaming that there is meaningful room left.
-    //
-    // MIN_OUTPUT_HEADROOM_TOKENS = 5 000 tokens (≈ 20 KB of text, enough for a
-    // complete synthesis response on typical tasks).  If remaining < this value,
-    // force an early synthesis instead of starting a new model invocation.
-    // Guard only fires when `used > 0` (at least one round has been completed).
-    // On round 0, the full budget is available and no truncation risk exists.
-    let min_output_headroom = state.policy.output_headroom_tokens as u64;
-    if limits.max_total_tokens > 0 {
-        let used = session.total_usage.total() as u64;
-        let budget = limits.max_total_tokens as u64;
-        let remaining = budget.saturating_sub(used);
-        if used > 0 && remaining < min_output_headroom {
+    // Consolidated frontier evaluation replaces scattered budget/headroom checks.
+    // The frontier module evaluates all gates in priority order and returns a
+    // typed verdict. The caller maps rejections to synthesis triggers.
+    {
+        // Wave 2: Budget proximity warning at 80% of time/cost/tokens.
+        let elapsed_secs = state.loop_start.elapsed().as_secs();
+        if limits.max_duration_secs > 0
+            && elapsed_secs >= (limits.max_duration_secs as f64 * 0.8) as u64
+        {
             tracing::warn!(
-                used,
-                budget,
-                remaining,
-                "Output headroom below minimum — forcing synthesis to prevent truncation"
+                elapsed_secs = elapsed_secs,
+                max_secs = limits.max_duration_secs,
+                round = round,
+                "budget_warning: session approaching time limit (>80%)"
             );
-            if !state.silent {
-                render_sink.warning(
-                    &format!(
-                        "output headroom critical ({remaining} tokens remaining of {budget}) \
-                         — synthesizing early to prevent truncation"
+        }
+        if limits.max_cost_usd > 0.0 && session.estimated_cost_usd >= limits.max_cost_usd * 0.8 {
+            tracing::warn!(
+                cost_usd = session.estimated_cost_usd,
+                max_usd = limits.max_cost_usd,
+                round = round,
+                "budget_warning: session approaching cost limit (>80%)"
+            );
+        }
+        let frontier_ctx = super::xiyo_frontier::FrontierContext {
+            tokens_used: session.total_usage.total() as u64,
+            max_total_tokens: limits.max_total_tokens as u64,
+            elapsed_secs,
+            max_duration_secs: limits.max_duration_secs,
+            cost_usd: session.estimated_cost_usd,
+            max_cost_usd: limits.max_cost_usd,
+            output_headroom_tokens: state.policy.output_headroom_tokens as u64,
+            round,
+            provider_name: effective_provider.name(),
+            model_name: selected_model,
+            model_supports_tools: !round_request.tools.is_empty(), // simplified: if tools sent, model supports them
+            tool_format_known: effective_provider.tool_format()
+                != halcon_core::types::ToolFormat::Unknown,
+            tools_in_request: !round_request.tools.is_empty(),
+            evidence_gate_fires: state.evidence.bundle.evidence_gate_fires(),
+            evidence_already_handled: state.evidence.bundle.synthesis_blocked,
+            is_synthesis_round: round_request.tools.is_empty(),
+        };
+        match super::xiyo_frontier::evaluate(&frontier_ctx) {
+            super::xiyo_frontier::FrontierVerdict::Reject {
+                gate,
+                reason,
+                suggested_trigger,
+            } => {
+                if !state.silent {
+                    render_sink.warning(&format!("[frontier] {reason}"), None);
+                }
+                let (trigger, origin) = match suggested_trigger {
+                    super::xiyo_frontier::SuggestedTrigger::BudgetExhausted => (
+                        SynthesisTrigger::MaxRoundsReached,
+                        SynthesisOrigin::ReplanTimeout,
                     ),
-                    Some("Increase max_total_tokens for complex tasks"),
-                );
+                    super::xiyo_frontier::SuggestedTrigger::DurationExceeded => (
+                        SynthesisTrigger::ReplanTimeout,
+                        SynthesisOrigin::ReplanTimeout,
+                    ),
+                    super::xiyo_frontier::SuggestedTrigger::HeadroomCritical => (
+                        SynthesisTrigger::ToolExhaustion,
+                        SynthesisOrigin::CacheCorruption,
+                    ),
+                };
+                state.request_synthesis_with_gate(trigger, origin, SynthesisPriority::High);
+                // EBS-R1: evidence gate override for budget/headroom rejections
+                if matches!(gate, super::xiyo_frontier::FrontierGate::EvidenceGate)
+                    || state.evidence.bundle.evidence_gate_fires()
+                {
+                    state.evidence.bundle.synthesis_blocked = true;
+                    state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
+                }
+                return Ok(ProviderRoundOutcome::BreakLoop);
             }
-            // Phase 2: route through governance gate (response cache failure → tool exhaustion).
-            state.request_synthesis_with_gate(
-                SynthesisTrigger::ToolExhaustion,
-                SynthesisOrigin::CacheCorruption,
-                SynthesisPriority::High,
-            );
-            // EBS-R1 (OutputHeadroomCritical): if evidence gate fires, override origin to
-            // SupervisorFailure so reward pipeline applies synthesis penalty.
-            if state.evidence.bundle.evidence_gate_fires() {
-                state.evidence.bundle.synthesis_blocked = true;
-                state.synthesis.synthesis_origin = Some(SynthesisOrigin::SupervisorFailure);
-                tracing::warn!(
-                    session_id = %state.session_id,
-                    text_bytes_extracted = state.evidence.bundle.text_bytes_extracted,
-                    "EvidenceGate FIRED (OutputHeadroomCritical): origin overridden to SupervisorFailure"
-                );
+            super::xiyo_frontier::FrontierVerdict::Proceed { warnings } => {
+                for w in &warnings {
+                    tracing::debug!(
+                        gate = ?w.gate,
+                        message = %w.message,
+                        "Xiyo frontier warning"
+                    );
+                }
+                let warn_summary = if warnings.is_empty() {
+                    "frontier: all gates passed".to_string()
+                } else {
+                    format!("frontier: passed with {} warning(s)", warnings.len())
+                };
+                state.log_decision(super::loop_state::DecisionCategory::Frontier, warn_summary);
             }
-            return Ok(ProviderRoundOutcome::BreakLoop);
         }
     }
+
+    // RC-1a output headroom guard: REMOVED — now handled by Xiyo frontier Gate 4
+    // (OutputHeadroom). The frontier evaluates headroom with the same logic:
+    // skip round 0, check remaining < output_headroom_tokens, and suggest synthesis.
 
     // ── EBS-B2: Deterministic Pre-Invocation Synthesis Gate (BRECHA-2 fix) ─────────────────
     //
@@ -440,18 +490,21 @@ pub(super) async fn run(
                     );
                 }
                 // P3 FIX: Emit AgentCompleted on early return (provider timeout).
-                let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-                    agent_type: AgentType::Chat,
-                    result: AgentResult {
-                        success: false,
-                        summary: format!(
-                            "ProviderError: timeout after {}s",
-                            limits.provider_timeout_secs
-                        ),
-                        files_modified: vec![],
-                        tools_used: vec![],
-                    },
-                }));
+                halcon_core::emit_event(
+                    event_tx,
+                    DomainEvent::new(EventPayload::AgentCompleted {
+                        agent_type: AgentType::Chat,
+                        result: AgentResult {
+                            success: false,
+                            summary: format!(
+                                "ProviderError: timeout after {}s",
+                                limits.provider_timeout_secs
+                            ),
+                            files_modified: vec![],
+                            tools_used: vec![],
+                        },
+                    }),
+                );
                 return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
                     ProviderEarlyReturnData {
                         full_text: state.full_text.clone(),
@@ -558,6 +611,14 @@ pub(super) async fn run(
                 }
                 let mut stream = attempt.stream;
                 let mut stream_had_error = false;
+                let stream_start = std::time::Instant::now();
+                // Wave 2 observability: log stream lifecycle for diagnostics.
+                tracing::info!(
+                    provider = %used_provider_name,
+                    model = %round_request.model,
+                    round = state.rounds,
+                    "stream_started"
+                );
                 // FIX: track Done separately so we can drain post-Done chunks (e.g. the
                 // OpenAI-compat Usage chunk that DeepSeek/OpenAI send AFTER the finish_reason
                 // chunk but BEFORE [DONE]). Without this drain, output_tokens stays 0 because
@@ -676,6 +737,20 @@ pub(super) async fn run(
                     }
                 };
 
+                // Wave 2 observability: log stream completion with timing.
+                let stream_elapsed = stream_start.elapsed();
+                tracing::info!(
+                    provider = %used_provider_name,
+                    model = %round_request.model,
+                    round = state.rounds,
+                    elapsed_ms = stream_elapsed.as_millis() as u64,
+                    tokens_in = round_usage.input_tokens,
+                    tokens_out = round_usage.output_tokens,
+                    had_error = stream_had_error,
+                    was_cancelled = cancelled,
+                    "stream_completed"
+                );
+
                 // P0 FIX: Stream finalization barrier.
                 // Guarantee spinner_stop() runs whenever the stream exits — regardless of
                 // whether the stream was empty, hit a guardrail, was cancelled, or had an
@@ -683,7 +758,10 @@ pub(super) async fn run(
                 // ToolUseStart) left the spinner active forever.
                 if spinner_active {
                     render_sink.spinner_stop();
-                    spinner_active = false;
+                    #[allow(unused_assignments)] // consumed by stream finalization barrier
+                    {
+                        spinner_active = false;
+                    }
                 }
 
                 if cancelled {
@@ -692,15 +770,18 @@ pub(super) async fn run(
                     }
                     drop(stream);
                     // P3 FIX: Emit AgentCompleted on early return (user cancellation).
-                    let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-                        agent_type: AgentType::Chat,
-                        result: AgentResult {
-                            success: false,
-                            summary: format!("Interrupted: user cancelled at round {round}"),
-                            files_modified: vec![],
-                            tools_used: vec![],
-                        },
-                    }));
+                    halcon_core::emit_event(
+                        event_tx,
+                        DomainEvent::new(EventPayload::AgentCompleted {
+                            agent_type: AgentType::Chat,
+                            result: AgentResult {
+                                success: false,
+                                summary: format!("Interrupted: user cancelled at round {round}"),
+                                files_modified: vec![],
+                                tools_used: vec![],
+                            },
+                        }),
+                    );
                     return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
                         ProviderEarlyReturnData {
                             full_text: state.full_text.clone(),
@@ -824,15 +905,18 @@ pub(super) async fn run(
                     render_sink.error(&format!("provider request failed — {e}"), Some(hint));
                 }
                 // P3 FIX: Emit AgentCompleted on early return (provider request failure).
-                let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-                    agent_type: AgentType::Chat,
-                    result: AgentResult {
-                        success: false,
-                        summary: format!("ProviderError: {e}"),
-                        files_modified: vec![],
-                        tools_used: vec![],
-                    },
-                }));
+                halcon_core::emit_event(
+                    event_tx,
+                    DomainEvent::new(EventPayload::AgentCompleted {
+                        agent_type: AgentType::Chat,
+                        result: AgentResult {
+                            success: false,
+                            summary: format!("ProviderError: {e}"),
+                            files_modified: vec![],
+                            tools_used: vec![],
+                        },
+                    }),
+                );
                 return Ok(ProviderRoundOutcome::EarlyReturn(Box::new(
                     ProviderEarlyReturnData {
                         full_text: state.full_text.clone(),
@@ -857,12 +941,18 @@ pub(super) async fn run(
 
     // Emit ModelInvoked event with per-round metrics (uses actual provider/model, not request).
     let round_latency_ms = round_start.elapsed().as_millis() as u64;
-    let _ = event_tx.send(DomainEvent::new(EventPayload::ModelInvoked {
-        provider: round_provider_name.clone(),
-        model: round_model_name.clone(),
-        usage: round_usage.clone(),
-        latency_ms: round_latency_ms,
-    }));
+    halcon_core::emit_event(
+        event_tx,
+        DomainEvent::new(EventPayload::ModelInvoked {
+            provider: round_provider_name.clone(),
+            model: round_model_name.clone(),
+            usage: round_usage.clone(),
+            latency_ms: round_latency_ms,
+        }),
+    );
+
+    // Paloma outcome feedback is recorded in mod.rs after provider_round::run()
+    // returns, where paloma_router is directly available from AgentLoopContext.
 
     // Track session-level metrics.
     session.total_latency_ms += round_latency_ms;
@@ -954,10 +1044,34 @@ pub(super) async fn run(
         if round_usage.input_tokens == 0 && report_input > 0 {
             session.total_usage.input_tokens += report_input;
         }
+
+        // D3: Symmetric output_tokens estimation fallback.
+        // When provider reports output_tokens=0 but text was generated, estimate from
+        // rendered text length using a conservative 4 chars/token heuristic.
+        let streamed_text_len = render_sink.stream_full_text().len();
+        let report_output = if round_usage.output_tokens > 0 {
+            round_usage.output_tokens
+        } else if streamed_text_len > 0 {
+            let estimated = (streamed_text_len as f64 / 4.0).ceil() as u32;
+            tracing::info!(
+                metric.output_tokens_estimated = true,
+                estimated,
+                text_len = streamed_text_len,
+                "D3: output_tokens=0 from provider — estimated from streamed text length"
+            );
+            estimated
+        } else {
+            0
+        };
+        // Patch session totals with estimation when actual output was missing.
+        if round_usage.output_tokens == 0 && report_output > 0 {
+            session.total_usage.output_tokens += report_output;
+        }
+
         render_sink.round_ended(
             round + 1,
             report_input,
-            round_usage.output_tokens,
+            report_output,
             round_cost.estimated_cost_usd,
             round_latency_ms,
         );
@@ -1089,11 +1203,14 @@ pub(super) async fn run(
                 "Output guardrail: {}",
                 v.reason
             );
-            let _ = event_tx.send(DomainEvent::new(EventPayload::GuardrailTriggered {
-                guardrail: v.guardrail.clone(),
-                checkpoint: "post".into(),
-                action: format!("{:?}", v.action),
-            }));
+            halcon_core::emit_event(
+                event_tx,
+                DomainEvent::new(EventPayload::GuardrailTriggered {
+                    guardrail: v.guardrail.clone(),
+                    checkpoint: "post".into(),
+                    action: format!("{:?}", v.action),
+                }),
+            );
         }
         if halcon_security::has_blocking_violation(&violations) {
             if !state.silent {
@@ -1270,87 +1387,8 @@ pub(super) async fn run(
                 });
             }
 
-            // RP-2: Validate recovered tool names against the round's allowed tool surface.
-            // DeepSeek DSML recovery can produce a tool name that is NOT in the sub-agent's
-            // narrowed `round_request.tools` (e.g., model emits `directory_tree` but the
-            // planner allocated only `read_multiple_files`). The executor will silently reject
-            // any tool not in the allowed surface, producing 0 tool executions.
-            //
-            // When exactly one tool is allowed and the recovered name is wrong, remap to the
-            // intended tool. This handles the common "model knows one allowed tool but generates
-            // DSML for a different tool" hallucination pattern.
-            let allowed_tool_names: std::collections::HashSet<&str> = round_request
-                .tools
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect();
-            for tool in &mut synthetic_tools {
-                if !allowed_tool_names.contains(tool.name.as_str()) {
-                    if round_request.tools.len() == 1 {
-                        let intended = round_request.tools[0].name.clone();
-                        tracing::warn!(
-                            recovered = %tool.name,
-                            remapped_to = %intended,
-                            round,
-                            "RP-2: DSML tool name not in allowed surface — remapping to single allowed tool"
-                        );
-                        if !state.silent {
-                            render_sink.info(&format!(
-                                "[format-recovery] RP-2: remapped `{}` → `{}` (not in sub-agent surface)",
-                                tool.name, intended
-                            ));
-                        }
-                        tool.name = intended;
-                    } else {
-                        tracing::warn!(
-                            recovered = %tool.name,
-                            allowed = ?allowed_tool_names,
-                            round,
-                            "RP-2: DSML tool name not in allowed surface — cannot remap (multiple allowed tools)"
-                        );
-                    }
-                }
-            }
-
-            // RP-1: Validate and coerce recovered args against tool input_schema.
-            // DeepSeek DSML frequently emits `paths: "/dir"` (string) when schema declares
-            // `type: "array"`. Coerce string → [string] to prevent tool failures with score 0.00.
-            for tool in &mut synthetic_tools {
-                if let Some(tool_def) = round_request.tools.iter().find(|t| t.name == tool.name) {
-                    let props = tool_def
-                        .input_schema
-                        .get("properties")
-                        .and_then(|p| p.as_object());
-                    if let Some(props_map) = props {
-                        if let serde_json::Value::Object(ref mut args) = tool.input {
-                            // Collect keys to coerce (avoid double-borrow during mutation).
-                            let to_coerce: Vec<String> = props_map
-                                .iter()
-                                .filter(|(prop_name, prop_schema)| {
-                                    let expects_array =
-                                        prop_schema.get("type").and_then(|t| t.as_str())
-                                            == Some("array");
-                                    expects_array
-                                        && args
-                                            .get(prop_name.as_str())
-                                            .is_some_and(|v| v.is_string())
-                                })
-                                .map(|(k, _)| k.clone())
-                                .collect();
-                            for prop_name in to_coerce {
-                                if let Some(val) = args.get(&prop_name).cloned() {
-                                    tracing::warn!(
-                                        tool = %tool.name,
-                                        prop = %prop_name,
-                                        "RP-1: DSML arg coercion — string → array (schema mismatch)"
-                                    );
-                                    args.insert(prop_name, serde_json::Value::Array(vec![val]));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // RP-2 + RP-1: Validate and coerce recovered tools (shared helper).
+            coerce_recovered_tools(&mut synthetic_tools, &round_request.tools, round, "fase2");
 
             // Strip the DSML text from round_text so it doesn't contaminate full_text.
             let clean_text = super::super::model_quirks::strip_tool_xml_artifacts(&round_text);
@@ -1420,7 +1458,154 @@ pub(super) async fn run(
     }
     // ── End FASE 2 ───────────────────────────────────────────────────────────
 
-    if stop_reason != StopReason::ToolUse {
+    // ── B1/B2 Remediation: Content-First Tool Decision Gate ──────────────────
+    //
+    // BEFORE this fix, the decision to execute tools was coupled to stop_reason:
+    //   if stop_reason != ToolUse -> synthesis path (tools LOST)
+    //   if stop_reason == ToolUse -> tool execution path
+    //
+    // AFTER: Decision is based on accumulated content, not provider metadata.
+    // This handles providers (Cenzontle, DeepSeek) that emit tool_use blocks
+    // with stop_reason=EndTurn, or that emit BOTH native tool blocks AND
+    // text-embedded tool calls simultaneously.
+    //
+    // Flow:
+    //   1. Finalize accumulator FIRST (content-first)
+    //   2. If accumulated tools exist -> tool execution path (regardless of stop_reason)
+    //   3. If no accumulated tools -> text/synthesis path
+    let mut completed_tools = accumulator.finalize();
+
+    // B2: Always attempt text recovery and merge with native tools (deduplicating).
+    // Previously this only ran when stop_reason != ToolUse, losing text-embedded
+    // calls when the provider also emitted native tool_use blocks.
+    if !fsm_in_synthesizing && !round_text.is_empty() {
+        if let Some(recovered) = super::super::model_quirks::try_recover_any_tool_call(&round_text)
+        {
+            // Deduplicate: only add recovered tools whose names aren't already in native set.
+            let existing_names: std::collections::HashSet<&str> =
+                completed_tools.iter().map(|t| t.name.as_str()).collect();
+            let mut new_recovered: Vec<super::super::accumulator::CompletedToolUse> = Vec::new();
+            for (i, call) in recovered.iter().enumerate() {
+                if !existing_names.contains(call.name.as_str()) {
+                    new_recovered.push(super::super::accumulator::CompletedToolUse {
+                        id: format!("recovered_{round}_{i}"),
+                        name: call.name.clone(),
+                        input: call.input.clone(),
+                    });
+                }
+            }
+            if !new_recovered.is_empty() {
+                // RP-2 + RP-1: Validate and coerce recovered tools (shared helper).
+                coerce_recovered_tools(&mut new_recovered, &round_request.tools, round, "gate");
+
+                let source = if completed_tools.is_empty() {
+                    "text-only"
+                } else {
+                    "supplementary"
+                };
+                tracing::info!(
+                    round,
+                    source,
+                    native_count = completed_tools.len(),
+                    recovered_count = new_recovered.len(),
+                    tool_names = ?new_recovered.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+                    "B2: text recovery merged tool calls into execution pipeline"
+                );
+                if !state.silent {
+                    render_sink.info(&format!(
+                        "[tool-decision-gate] recovered {} additional tool call(s) from text",
+                        new_recovered.len()
+                    ));
+                }
+                completed_tools.extend(new_recovered);
+            }
+        }
+    }
+
+    // ── Phase 2: Observability metrics ──────────────────────────────────────
+    // Emit structured metric events for tool_call_source classification.
+    {
+        let native_count = completed_tools
+            .iter()
+            .filter(|t| !t.id.starts_with("recovered_"))
+            .count();
+        let recovered_count = completed_tools
+            .iter()
+            .filter(|t| t.id.starts_with("recovered_"))
+            .count();
+        if !completed_tools.is_empty() {
+            tracing::info!(
+                metric.tool_call_source = true,
+                round,
+                native = native_count,
+                recovered = recovered_count,
+                total = completed_tools.len(),
+                stop_reason = ?stop_reason,
+                "metric: tool_call_source breakdown"
+            );
+        }
+        // stop_reason mismatch detection
+        let mismatch = (!completed_tools.is_empty() && stop_reason != StopReason::ToolUse)
+            || (completed_tools.is_empty() && stop_reason == StopReason::ToolUse);
+        if mismatch {
+            tracing::info!(
+                metric.stop_reason_mismatch = true,
+                round,
+                stop_reason = ?stop_reason,
+                has_tools = !completed_tools.is_empty(),
+                tool_count = completed_tools.len(),
+                "metric: stop_reason/tools mismatch detected"
+            );
+        }
+    }
+
+    if completed_tools.is_empty() {
+        // ── No tools path (text-only or empty response) ──────────────────────
+        if stop_reason == StopReason::ToolUse {
+            // Provider said ToolUse but accumulator produced nothing — anomalous.
+            tracing::warn!(
+                round,
+                "B1: stop_reason=ToolUse but no tools accumulated — treating as text round"
+            );
+        }
+
+        // D1: Empty response detector — when model returns NOTHING (no text, no tools)
+        // after tool results were injected, signal the caller to retry instead of breaking.
+        // This handles Cenzontle/DeepSeek transient empty responses where the model
+        // processes for 30-60 seconds and returns zero content.
+        let is_truly_empty =
+            round_text.trim().is_empty() && round_usage.output_tokens == 0 && round > 0;
+        if is_truly_empty {
+            tracing::warn!(
+                metric.empty_response = true,
+                round,
+                latency_ms = round_start.elapsed().as_millis() as u64,
+                input_tokens = round_usage.input_tokens,
+                "D1: empty response detected — model returned no text and no tools"
+            );
+            // Record the empty trace for diagnostics.
+            record_trace(
+                trace_db, state.session_id, &mut state.trace_step_index,
+                TraceStepType::ModelResponse,
+                serde_json::json!({
+                    "round": pending_trace_round,
+                    "text": "",
+                    "stop_reason": &pending_trace_stop,
+                    "usage": { "input_tokens": pending_trace_usage.input_tokens, "output_tokens": 0 },
+                    "latency_ms": pending_trace_latency,
+                    "tool_uses": [],
+                    "empty_response": true,
+                }).to_string(),
+                pending_trace_latency,
+                exec_clock,
+            );
+            state.log_decision(
+                super::loop_state::DecisionCategory::Frontier,
+                format!("empty response in round {round} — signaling retry"),
+            );
+            return Ok(ProviderRoundOutcome::EmptyResponse);
+        }
+
         // Record deferred trace with empty tool_uses for non-tool-use rounds.
         record_trace(
             trace_db, state.session_id, &mut state.trace_step_index,
@@ -1495,14 +1680,19 @@ pub(super) async fn run(
         return Ok(ProviderRoundOutcome::BreakLoop);
     }
 
-    // --- Tool use round ---
+    // ── Tool use path (content-first: tools exist regardless of stop_reason) ──
+    if stop_reason != StopReason::ToolUse {
+        // B1: Provider emitted tool blocks but stop_reason was EndTurn/MaxTokens.
+        // This is common with Cenzontle/DeepSeek gateways. Log for observability.
+        tracing::info!(
+            round,
+            stop_reason = ?stop_reason,
+            tool_count = completed_tools.len(),
+            "B1: executing tools despite non-ToolUse stop_reason (content-first gate)"
+        );
+    }
     state.rounds = round + 1;
     session.agent_rounds += 1;
-    let completed_tools = accumulator.finalize();
-
-    if completed_tools.is_empty() {
-        return Ok(ProviderRoundOutcome::BreakLoop);
-    }
 
     // Record deferred trace with tool_uses for tool-use rounds.
     record_trace(
@@ -1549,4 +1739,83 @@ pub(super) async fn run(
         round_usage,
         round_text_for_scorer,
     }))
+}
+
+// ── Shared RP-1/RP-2 coercion helper ─────────────────────────────────────────
+//
+// Extracted from the duplicate logic in FASE 2 and Content-First Gate paths.
+// Both paths call this after recovering tool calls from text to:
+//   RP-2: Validate recovered tool names against the allowed tool surface
+//   RP-1: Coerce string arguments to arrays where schema expects arrays
+
+/// Validate and coerce recovered tool calls against the round's tool surface.
+///
+/// **RP-2**: If a recovered tool name is not in the allowed surface and exactly
+/// one tool is allowed, remap to that tool. Otherwise warn.
+///
+/// **RP-1**: If a tool argument is a string but the schema expects an array,
+/// coerce `"value"` → `["value"]` to prevent downstream failures.
+fn coerce_recovered_tools(
+    tools: &mut [super::super::accumulator::CompletedToolUse],
+    allowed_tools: &[halcon_core::types::ToolDefinition],
+    round: usize,
+    label: &str,
+) {
+    // RP-2: Tool name validation and remapping.
+    let allowed_names: std::collections::HashSet<&str> =
+        allowed_tools.iter().map(|t| t.name.as_str()).collect();
+    for tool in tools.iter_mut() {
+        if !allowed_names.is_empty() && !allowed_names.contains(tool.name.as_str()) {
+            if allowed_tools.len() == 1 {
+                let intended = allowed_tools[0].name.clone();
+                tracing::warn!(
+                    recovered = %tool.name,
+                    remapped_to = %intended,
+                    round,
+                    "RP-2 ({label}): recovered tool name not in allowed surface — remapping"
+                );
+                tool.name = intended;
+            } else {
+                tracing::warn!(
+                    recovered = %tool.name,
+                    round,
+                    "RP-2 ({label}): recovered tool name not in allowed surface — cannot remap"
+                );
+            }
+        }
+    }
+
+    // RP-1: String → array coercion for schema mismatches.
+    for tool in tools.iter_mut() {
+        if let Some(tool_def) = allowed_tools.iter().find(|t| t.name == tool.name) {
+            let props = tool_def
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.as_object());
+            if let Some(props_map) = props {
+                if let serde_json::Value::Object(ref mut args) = tool.input {
+                    let to_coerce: Vec<String> = props_map
+                        .iter()
+                        .filter(|(prop_name, prop_schema)| {
+                            let expects_array =
+                                prop_schema.get("type").and_then(|t| t.as_str()) == Some("array");
+                            expects_array
+                                && args.get(prop_name.as_str()).is_some_and(|v| v.is_string())
+                        })
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for prop_name in to_coerce {
+                        if let Some(val) = args.get(&prop_name).cloned() {
+                            tracing::warn!(
+                                tool = %tool.name,
+                                prop = %prop_name,
+                                "RP-1 ({label}): string → array coercion (schema mismatch)"
+                            );
+                            args.insert(prop_name, serde_json::Value::Array(vec![val]));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

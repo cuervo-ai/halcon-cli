@@ -1,42 +1,53 @@
-//! Parallel tool executor: partitions tools by permission level and executes
-//! ReadOnly tools concurrently via `futures::join_all`, while Destructive/ReadWrite
-//! tools requiring permission run sequentially.
+//! Tool executor: partitions tools by permission level and executes them.
 //!
 //! ## Module structure
 //!
-//! - `mod.rs`        — Public API: `plan_execution()`, `execute_one_tool()`, shared types
+//! - `mod.rs`        — Public API: `plan_execution()`, shared types, re-exports
+//! - `pipeline.rs`   — Single-tool execution pipeline (9-stage lifecycle)
 //! - `parallel.rs`   — `execute_parallel_batch()` for ReadOnly/concurrent tools
 //! - `sequential.rs` — `execute_sequential_tool()` for gated Destructive tools
 //! - `validation.rs` — `validate_tool_args()`, path resolution, schema checks (pure, no I/O)
 //! - `retry.rs`      — Unified retry: classification + backoff + mutations + repair
 //! - `hooks.rs`      — Pre/post tool hook integration
 
-mod hooks;
+pub(crate) mod hooks;
 pub(crate) mod parallel;
-pub(crate) mod sequential;
+pub(crate) mod pipeline;
 pub(crate) mod retry;
+pub(crate) mod sequential;
 pub(crate) mod validation;
 
 // Re-export public API (preserves backward compatibility)
 pub use parallel::execute_parallel_batch;
-pub use retry::{is_deterministic_error, is_transient_error};
+pub use retry::{classify_error, is_deterministic_error, is_transient_error};
 pub use sequential::execute_sequential_tool;
 
-// Re-export submodule items used by tests (super::* pattern)
-pub(crate) use retry::{jittered_delay, run_with_retry};
-pub(crate) use validation::{extract_path_args, pre_validate_path_args, resolve_to_absolute, suggest_similar_path, validate_tool_args};
+// Re-export pipeline items used by parallel.rs, sequential.rs, and tests
+pub(crate) use pipeline::{execute_one_tool, make_error_result};
 
+// Re-export submodule items used by tests (super::* pattern)
+#[cfg(test)]
+pub(crate) use retry::{jittered_delay, run_with_retry};
+#[cfg(test)]
+pub(crate) use validation::{
+    extract_path_args, pre_validate_path_args, resolve_to_absolute, suggest_similar_path,
+    validate_tool_args,
+};
+
+#[cfg(test)]
 use std::time::Duration;
 
-use halcon_core::types::{ContentBlock, PermissionLevel, ToolInput};
+#[cfg(test)]
+use halcon_core::types::ToolInput;
 use halcon_core::types::ToolRetryConfig;
+use halcon_core::types::{ContentBlock, PermissionLevel};
 use halcon_tools::ToolRegistry;
 
 use super::accumulator::CompletedToolUse;
+#[cfg(test)]
 use super::conversational_permission::ConversationalPermissionHandler;
 use super::idempotency::DryRunMode;
 use crate::render::diff::{compute_ai_diff, render_file_diff};
-use crate::render::sink::RenderSink;
 
 // Re-export for test visibility (tests use super::*)
 #[allow(unused_imports)]
@@ -69,6 +80,10 @@ pub struct ToolExecutionConfig<'a> {
     /// Optional unified trace recorder. When `Some`, parallel/sequential executors
     /// use fire-and-forget recording instead of inline DB writes.
     pub trace_recorder: Option<super::trace_recording::TraceRecorder>,
+    /// Maximum seconds to wait for an interactive permission prompt before auto-denying.
+    /// `None` or `Some(0)` = unlimited (legacy behavior).
+    /// Resolves: CR-2 (unbounded permission wait).
+    pub permission_timeout_secs: Option<u64>,
 }
 
 impl Default for ToolExecutionConfig<'_> {
@@ -81,6 +96,7 @@ impl Default for ToolExecutionConfig<'_> {
             session_id_str: String::new(),
             session_tools: Vec::new(),
             trace_recorder: None,
+            permission_timeout_secs: None,
         }
     }
 }
@@ -119,7 +135,10 @@ pub(crate) fn resolve_tool_from_registry(
     registry: &ToolRegistry,
 ) -> Option<std::sync::Arc<dyn halcon_core::traits::Tool>> {
     let canonical = canonicalize_name(name);
-    registry.get(name).or_else(|| registry.get(canonical)).cloned()
+    registry
+        .get(name)
+        .or_else(|| registry.get(canonical))
+        .cloned()
 }
 
 /// Partition completed tool uses into parallel and sequential batches.
@@ -238,337 +257,9 @@ fn generate_file_edit_preview(input: &serde_json::Value) -> Option<(String, usiz
     Some((path.to_string(), added, deleted))
 }
 
-// jittered_delay moved to retry.rs
-
-// ─────────────────────────────────────────────────────────────────────────────
-// execute_one_tool helpers — each <50 LOC, independently testable
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Build a ToolExecResult with is_error=true and zero duration.
-#[inline]
-fn make_error_result(tool_call: &CompletedToolUse, content: String) -> ToolExecResult {
-    ToolExecResult {
-        tool_use_id: tool_call.id.clone(),
-        tool_name: tool_call.name.clone(),
-        content_block: ContentBlock::ToolResult {
-            tool_use_id: tool_call.id.clone(),
-            content,
-            is_error: true,
-        },
-        duration_ms: 0,
-        was_parallel: false,
-    }
-}
-
-/// Return an error result if the tool is not in the registry.
-///
-/// Tries exact name first, then falls back to the canonical alias so models
-/// that emit `run_command`, `execute_bash`, `shell`, etc. still resolve to
-/// the registered `bash` tool.
-#[allow(clippy::result_large_err)]
-fn check_tool_known(
-    tool_call: &CompletedToolUse,
-    registry: &ToolRegistry,
-    session_tools: &[std::sync::Arc<dyn halcon_core::traits::Tool>],
-) -> Result<std::sync::Arc<dyn halcon_core::traits::Tool>, ToolExecResult> {
-    // Primary: registered tool registry (uses shared resolution with alias fallback).
-    if let Some(t) = resolve_tool_from_registry(&tool_call.name, registry) {
-        return Ok(t);
-    }
-    // Fallback: session-injected tools (e.g., search_memory).
-    let canonical = canonicalize_name(&tool_call.name);
-    for t in session_tools {
-        if t.name() == tool_call.name || t.name() == canonical {
-            return Ok(t.clone());
-        }
-    }
-    Err(make_error_result(
-        tool_call,
-        format!(
-            "Error: unknown tool '{}' (canonical: '{}')",
-            tool_call.name, canonical
-        ),
-    ))
-}
-
-/// Return a dry-run result if the mode demands it, otherwise None.
-fn check_dry_run(
-    tool_call: &CompletedToolUse,
-    perm_level: PermissionLevel,
-    dry_run_mode: DryRunMode,
-) -> Option<ToolExecResult> {
-    match dry_run_mode {
-        DryRunMode::Off => None,
-        DryRunMode::Full => Some(synthetic_dry_run_result(tool_call)),
-        DryRunMode::DestructiveOnly if perm_level >= PermissionLevel::ReadWrite => {
-            Some(synthetic_dry_run_result(tool_call))
-        }
-        DryRunMode::DestructiveOnly => None,
-    }
-}
-
-/// Return a cached result if this call was already executed, plus the execution_id for recording.
-fn check_idempotency(
-    tool_call: &CompletedToolUse,
-    idempotency: Option<&super::idempotency::IdempotencyRegistry>,
-) -> (Option<ToolExecResult>, Option<String>) {
-    let Some(reg) = idempotency else {
-        return (None, None);
-    };
-    let id = super::idempotency::compute_execution_id(&tool_call.name, &tool_call.input, "");
-    if let Some(cached) = reg.lookup(&id) {
-        let result = ToolExecResult {
-            tool_use_id: tool_call.id.clone(),
-            tool_name: tool_call.name.clone(),
-            content_block: ContentBlock::ToolResult {
-                tool_use_id: tool_call.id.clone(),
-                content: cached.result_content,
-                is_error: cached.is_error,
-            },
-            duration_ms: 0,
-            was_parallel: false,
-        };
-        return (Some(result), Some(id));
-    }
-    (None, Some(id))
-}
-
-// validate_tool_args, extract_path_args, resolve_to_absolute, suggest_similar_path,
-// pre_validate_path_args moved to validation.rs
-
-// run_with_retry moved to retry.rs
-
-/// Record the execution result in the idempotency registry.
-fn record_idempotency(
-    idempotency: Option<&super::idempotency::IdempotencyRegistry>,
-    exec_id: Option<String>,
-    tool_call: &CompletedToolUse,
-    result: &ToolExecResult,
-) {
-    let (Some(registry), Some(id)) = (idempotency, exec_id) else {
-        return;
-    };
-    let (content, is_error) = match &result.content_block {
-        ContentBlock::ToolResult {
-            content, is_error, ..
-        } => (content.clone(), *is_error),
-        _ => (String::new(), false),
-    };
-    registry.record(super::idempotency::ExecutionRecord {
-        execution_id: id,
-        tool_name: tool_call.name.clone(),
-        result_content: content,
-        is_error,
-        executed_at: chrono::Utc::now(),
-    });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Execution Pipeline
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Bundled context for tool execution — replaces 12 positional parameters.
-///
-/// Constructed once per batch and passed to `execute_one_tool`. Each field
-/// is a dependency that the pipeline stages reference, eliminating the need
-/// for `super::super::` traversal or implicit coupling.
-pub(crate) struct ExecutionContext<'a> {
-    pub registry: &'a ToolRegistry,
-    pub working_dir: &'a str,
-    pub tool_timeout: Duration,
-    pub dry_run_mode: DryRunMode,
-    pub idempotency: Option<&'a super::idempotency::IdempotencyRegistry>,
-    pub retry_config: &'a ToolRetryConfig,
-    pub render_sink: &'a dyn RenderSink,
-    pub plugin_registry: Option<&'a std::sync::Mutex<crate::repl::plugins::PluginRegistry>>,
-    pub hook_runner: Option<&'a crate::repl::hooks::HookRunner>,
-    pub session_id_str: &'a str,
-    pub session_tools: &'a [std::sync::Arc<dyn halcon_core::traits::Tool>],
-}
-
-/// Check plugin pre-invoke gate. Returns Some(denied_result) if blocked.
-fn check_plugin_gate(
-    tool_call: &CompletedToolUse,
-    plugin_registry: Option<&std::sync::Mutex<crate::repl::plugins::PluginRegistry>>,
-) -> Option<ToolExecResult> {
-    let pr_mutex = plugin_registry?;
-    match pr_mutex.try_lock() {
-        Ok(pr) => {
-            if let Some(plugin_id) = pr.plugin_id_for_tool(&tool_call.name).map(str::to_owned) {
-                if let crate::repl::plugins::InvokeGateResult::Deny(reason) =
-                    pr.pre_invoke_gate(&plugin_id, &tool_call.name, false)
-                {
-                    return Some(synthetic_plugin_denied_result(tool_call, &reason));
-                }
-            }
-            None
-        }
-        Err(_) => {
-            tracing::warn!(tool = %tool_call.name, "plugin gate lock contention — denying tool (fail-closed)");
-            Some(synthetic_plugin_denied_result(
-                tool_call,
-                "plugin service temporarily unavailable",
-            ))
-        }
-    }
-}
-
-/// Record plugin post-invoke metrics (best-effort, never blocks).
-fn record_plugin_metrics(
-    tool_call: &CompletedToolUse,
-    result: &ToolExecResult,
-    plugin_registry: Option<&std::sync::Mutex<crate::repl::plugins::PluginRegistry>>,
-) {
-    let Some(pr_mutex) = plugin_registry else { return };
-    match pr_mutex.try_lock() {
-        Ok(mut pr) => {
-            if let Some(plugin_id) = pr.plugin_id_for_tool(&tool_call.name).map(str::to_owned) {
-                let is_err = matches!(
-                    &result.content_block,
-                    ContentBlock::ToolResult { is_error: true, .. }
-                );
-                pr.post_invoke(&plugin_id, &tool_call.name, 0, 0.0, !is_err, None);
-            }
-        }
-        Err(_) => {
-            tracing::warn!(tool = %tool_call.name, "plugin post-invoke metrics skipped — lock contention")
-        }
-    }
-}
-
-/// Execute a single tool through the execution pipeline.
-///
-/// Pipeline stages (each is a separate function, composable):
-///   1. resolve   → check_tool_known()
-///   2. plugin    → check_plugin_gate()
-///   3. dry-run   → check_dry_run()
-///   4. cache     → check_idempotency()
-///   5. validate  → validate_tool_args() + pre_validate_path_args()
-///   6. hook      → hooks::fire_pre_tool_hook()
-///   7. execute   → run_with_retry()
-///   8. post-hook → hooks::fire_post_tool_hook()
-///   9. record    → record_idempotency() + record_plugin_metrics()
-async fn execute_tool_pipeline(
-    tool_call: &CompletedToolUse,
-    ctx: &ExecutionContext<'_>,
-) -> ToolExecResult {
-    // Stage 1: Resolve tool.
-    let tool = match check_tool_known(tool_call, ctx.registry, ctx.session_tools) {
-        Ok(t) => t,
-        Err(e) => return e,
-    };
-
-    // Stage 2: Plugin pre-invoke gate.
-    if let Some(denied) = check_plugin_gate(tool_call, ctx.plugin_registry) {
-        return denied;
-    }
-
-    // Stage 3: Dry-run shortcut.
-    if let Some(r) = check_dry_run(tool_call, tool.permission_level(), ctx.dry_run_mode) {
-        return r;
-    }
-
-    // Stage 4: Idempotency cache.
-    let (cached, exec_id) = check_idempotency(tool_call, ctx.idempotency);
-    if let Some(r) = cached {
-        return r;
-    }
-
-    // Stage 5: Argument validation + path existence.
-    if let Some(r) = validate_tool_args(tool_call) {
-        return r;
-    }
-    if let Some(r) = pre_validate_path_args(tool_call, tool.permission_level(), ctx.working_dir) {
-        record_idempotency(ctx.idempotency, exec_id, tool_call, &r);
-        return r;
-    }
-
-    // Stage 6: PreToolUse lifecycle hook.
-    if let Some(runner) = ctx.hook_runner {
-        if let Some(denied) = hooks::fire_pre_tool_hook(runner, tool_call, ctx.session_id_str).await {
-            record_idempotency(ctx.idempotency, exec_id, tool_call, &denied);
-            return denied;
-        }
-    }
-
-    // Stage 7: Execute with retry.
-    let result = run_with_retry(
-        tool_call, &tool, ctx.working_dir, ctx.tool_timeout, ctx.retry_config, ctx.render_sink,
-    )
-    .await;
-
-    // Stage 8: PostToolUse hook (best-effort).
-    if let Some(runner) = ctx.hook_runner {
-        let is_error = matches!(&result.content_block,
-            ContentBlock::ToolResult { is_error, .. } if *is_error);
-        hooks::fire_post_tool_hook(runner, tool_call, is_error, ctx.session_id_str).await;
-    }
-
-    // Stage 9: Record idempotency + plugin metrics.
-    record_idempotency(ctx.idempotency, exec_id, tool_call, &result);
-    record_plugin_metrics(tool_call, &result, ctx.plugin_registry);
-
-    result
-}
-
-/// Execute a single tool — constructs an `ExecutionContext` and delegates to the pipeline.
-///
-/// This is the primary entry point for parallel.rs and sequential.rs.
-/// The 12-parameter signature is preserved for backward compatibility.
-/// Internally constructs an `ExecutionContext` and delegates to `execute_tool_pipeline`.
-#[allow(clippy::too_many_arguments)]
-async fn execute_one_tool(
-    tool_call: &CompletedToolUse,
-    registry: &ToolRegistry,
-    working_dir: &str,
-    tool_timeout: Duration,
-    dry_run_mode: DryRunMode,
-    idempotency: Option<&super::idempotency::IdempotencyRegistry>,
-    retry_config: &ToolRetryConfig,
-    render_sink: &dyn RenderSink,
-    plugin_registry: Option<&std::sync::Mutex<crate::repl::plugins::PluginRegistry>>,
-    hook_runner: Option<&super::hooks::HookRunner>,
-    session_id_str: &str,
-    session_tools: &[std::sync::Arc<dyn halcon_core::traits::Tool>],
-) -> ToolExecResult {
-    let ctx = ExecutionContext {
-        registry,
-        working_dir,
-        tool_timeout,
-        dry_run_mode,
-        idempotency,
-        retry_config,
-        render_sink,
-        plugin_registry,
-        hook_runner,
-        session_id_str,
-        session_tools,
-    };
-    execute_tool_pipeline(tool_call, &ctx).await
-}
-
-/// Build a synthetic ToolExecResult for plugin gate denials.
-///
-/// Returns an `is_error: true` tool result so the agent loop treats the
-/// plugin denial identically to a normal tool failure — the halting
-/// logic (ToolFailureTracker, circuit breaker, etc.) receives a clean signal.
-fn synthetic_plugin_denied_result(tool_call: &CompletedToolUse, reason: &str) -> ToolExecResult {
-    ToolExecResult {
-        tool_use_id: tool_call.id.clone(),
-        tool_name: tool_call.name.clone(),
-        content_block: ContentBlock::ToolResult {
-            tool_use_id: tool_call.id.clone(),
-            content: format!("Plugin gate denied: {reason}"),
-            is_error: true,
-        },
-        duration_ms: 0,
-        was_parallel: false,
-    }
-}
-
-// execute_parallel_batch moved to parallel.rs, re-exported above
-
-// execute_sequential_tool moved to sequential.rs, re-exported above
+// Pipeline internals (execute_one_tool, check_*, record_*) → pipeline.rs
+// Parallel batch execution → parallel.rs
+// Sequential tool execution → sequential.rs
 
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
@@ -686,6 +377,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -712,6 +405,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -752,6 +447,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -781,6 +478,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -816,6 +515,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -851,6 +552,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -888,6 +591,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -1110,6 +815,8 @@ mod tests {
             &config,
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -1622,6 +1329,8 @@ mod tests {
             &config,
             &*TEST_SINK,
             None, // plugin_registry
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -1853,7 +1562,7 @@ mod tests {
             fn input_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+            async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 Ok(ToolOutput {
                     tool_use_id: input.tool_use_id,
@@ -2360,6 +2069,8 @@ mod tests {
                 &ToolExecutionConfig::default(),
                 &*TEST_SINK,
                 None, // plugin_registry
+                None, // permission_pipeline
+                None, // permissions
             )
             .await;
 
@@ -2417,6 +2128,8 @@ mod tests {
                 &ToolExecutionConfig::default(),
                 &*TEST_SINK,
                 None, // plugin_registry
+                None, // permission_pipeline
+                None, // permissions
             )
             .await;
 
@@ -2471,6 +2184,8 @@ mod tests {
                 &ToolExecutionConfig::default(),
                 &*TEST_SINK,
                 None, // plugin_registry
+                None, // permission_pipeline
+                None, // permissions
             )
             .await;
 
@@ -2673,6 +2388,8 @@ mod tests {
                 &ToolExecutionConfig::default(),
                 &*TEST_SINK,
                 None, // plugin_registry
+                None, // permission_pipeline
+                None, // permissions
             )
             .await;
 
@@ -2727,6 +2444,8 @@ mod tests {
                 &ToolExecutionConfig::default(),
                 &*TEST_SINK,
                 None, // plugin_registry
+                None, // permission_pipeline
+                None, // permissions
             )
             .await;
 
@@ -2769,6 +2488,8 @@ mod tests {
                 &ToolExecutionConfig::default(),
                 &*TEST_SINK,
                 None, // plugin_registry
+                None, // permission_pipeline
+                None, // permissions
             )
             .await;
 
@@ -3590,6 +3311,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None,
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
@@ -3643,6 +3366,8 @@ mod tests {
             &ToolExecutionConfig::default(),
             &*TEST_SINK,
             None,
+            None, // permission_pipeline
+            None, // permissions
         )
         .await;
 
