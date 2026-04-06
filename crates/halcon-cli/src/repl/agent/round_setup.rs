@@ -357,7 +357,51 @@ pub(super) async fn run(
     // correct. build_messages() is O(n) over all tiers; calling it twice per round
     // was the hot-path bottleneck identified in the SOTA 2026 performance audit.
     state.context_pipeline.set_round(round as u32);
-    let built_messages = state.context_pipeline.build_messages();
+    let mut built_messages = state.context_pipeline.build_messages();
+
+    // Wave 9: Context efficiency pipeline — XIYO-aligned 2-tier approach.
+    //
+    // Tier 1: Truncate large tool results (XIYO: per-tool maxResultSizeChars, default 50K).
+    // Applied to ALL messages except the last 2 (current turn). Uses head+tail preview.
+    // Threshold: 2000 tokens (~8K chars). Preview: 500 tokens (~2K chars).
+    {
+        let truncated = super::super::context::tool_result_truncator::truncate_large_tool_results(
+            &mut built_messages,
+            2000, // threshold_tokens: truncate results > ~8K chars
+            500,  // preview_tokens: keep ~2K chars of preview
+        );
+        if truncated > 0 {
+            tracing::info!(
+                truncated_count = truncated,
+                round = round,
+                "tool_result_truncator: truncated large tool outputs"
+            );
+        }
+    }
+
+    // Tier 2: Observation masking — replace old tool outputs with compact placeholders.
+    // Follows JetBrains "Complexity Trap" paper (arxiv:2508.21433): observation masking
+    // achieves 50%+ cost reduction. XIYO's equivalent: contentReplacementState + per-message budget.
+    // Auto-enables after round 3 (enough context for masking to matter).
+    {
+        let masker_config = super::super::domain::observation_masker::ObservationMaskerConfig {
+            enabled: round >= 3,
+            keep_recent_rounds: 2,
+            min_tokens_to_mask: 50,
+        };
+        let tokens_saved = super::super::domain::observation_masker::mask_old_observations(
+            &mut built_messages,
+            round,
+            &masker_config,
+        );
+        if tokens_saved > 0 {
+            tracing::info!(
+                tokens_saved = tokens_saved,
+                round = round,
+                "observation_masker: masked old tool outputs"
+            );
+        }
+    }
 
     // ── Paloma Routing (formally-verified decision) ──────────────────────────
     // When PalomaRouter is available, consult it first for model/provider selection.
