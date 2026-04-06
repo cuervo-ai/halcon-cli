@@ -397,6 +397,8 @@ pub struct AnthropicLlmLayer {
     client: reqwest::blocking::Client,
     /// API key de Anthropic (de `ANTHROPIC_API_KEY` o constructor manual).
     api_key: String,
+    /// API base URL (e.g., "https://api.anthropic.com"). Configurable for proxies.
+    api_base: String,
     /// Model ID. Default: "claude-haiku-4-5-20251001".
     model: String,
     /// Timeout de la llamada HTTP en milisegundos. Default: 2000.
@@ -417,8 +419,18 @@ impl AnthropicLlmLayer {
         ))
     }
 
-    /// Constructor explícito con API key, model y timeout configurables.
+    /// Constructor explícito con API key, model, base URL y timeout configurables.
     pub fn new(api_key: String, model: String, timeout_ms: u64) -> Self {
+        Self::with_base(
+            api_key,
+            "https://api.anthropic.com".to_string(),
+            model,
+            timeout_ms,
+        )
+    }
+
+    /// Constructor with explicit API base URL (for proxies or alternative endpoints).
+    pub fn with_base(api_key: String, api_base: String, model: String, timeout_ms: u64) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
             .build()
@@ -426,6 +438,7 @@ impl AnthropicLlmLayer {
         Self {
             client,
             api_key,
+            api_base,
             model,
             timeout_ms,
         }
@@ -440,11 +453,12 @@ impl LlmClassifierLayer for AnthropicLlmLayer {
         let query = query.to_string();
         let client = self.client.clone();
         let api_key = self.api_key.clone();
+        let api_base = self.api_base.clone();
         let model = self.model.clone();
         let timeout_ms = self.timeout_ms;
 
         std::thread::spawn(move || {
-            let result = anthropic_classify(&client, &api_key, &model, &query);
+            let result = anthropic_classify(&client, &api_key, &api_base, &model, &query);
             let _ = tx.send(result);
         });
 
@@ -462,6 +476,7 @@ impl LlmClassifierLayer for AnthropicLlmLayer {
     fn deliberate(&self, query: &str, scores: &[TaskScore]) -> Option<LayerResult> {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
+        let api_base = self.api_base.clone();
         let model = self.model.clone();
         let query_s = query.to_string();
         let timeout_ms = self.timeout_ms;
@@ -482,7 +497,8 @@ impl LlmClassifierLayer for AnthropicLlmLayer {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = anthropic_deliberate(&client, &api_key, &model, &query_s, &score_lines);
+            let result =
+                anthropic_deliberate(&client, &api_key, &api_base, &model, &query_s, &score_lines);
             let _ = tx.send(result);
         });
         let channel_timeout = Duration::from_millis(timeout_ms.saturating_add(200));
@@ -532,6 +548,7 @@ struct LlmClassificationResponse {
 fn anthropic_classify(
     client: &reqwest::blocking::Client,
     api_key: &str,
+    api_base: &str,
     model: &str,
     query: &str,
 ) -> Option<LayerResult> {
@@ -545,7 +562,7 @@ fn anthropic_classify(
     });
 
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(format!("{api_base}/v1/messages"))
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
@@ -573,6 +590,7 @@ fn anthropic_classify(
 fn anthropic_deliberate(
     client: &reqwest::blocking::Client,
     api_key: &str,
+    api_base: &str,
     model: &str,
     query: &str,
     score_lines: &str,
@@ -591,7 +609,7 @@ fn anthropic_deliberate(
     });
 
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(format!("{api_base}/v1/messages"))
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
@@ -1083,6 +1101,14 @@ pub struct HybridConfig {
     /// If normalized Shannon entropy > this value, `HighEntropy` is flagged.
     /// Default: 0.75 (fires when top 3+ types share similar similarity scores).
     pub entropy_threshold: f32,
+    /// Blending weight for heuristic layer when dominant (≥ heuristic_dominant).
+    pub w_heuristic_dominant: f32,
+    /// Blending weight for embedding layer when heuristic is dominant.
+    pub w_embedding_secondary: f32,
+    /// Blending weight for heuristic layer when embedding is primary.
+    pub w_heuristic_weak: f32,
+    /// Blending weight for embedding layer when primary.
+    pub w_embedding_primary: f32,
 }
 
 impl Default for HybridConfig {
@@ -1096,6 +1122,10 @@ impl Default for HybridConfig {
             llm_min_query_len: 10,
             margin_threshold: 0.05,
             entropy_threshold: 0.75,
+            w_heuristic_dominant: W_HEURISTIC_DOMINANT,
+            w_embedding_secondary: W_EMBEDDING_SECONDARY,
+            w_heuristic_weak: W_HEURISTIC_WEAK,
+            w_embedding_primary: W_EMBEDDING_PRIMARY,
         }
     }
 }
@@ -1586,8 +1616,8 @@ impl HybridIntentClassifier {
 
         // Heurística dominante: acuerdo entre capas.
         if h.confidence >= self.config.heuristic_dominant && h.task_type == e.task_type {
-            let blended =
-                W_HEURISTIC_DOMINANT * h.confidence + W_EMBEDDING_SECONDARY * e.confidence;
+            let blended = self.config.w_heuristic_dominant * h.confidence
+                + self.config.w_embedding_secondary * e.confidence;
             return (
                 h.task_type,
                 blended.clamp(0.0, 1.0),
@@ -1599,7 +1629,8 @@ impl HybridIntentClassifier {
 
         // Heurística dominante pero desacuerdo: heurística gana pero con penalización.
         if h.confidence >= self.config.heuristic_dominant {
-            let blended = W_HEURISTIC_DOMINANT * h.confidence + W_EMBEDDING_SECONDARY * 0.0;
+            let blended = self.config.w_heuristic_dominant * h.confidence
+                + self.config.w_embedding_secondary * 0.0;
             return (
                 h.task_type,
                 blended.clamp(0.0, 1.0),
@@ -1611,8 +1642,8 @@ impl HybridIntentClassifier {
 
         // Embedding primario — heurística débil.
         // Comparar scores ponderados y elegir el tipo con mayor score combinado.
-        let h_weighted = W_HEURISTIC_WEAK * h.confidence;
-        let e_weighted = W_EMBEDDING_PRIMARY * e.confidence;
+        let h_weighted = self.config.w_heuristic_weak * h.confidence;
+        let e_weighted = self.config.w_embedding_primary * e.confidence;
 
         if e.task_type == h.task_type {
             // Acuerdo aunque heurística débil.
@@ -1720,7 +1751,7 @@ impl HybridIntentClassifier {
         confidence: f32,
         signals: Vec<String>,
         trace: ClassificationTrace,
-        ctx: &ContextSignals<'_>,
+        _ctx: &ContextSignals<'_>,
     ) -> HybridClassification {
         use super::task_analyzer::TaskAnalyzer;
 

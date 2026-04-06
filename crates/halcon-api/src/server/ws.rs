@@ -143,5 +143,10 @@ fn should_forward(event: &WsServerEvent, channels: &HashSet<WsChannel>) -> bool 
         | WsServerEvent::MediaAnalysisCompleted { .. } => {
             channels.contains(&WsChannel::Chat) || channels.contains(&WsChannel::All)
         }
+        // Remote-control events are forwarded on the Execution channel.
+        WsServerEvent::RemoteControlReplanAccepted { .. }
+        | WsServerEvent::RemoteControlReplanRejected { .. } => {
+            channels.contains(&WsChannel::Execution) || channels.contains(&WsChannel::All)
+        }
     }
 }

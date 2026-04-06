@@ -40,7 +40,7 @@ impl Tool for NativeCrawlTool {
         false
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let url = input.arguments["url"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("native_crawl requires 'url' string".into())
         })?;

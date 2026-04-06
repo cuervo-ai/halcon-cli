@@ -98,11 +98,14 @@ pub(super) async fn invoke_with_fallback(
         // Primary is unhealthy — promote first healthy fallback to primary.
         let (name, first_fb) = healthy_fallbacks.remove(0);
         tracing::info!(provider = %name, "Promoting fallback to primary (original primary unhealthy)");
-        let _ = event_tx.send(DomainEvent::new(EventPayload::ProviderFallback {
-            from_provider: primary.name().to_string(),
-            to_provider: name.clone(),
-            reason: "primary unhealthy".to_string(),
-        }));
+        halcon_core::emit_event(
+            event_tx,
+            DomainEvent::new(EventPayload::ProviderFallback {
+                from_provider: primary.name().to_string(),
+                to_provider: name.clone(),
+                reason: "primary unhealthy".to_string(),
+            }),
+        );
         (first_fb, None, Some(name))
     };
 
@@ -158,11 +161,14 @@ pub(super) async fn invoke_with_fallback(
                 };
                 match fb_provider.invoke(&fb_request).await {
                     Ok(stream) => {
-                        let _ = event_tx.send(DomainEvent::new(EventPayload::ProviderFallback {
-                            from_provider: effective_primary.name().to_string(),
-                            to_provider: fb_name.clone(),
-                            reason: format!("fallback #{}", idx + 1),
-                        }));
+                        halcon_core::emit_event(
+                            event_tx,
+                            DomainEvent::new(EventPayload::ProviderFallback {
+                                from_provider: effective_primary.name().to_string(),
+                                to_provider: fb_name.clone(),
+                                reason: format!("fallback #{}", idx + 1),
+                            }),
+                        );
                         return Ok(InvokeAttempt {
                             stream,
                             provider_name: fb_name.clone(),

@@ -473,7 +473,7 @@ impl Tool for TestRunTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "test_run"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let working_dir = &input.working_directory;
 
         let coverage = input

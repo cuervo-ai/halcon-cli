@@ -73,7 +73,7 @@ impl AgentBadge {
     ///
     /// Uses transition engine to smoothly animate color changes between states.
     pub fn render_span(&self) -> Span<'static> {
-        let p = &theme::active().palette;
+        let _p = &theme::active().palette;
         let base_color = self.indicator.state().semantic_color();
 
         // Get current transition color (or base if no transition active)

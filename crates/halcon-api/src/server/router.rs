@@ -7,10 +7,12 @@ use axum::{
     Router,
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use super::auth::auth_middleware;
 use super::handlers;
+use super::middleware::rate_limit::{rate_limit_middleware, RateLimiterState};
 use super::state::AppState;
 use super::ws::ws_handler;
 
@@ -97,6 +99,19 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/chat/sessions/:id/permissions/:req_id",
             post(handlers::chat::resolve_permission),
+        )
+        // Remote-control endpoints
+        .route(
+            "/remote-control/sessions/:id/replan",
+            post(handlers::remote_control::submit_replan),
+        )
+        .route(
+            "/remote-control/sessions/:id/status",
+            get(handlers::remote_control::get_status),
+        )
+        .route(
+            "/remote-control/sessions/:id/context",
+            post(handlers::remote_control::inject_context),
         );
 
     // Admin routes require the HALCON_ADMIN_API_KEY env var (bootstrap admin auth).
@@ -125,11 +140,17 @@ pub fn build_router(state: AppState) -> Router {
             auth_middleware,
         ));
 
+    // Rate limiter state shared across all requests.
+    let rate_limiter = RateLimiterState::new();
+
     Router::new()
         // Health check is explicitly PUBLIC — no auth, no state required.
         .route("/health", get(health_check))
         .merge(protected)
         .merge(admin_routes)
+        // H6: Per-client rate limiting (120 req/min per IP).
+        .layer(axum::Extension(rate_limiter))
+        .layer(middleware::from_fn(rate_limit_middleware))
         .layer(
             // Restrict CORS to localhost origins only.
             // This prevents cross-origin browser requests from arbitrary websites
@@ -156,6 +177,9 @@ pub fn build_router(state: AppState) -> Router {
                 ]),
         )
         .layer(TraceLayer::new_for_http())
+        // P0-C1: Prevent DoS via oversized request payloads.
+        // 10 MB limit covers large code context submissions while blocking abuse.
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state)
 }
 

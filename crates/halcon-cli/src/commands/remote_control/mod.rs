@@ -20,9 +20,7 @@ mod client;
 mod interactive;
 mod protocol;
 
-pub use protocol::{
-    RemoteCommand, RemoteControlEvent, RemoteControlStatus, RemoteSessionInfo, ReplanPayload,
-};
+pub use protocol::ReplanPayload;
 
 /// Subcommands for `halcon remote-control`.
 #[derive(Subcommand)]
@@ -105,11 +103,7 @@ pub enum RemoteControlAction {
 }
 
 /// Run the remote-control command.
-pub async fn run(
-    action: RemoteControlAction,
-    server_url: &str,
-    token: &str,
-) -> Result<()> {
+pub async fn run(action: RemoteControlAction, server_url: &str, token: &str) -> Result<()> {
     let rc_client = client::RemoteControlClient::new(server_url, token)?;
 
     match action {
@@ -263,10 +257,8 @@ async fn cmd_replan(
     session_id: Option<String>,
 ) -> Result<()> {
     let sid = resolve_session(session_id)?;
-    let plan_json =
-        std::fs::read_to_string(plan_path).context("Failed to read plan file")?;
-    let payload: ReplanPayload =
-        serde_json::from_str(&plan_json).context("Invalid plan JSON")?;
+    let plan_json = std::fs::read_to_string(plan_path).context("Failed to read plan file")?;
+    let payload: ReplanPayload = serde_json::from_str(&plan_json).context("Invalid plan JSON")?;
 
     println!("Submitting replan ({} steps)...", payload.steps.len());
     client.submit_replan(&sid, &payload).await?;
@@ -274,11 +266,11 @@ async fn cmd_replan(
     Ok(())
 }
 
-async fn cmd_cancel(
-    client: &client::RemoteControlClient,
-    task_id: &str,
-) -> Result<()> {
-    println!("Cancelling {}...", &task_id[..std::cmp::min(8, task_id.len())]);
+async fn cmd_cancel(client: &client::RemoteControlClient, task_id: &str) -> Result<()> {
+    println!(
+        "Cancelling {}...",
+        &task_id[..std::cmp::min(8, task_id.len())]
+    );
     client.cancel_session(task_id).await?;
     println!("  Cancelled.");
     Ok(())

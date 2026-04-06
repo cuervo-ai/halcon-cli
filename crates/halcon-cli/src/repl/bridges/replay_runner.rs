@@ -120,12 +120,15 @@ pub async fn run_replay(
     let default_planning_config = halcon_core::types::PlanningConfig::default();
     let default_orch_config = halcon_core::types::OrchestratorConfig::default();
     let replay_speculator = super::super::tool_speculation::ToolSpeculator::new();
+    // Phase 1: Replay gets fresh pipeline (deterministic mode doesn't persist denials)
+    let mut replay_pipeline = crate::repl::security::permission_pipeline::PermissionPipeline::new();
     let ctx = AgentContext {
         provider: &provider,
         session: &mut replay_session,
         request: &request,
         tool_registry,
         permissions: &mut permissions,
+        permission_pipeline: &mut replay_pipeline,
         working_dir: &original_session.working_directory,
         event_tx,
         limits: &limits,
@@ -170,6 +173,7 @@ pub async fn run_replay(
         is_sub_agent: false,
         requested_provider: None,
         policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+        paloma_router: None,
     };
 
     let result = agent::run_agent_loop(ctx).await?;

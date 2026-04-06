@@ -201,7 +201,10 @@ pub fn strip_tool_xml_artifacts(text: &str) -> Cow<'_, str> {
                     continue 'outer;
                 } else {
                     stripped = true;
-                    rest = "";
+                    #[allow(unused_assignments)]
+                    {
+                        rest = "";
+                    }
                     break 'outer;
                 }
             }

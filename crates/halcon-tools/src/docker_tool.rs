@@ -186,7 +186,7 @@ impl Tool for DockerTool {
         matches!(action, "rm" | "rmi" | "prune" | "compose_down")
     }
 
-    async fn execute(
+    async fn execute_inner(
         &self,
         input: ToolInput,
     ) -> Result<ToolOutput, halcon_core::error::HalconError> {

@@ -429,7 +429,7 @@ impl Tool for OpenApiValidateTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(
+    async fn execute_inner(
         &self,
         input: ToolInput,
     ) -> Result<ToolOutput, halcon_core::error::HalconError> {

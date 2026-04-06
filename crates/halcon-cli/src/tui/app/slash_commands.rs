@@ -186,6 +186,53 @@ impl TuiApp {
                 self.activity_model
                     .push_info("[mode] Cycled UI display mode");
             }
+            "settings" | "config" => {
+                self.handle_action(input::InputAction::OpenSettings);
+            }
+            "lsp" => {
+                self.handle_action(input::InputAction::OpenLspStatus);
+            }
+            // --- Remote Control ---
+            "remote-control" => {
+                // Show active remote-control session status from persisted state.
+                let rc_path = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join("halcon")
+                    .join("active_rc_session");
+                match std::fs::read_to_string(&rc_path) {
+                    Ok(sid) if !sid.is_empty() => {
+                        self.activity_model.push_info(&format!(
+                            "[remote-control] Active session: {} — use /remote-control attach or `halcon remote-control status`",
+                            sid.trim()
+                        ));
+                    }
+                    _ => {
+                        self.activity_model.push_info(
+                            "[remote-control] No active session. Start one with `halcon remote-control start`",
+                        );
+                    }
+                }
+            }
+            "remote-control-attach" => {
+                let rc_path = dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join("halcon")
+                    .join("active_rc_session");
+                match std::fs::read_to_string(&rc_path) {
+                    Ok(sid) if !sid.is_empty() => {
+                        self.activity_model.push_info(&format!(
+                            "[remote-control] To attach, run in a terminal:\n  halcon remote-control attach -s {}",
+                            sid.trim()
+                        ));
+                    }
+                    _ => {
+                        self.activity_model.push_warning(
+                            "[remote-control] No active session to attach to",
+                            Some("Start one with `halcon remote-control start`"),
+                        );
+                    }
+                }
+            }
             other => {
                 self.activity_model.push_warning(
                     &format!("[cmd] Unknown command: /{other}"),

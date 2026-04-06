@@ -352,12 +352,16 @@ impl AgentBridgeImpl {
         };
 
         // Build AgentContext — BridgeSink satisfies RenderSink without ratatui.
+        // Phase 1: Bridge agent gets fresh permission pipeline
+        let mut bridge_pipeline =
+            crate::repl::security::permission_pipeline::PermissionPipeline::new();
         let ctx = crate::repl::agent::AgentContext {
             provider: &provider,
             session: &mut session,
             request: &request,
             tool_registry: &*self.tool_registry,
             permissions: &mut permissions,
+            permission_pipeline: &mut bridge_pipeline,
             working_dir: &context.working_directory,
             event_tx: &event_tx,
             limits: &limits,
@@ -392,6 +396,7 @@ impl AgentBridgeImpl {
             is_sub_agent: false,
             requested_provider: None,
             policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+            paloma_router: None,
         };
 
         let loop_result = crate::repl::agent::run_agent_loop(ctx)

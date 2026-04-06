@@ -135,13 +135,10 @@ mod local_adaptive {
     }
 }
 
-#[cfg(feature = "color-science")]
-use momoto_core::{Color, OKLCH};
-
 use super::intelligent_theme::{IntelligentPaletteBuilder, PaletteWithMetadata};
 use super::theme::{Palette, ThemeColor};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Types of palette modification operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -157,9 +157,13 @@ impl RoundScorer {
         }
         let stagnation_flag = self.consecutive_zero_progress >= STAGNATION_ROUNDS;
 
-        // Tool efficiency: success_count / total (0.0 when no tools ran).
+        // Tool efficiency: success_count / total.
+        // Synthesis/text-only rounds (tools_total=0) score 0.7 — they represent
+        // expected convergence behavior (model synthesizing results), not stagnation.
+        // Previous value of 0.5 penalized normal synthesis rounds, causing low
+        // combined scores (0.55-0.59) that triggered unnecessary extra rounds.
         let tool_efficiency = if tools_total == 0 {
-            0.5 // neutral when no tools — text-only round
+            0.7 // above-neutral: synthesis round is expected convergence
         } else {
             tools_succeeded as f32 / tools_total as f32
         };
@@ -169,7 +173,7 @@ impl RoundScorer {
         // answer is the right behavior for conversational tasks, not inefficiency
         // (Phase L fix C3: prevents "hola" from scoring 0.56 due to 179/4384=0.041).
         let token_efficiency = if input_tokens == 0 || tools_total == 0 {
-            0.5 // neutral: no tools ran this round, or no input
+            0.7 // above-neutral: synthesis rounds produce concise output by design
         } else {
             (output_tokens as f32 / input_tokens as f32).min(1.0)
         };
@@ -183,8 +187,15 @@ impl RoundScorer {
             intersection as f32 / self.goal_keywords.len() as f32
         };
 
-        // Anomaly penalty: each flag deducts 0.10 (capped so score stays ≥ 0).
-        let anomaly_penalty = (anomaly_flags.len() as f32 * ANOMALY_PENALTY_PER_FLAG).min(0.5);
+        // Anomaly penalty: only model-caused anomalies penalize the score.
+        // System errors (ForceNoTools from SSE stall, stream retries) are not
+        // model performance issues and should not reduce convergence scores.
+        // Xiyo alignment: quality is measured by model behavior, not infrastructure.
+        let model_anomalies = anomaly_flags
+            .iter()
+            .filter(|f| !matches!(f.as_str(), "ForceNoTools" | "StreamRetry" | "SystemError"))
+            .count();
+        let anomaly_penalty = (model_anomalies as f32 * ANOMALY_PENALTY_PER_FLAG).min(0.5);
 
         // Progress score: only positive deltas count.
         let progress_score = progress_delta.max(0.0);
@@ -332,7 +343,7 @@ mod tests {
     fn zero_tools_gives_neutral_efficiency() {
         let mut s = make_scorer();
         let eval = s.score_round(0, 0, 0, 100, 200, 0.0, vec![], "some output");
-        assert!((eval.tool_efficiency - 0.5).abs() < 0.01);
+        assert!((eval.tool_efficiency - 0.7).abs() < 0.01);
     }
 
     #[test]

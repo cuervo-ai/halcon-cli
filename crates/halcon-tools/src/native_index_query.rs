@@ -40,7 +40,7 @@ impl Tool for NativeIndexQueryTool {
         false
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let query_type = input.arguments["type"].as_str().unwrap_or("stats");
 
         // Check if engine is initialized

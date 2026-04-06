@@ -57,6 +57,23 @@ pub use registry::ProviderRegistry;
 pub use replay::ReplayProvider;
 pub use router::{IntelligentRouter, IntentClassifier, RoutingDecision, TaskIntent};
 
+#[cfg(feature = "paloma")]
+pub use router::paloma_adapter::PalomaRouter;
+
+/// Re-export Paloma types needed for router initialization.
+#[cfg(feature = "paloma")]
+pub mod paloma_reexports {
+    pub use paloma_budget::BudgetStore;
+    pub use paloma_health::HealthTracker;
+    pub use paloma_registry::RegistrySnapshot;
+    pub use paloma_types::candidate::{
+        CandidateId, ModelEntry, ModelId, ModelLifecycleState, ModelVersion, Pricing, ProviderId,
+        Target,
+    };
+    pub use paloma_types::cost::Cost;
+    pub use paloma_types::request::{Capability, Modality, TenantId};
+}
+
 #[cfg(feature = "bedrock")]
 pub use bedrock::BedrockProvider;
 #[cfg(feature = "vertex")]

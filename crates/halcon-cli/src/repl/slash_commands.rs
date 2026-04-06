@@ -12,7 +12,7 @@ use super::{commands, console, orchestrator, planner, replay_runner, Repl};
 
 impl Repl {
     pub(crate) fn list_sessions(&self) {
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             println!("(No database configured)");
             return;
         };
@@ -97,7 +97,7 @@ impl Repl {
                 println!("Model:    {}", self.model);
                 println!(
                     "Database: {}",
-                    if self.db.is_some() {
+                    if self.infra.db.is_some() {
                         "connected"
                     } else {
                         "not configured"
@@ -107,11 +107,11 @@ impl Repl {
                 println!("Messages: {}", self.session.messages.len());
 
                 // Check registered providers.
-                let providers = self.registry.list();
+                let providers = self.infra.registry.list();
                 println!("Registered providers: {}", providers.join(", "));
 
                 // Check if current provider is available.
-                match self.registry.get(&self.provider) {
+                match self.infra.registry.get(&self.provider) {
                     Some(p) => {
                         let available = p.is_available().await;
                         println!(
@@ -132,11 +132,11 @@ impl Repl {
             }
             TestKind::Provider(name) => {
                 print!("Testing provider '{name}'... ");
-                match self.registry.get(name) {
+                match self.infra.registry.get(name) {
                     None => {
                         println!("NOT FOUND");
                         println!("  Provider '{name}' is not registered.");
-                        let available = self.registry.list();
+                        let available = self.infra.registry.list();
                         println!("  Available: {}", available.join(", "));
                     }
                     Some(p) => {
@@ -213,7 +213,7 @@ impl Repl {
     }
 
     pub(crate) async fn run_orchestrate(&mut self, instruction: &str) {
-        if !self.config.orchestrator.enabled {
+        if !self.infra.config.orchestrator.enabled {
             crate::render::feedback::user_error(
                 "orchestrator is disabled",
                 Some("Set [orchestrator] enabled = true in config.toml"),
@@ -221,7 +221,7 @@ impl Repl {
             return;
         }
 
-        let provider = match self.registry.get(&self.provider).cloned() {
+        let provider = match self.infra.registry.get(&self.provider).cloned() {
             Some(p) => p,
             None => {
                 crate::render::feedback::user_error(
@@ -256,6 +256,7 @@ impl Repl {
 
         let orchestrator_id = uuid::Uuid::new_v4();
         let working_dir = self
+            .infra
             .config
             .general
             .working_directory
@@ -269,25 +270,29 @@ impl Repl {
             });
 
         let fallback_providers: Vec<(String, Arc<dyn halcon_core::traits::ModelProvider>)> = self
+            .infra
             .config
             .agent
             .routing
             .fallback_models
             .iter()
-            .filter_map(|name| self.registry.get(name).cloned().map(|p| (name.clone(), p)))
+            .filter_map(|name| {
+                self.infra
+                    .registry
+                    .get(name)
+                    .cloned()
+                    .map(|p| (name.clone(), p))
+            })
             .collect();
 
-        let guardrails: &[Box<dyn halcon_security::Guardrail>] = if self
-            .config
-            .security
-            .guardrails
-            .enabled
-            && self.config.security.guardrails.builtins
-        {
-            halcon_security::builtin_guardrails()
-        } else {
-            &[]
-        };
+        let guardrails: &[Box<dyn halcon_security::Guardrail>] =
+            if self.infra.config.security.guardrails.enabled
+                && self.infra.config.security.guardrails.builtins
+            {
+                halcon_security::builtin_guardrails()
+            } else {
+                &[]
+            };
 
         eprintln!("Orchestrating: {}", instruction);
         let start = std::time::Instant::now();
@@ -296,23 +301,23 @@ impl Repl {
             orchestrator_id,
             tasks,
             &provider,
-            &self.tool_registry,
-            &self.event_tx,
-            &self.config.agent.limits,
-            &self.config.orchestrator,
-            &self.config.agent.routing,
-            self.async_db.as_ref(),
-            self.response_cache.as_ref(),
+            &self.infra.tool_registry,
+            &self.infra.event_tx,
+            &self.infra.config.agent.limits,
+            &self.infra.config.orchestrator,
+            &self.infra.config.agent.routing,
+            self.infra.async_db.as_ref(),
+            self.ctx.response_cache.as_ref(),
             &fallback_providers,
             &self.model,
             &working_dir,
             None,
             guardrails,
-            self.config.tools.confirm_destructive,
-            self.config.security.tbac_enabled,
+            self.infra.config.tools.confirm_destructive,
+            self.infra.config.security.tbac_enabled,
             None, // perm_awaiter: slash commands run outside TUI
-            std::sync::Arc::new(self.config.policy.clone()),
-            Some(&self.registry), // provider registry for per-task provider override
+            std::sync::Arc::new(self.infra.config.policy.clone()),
+            Some(&self.infra.registry), // provider registry for per-task provider override
         )
         .await
         {
@@ -357,6 +362,7 @@ impl Repl {
             + self.session.total_usage.output_tokens as u64;
 
         let diagnostics: Vec<(String, String, usize)> = self
+            .security
             .resilience
             .diagnostics()
             .iter()
@@ -366,7 +372,13 @@ impl Repl {
             })
             .collect();
 
-        let models: Vec<String> = self.registry.list().iter().map(|s| s.to_string()).collect();
+        let models: Vec<String> = self
+            .infra
+            .registry
+            .list()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let mut out = std::io::stderr().lock();
         let info = console::StatusInfo {
@@ -385,7 +397,7 @@ impl Repl {
     pub(crate) async fn handle_metrics(&self) {
         let mut out = std::io::stderr().lock();
 
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -400,7 +412,7 @@ impl Repl {
 
         let cache = db.cache_stats().ok();
         let memory = db.memory_stats().ok();
-        let speculation = Some(self.speculator.metrics());
+        let speculation = Some(self.runtime.speculator.metrics());
 
         console::render_metrics(
             &sys,
@@ -414,7 +426,7 @@ impl Repl {
     pub(crate) async fn handle_logs(&self, filter: Option<&str>) {
         let mut out = std::io::stderr().lock();
 
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -438,7 +450,7 @@ impl Repl {
                 console::inspect_runtime(&mut out);
             }
             commands::InspectTarget::Memory => {
-                let (stats, episodes) = if let Some(db) = &self.db {
+                let (stats, episodes) = if let Some(db) = &self.infra.db {
                     let ms = db.memory_stats().ok();
                     let ep = db.count_episodes().unwrap_or(0);
                     (ms, ep)
@@ -448,7 +460,7 @@ impl Repl {
                 console::inspect_memory(stats.as_ref(), episodes, &mut out);
             }
             commands::InspectTarget::Db => {
-                let info = self.db.as_ref().and_then(|db| {
+                let info = self.infra.db.as_ref().and_then(|db| {
                     let conn = db.conn().ok()?;
                     let mut pairs = Vec::new();
                     for pragma in &["page_count", "page_size", "journal_mode"] {
@@ -467,7 +479,7 @@ impl Repl {
                 console::inspect_db(info.as_deref(), &mut out);
             }
             commands::InspectTarget::Traces => {
-                let traces = if let Some(db) = &self.db {
+                let traces = if let Some(db) = &self.infra.db {
                     let sessions = db.list_sessions(10).unwrap_or_default();
                     sessions
                         .iter()
@@ -488,14 +500,14 @@ impl Repl {
                 let _ = writeln!(
                     out,
                     "Dynamic tool selection: {}",
-                    self.config.context.dynamic_tool_selection
+                    self.infra.config.context.dynamic_tool_selection
                 );
                 let _ = writeln!(
                     out,
                     "Max context tokens:    {}",
-                    self.config.general.max_tokens
+                    self.infra.config.general.max_tokens
                 );
-                if let Some(ref cm) = self.context_manager {
+                if let Some(ref cm) = self.ctx.manager {
                     let _ = writeln!(out, "Context sources:       {}", cm.source_count());
                     for (name, priority) in cm.sources() {
                         let _ = writeln!(out, "  - {} (priority: {})", name, priority);
@@ -507,14 +519,18 @@ impl Repl {
                 let _ = writeln!(
                     out,
                     "  Max tokens/source: {}",
-                    self.config.context.governance.default_max_tokens_per_source
+                    self.infra
+                        .config
+                        .context
+                        .governance
+                        .default_max_tokens_per_source
                 );
                 let _ = writeln!(
                     out,
                     "  TTL (secs):        {}",
-                    self.config.context.governance.default_ttl_secs
+                    self.infra.config.context.governance.default_ttl_secs
                 );
-                let snap = self.context_metrics.snapshot();
+                let snap = self.ctx.metrics.snapshot();
                 let _ = writeln!(out, "Context Metrics:");
                 let _ = writeln!(
                     out,
@@ -530,19 +546,19 @@ impl Repl {
             }
             commands::InspectTarget::Tasks => {
                 let _ = writeln!(out, "--- Task Framework ---");
-                if self.config.task_framework.enabled {
+                if self.infra.config.task_framework.enabled {
                     let _ = writeln!(out, "Status:      enabled");
                     let _ = writeln!(
                         out,
                         "Persist:     {}",
-                        self.config.task_framework.persist_tasks
+                        self.infra.config.task_framework.persist_tasks
                     );
                     let _ = writeln!(
                         out,
                         "Max retries: {}",
-                        self.config.task_framework.default_max_retries
+                        self.infra.config.task_framework.default_max_retries
                     );
-                    if let Some(ref timeline) = self.last_timeline {
+                    if let Some(ref timeline) = self.cache.last_timeline {
                         let _ = writeln!(out, "Last timeline: {} bytes", timeline.len());
                     } else {
                         let _ = writeln!(out, "Last timeline: (none)");
@@ -554,25 +570,29 @@ impl Repl {
             }
             commands::InspectTarget::Mcp => {
                 let _ = writeln!(out, "--- MCP Servers ---");
-                if self.config.mcp.servers.is_empty() {
+                if self.infra.config.mcp.servers.is_empty() {
                     let _ = writeln!(out, "No MCP servers configured.");
                     let _ = writeln!(out, "  Add servers in [mcp.servers] section of config.toml");
                 } else {
-                    let _ = writeln!(out, "Configured servers: {}", self.config.mcp.servers.len());
-                    for (name, server) in &self.config.mcp.servers {
+                    let _ = writeln!(
+                        out,
+                        "Configured servers: {}",
+                        self.infra.config.mcp.servers.len()
+                    );
+                    for (name, server) in &self.infra.config.mcp.servers {
                         let _ = writeln!(out, "  - {name}: {}", server.command);
                     }
                 }
-                let tool_count = self.tool_registry.tool_definitions().len();
+                let tool_count = self.infra.tool_registry.tool_definitions().len();
                 let _ = writeln!(out, "Total registered tools: {tool_count}");
             }
             commands::InspectTarget::Reasoning => {
                 let _ = writeln!(out, "--- Reasoning Engine ---");
-                if let Some(ref engine) = self.reasoning_engine {
+                if let Some(ref engine) = self.features.reasoning_engine {
                     let summary = engine.inspect_summary();
                     let _ = write!(out, "{summary}");
                     // Model quality cache from Phase 3 (session-level tracker).
-                    let cache_size = self.model_quality_cache.len();
+                    let cache_size = self.cache.model_quality.len();
                     if cache_size > 0 {
                         let _ = writeln!(
                             out,
@@ -594,7 +614,7 @@ impl Repl {
                     let _ = writeln!(
                         out,
                         "Quality cache:        {} model(s) tracked this session",
-                        self.model_quality_cache.len()
+                        self.cache.model_quality.len()
                     );
                 }
             }
@@ -603,41 +623,41 @@ impl Repl {
                 let _ = writeln!(
                     out,
                     "Enabled:          {}",
-                    self.config.orchestrator.enabled
+                    self.infra.config.orchestrator.enabled
                 );
-                if self.config.orchestrator.enabled {
+                if self.infra.config.orchestrator.enabled {
                     let _ = writeln!(
                         out,
                         "Max concurrent:   {}",
-                        self.config.orchestrator.max_concurrent_agents
+                        self.infra.config.orchestrator.max_concurrent_agents
                     );
                     let _ = writeln!(
                         out,
                         "Sub-agent timeout: {}s",
-                        self.config.orchestrator.sub_agent_timeout_secs
+                        self.infra.config.orchestrator.sub_agent_timeout_secs
                     );
                     let _ = writeln!(
                         out,
                         "Shared budget:    {}",
-                        self.config.orchestrator.shared_budget
+                        self.infra.config.orchestrator.shared_budget
                     );
                     let _ = writeln!(
                         out,
                         "Communication:    {}",
-                        self.config.orchestrator.enable_communication
+                        self.infra.config.orchestrator.enable_communication
                     );
                     let _ = writeln!(
                         out,
                         "Min delegation confidence: {:.2}",
-                        self.config.orchestrator.min_delegation_confidence
+                        self.infra.config.orchestrator.min_delegation_confidence
                     );
                 }
             }
             commands::InspectTarget::Resilience => {
                 let _ = writeln!(out, "--- Resilience ---");
-                let _ = writeln!(out, "Enabled: {}", self.config.resilience.enabled);
-                if self.config.resilience.enabled {
-                    let diag = self.resilience.diagnostics();
+                let _ = writeln!(out, "Enabled: {}", self.infra.config.resilience.enabled);
+                if self.infra.config.resilience.enabled {
+                    let diag = self.security.resilience.diagnostics();
                     let _ = writeln!(out, "Registered providers: {}", diag.len());
                     for d in &diag {
                         let _ = writeln!(
@@ -650,39 +670,48 @@ impl Repl {
                     let _ = writeln!(
                         out,
                         "  Failure threshold: {}",
-                        self.config.resilience.circuit_breaker.failure_threshold
+                        self.infra
+                            .config
+                            .resilience
+                            .circuit_breaker
+                            .failure_threshold
                     );
                     let _ = writeln!(
                         out,
                         "  Window:            {}s",
-                        self.config.resilience.circuit_breaker.window_secs
+                        self.infra.config.resilience.circuit_breaker.window_secs
                     );
                     let _ = writeln!(
                         out,
                         "  Open duration:     {}s",
-                        self.config.resilience.circuit_breaker.open_duration_secs
+                        self.infra
+                            .config
+                            .resilience
+                            .circuit_breaker
+                            .open_duration_secs
                     );
                     let _ = writeln!(out, "Health scoring:");
                     let _ = writeln!(
                         out,
                         "  Window:    {} min",
-                        self.config.resilience.health.window_minutes
+                        self.infra.config.resilience.health.window_minutes
                     );
                     let _ = writeln!(
                         out,
                         "  Degraded:  <= {}",
-                        self.config.resilience.health.degraded_threshold
+                        self.infra.config.resilience.health.degraded_threshold
                     );
                     let _ = writeln!(
                         out,
                         "  Unhealthy: <= {}",
-                        self.config.resilience.health.unhealthy_threshold
+                        self.infra.config.resilience.health.unhealthy_threshold
                     );
                     let _ = writeln!(out, "Backpressure:");
                     let _ = writeln!(
                         out,
                         "  Max concurrent/provider: {}",
-                        self.config
+                        self.infra
+                            .config
                             .resilience
                             .backpressure
                             .max_concurrent_per_provider
@@ -690,7 +719,7 @@ impl Repl {
                     let _ = writeln!(
                         out,
                         "  Queue timeout:           {}s",
-                        self.config.resilience.backpressure.queue_timeout_secs
+                        self.infra.config.resilience.backpressure.queue_timeout_secs
                     );
                 }
             }
@@ -703,17 +732,17 @@ impl Repl {
                 let _ = writeln!(
                     out,
                     "  Max rounds:      {}",
-                    self.config.agent.limits.max_rounds
+                    self.infra.config.agent.limits.max_rounds
                 );
                 let _ = writeln!(
                     out,
                     "  Max tool output: {} chars",
-                    self.config.agent.limits.max_tool_output_chars
+                    self.infra.config.agent.limits.max_tool_output_chars
                 );
             }
             commands::InspectTarget::SdlcServers => {
                 let _ = writeln!(out, "--- SDLC Context Servers ---");
-                if let Some(ref cm) = self.context_manager {
+                if let Some(ref cm) = self.ctx.manager {
                     let sdlc_servers: Vec<_> = cm
                         .sources()
                         .filter(|(name, _)| name.ends_with("Server"))
@@ -777,7 +806,7 @@ impl Repl {
     pub(crate) async fn handle_trace_browse(&self, session_id_str: Option<&str>) {
         let mut out = std::io::stderr().lock();
 
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -819,7 +848,7 @@ impl Repl {
     }
 
     pub(crate) async fn handle_plan(&mut self, goal: &str) {
-        let provider = match self.registry.get(&self.provider).cloned() {
+        let provider = match self.infra.registry.get(&self.provider).cloned() {
             Some(p) => p,
             None => {
                 crate::render::feedback::user_error(
@@ -831,9 +860,9 @@ impl Repl {
         };
 
         let planner = planner::LlmPlanner::new(provider, self.model.clone())
-            .with_max_replans(self.config.planning.max_replans);
+            .with_max_replans(self.infra.config.planning.max_replans);
 
-        let tool_defs = self.tool_registry.tool_definitions();
+        let tool_defs = self.infra.tool_registry.tool_definitions();
         eprintln!("Planning: {goal}");
 
         match planner.plan(goal, &tool_defs).await {
@@ -849,7 +878,7 @@ impl Repl {
                 console::render_plan(&plan_id_str, &plan.goal, &steps, &mut out);
 
                 // Save plan to DB.
-                if let Some(ref adb) = self.async_db {
+                if let Some(ref adb) = self.infra.async_db {
                     if let Err(e) = adb.save_plan_steps(&self.session.id, &plan).await {
                         crate::render::feedback::user_warning(
                             &format!("failed to save plan: {e}"),
@@ -870,7 +899,7 @@ impl Repl {
     }
 
     pub(crate) async fn handle_run_plan(&mut self, plan_id_str: &str) {
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -935,7 +964,7 @@ impl Repl {
             Ok(id) => id,
             Err(_) => {
                 // Try prefix match.
-                if let Some(db) = &self.db {
+                if let Some(db) = &self.infra.db {
                     let sessions = db.list_sessions(50).unwrap_or_default();
                     match sessions
                         .iter()
@@ -957,7 +986,7 @@ impl Repl {
             }
         };
 
-        let Some(ref adb) = self.async_db else {
+        let Some(ref adb) = self.infra.async_db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -1020,7 +1049,7 @@ impl Repl {
     }
 
     pub(crate) async fn handle_cancel(&self, task_id_str: &str) {
-        let Some(ref adb) = self.async_db else {
+        let Some(ref adb) = self.infra.async_db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -1053,7 +1082,7 @@ impl Repl {
             Ok(id) => id,
             Err(_) => {
                 // Try prefix match.
-                if let Some(db) = &self.db {
+                if let Some(db) = &self.infra.db {
                     let sessions = db.list_sessions(50).unwrap_or_default();
                     match sessions
                         .iter()
@@ -1075,15 +1104,21 @@ impl Repl {
             }
         };
 
-        let Some(ref adb) = self.async_db else {
+        let Some(ref adb) = self.infra.async_db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
 
         eprintln!("Replaying session {}...", &session_id.to_string()[..8]);
 
-        match replay_runner::run_replay(session_id, adb, &self.tool_registry, &self.event_tx, true)
-            .await
+        match replay_runner::run_replay(
+            session_id,
+            adb,
+            &self.infra.tool_registry,
+            &self.infra.event_tx,
+            true,
+        )
+        .await
         {
             Ok(result) => {
                 let mut out = std::io::stderr().lock();
@@ -1105,13 +1140,13 @@ impl Repl {
     }
 
     pub(crate) async fn handle_step(&mut self, direction: &commands::StepDirection) {
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
 
         // Load trace if no cursor exists.
-        if self.trace_cursor.is_none() {
+        if self.cache.trace_cursor.is_none() {
             let steps = match db.load_trace_steps(self.session.id) {
                 Ok(s) if s.is_empty() => {
                     crate::render::feedback::user_warning(
@@ -1129,10 +1164,10 @@ impl Repl {
                     return;
                 }
             };
-            self.trace_cursor = Some((self.session.id, steps, 0));
+            self.cache.trace_cursor = Some((self.session.id, steps, 0));
         }
 
-        let (_, ref steps, ref mut index) = self.trace_cursor.as_mut().unwrap();
+        let (_, ref steps, ref mut index) = self.cache.trace_cursor.as_mut().unwrap();
 
         match direction {
             commands::StepDirection::Forward => {
@@ -1154,7 +1189,7 @@ impl Repl {
     }
 
     pub(crate) async fn handle_snapshot(&self) {
-        let Some(ref adb) = self.async_db else {
+        let Some(ref adb) = self.infra.async_db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -1203,7 +1238,7 @@ impl Repl {
     }
 
     pub(crate) async fn handle_diff(&self, id_a: &str, id_b: &str) {
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -1260,7 +1295,7 @@ impl Repl {
     }
 
     pub(crate) async fn handle_research(&mut self, query: &str) {
-        if !self.config.orchestrator.enabled {
+        if !self.infra.config.orchestrator.enabled {
             crate::render::feedback::user_error(
                 "orchestrator is disabled (required for /research)",
                 Some("Set [orchestrator] enabled = true in config.toml"),
@@ -1268,7 +1303,7 @@ impl Repl {
             return;
         }
 
-        let provider = match self.registry.get(&self.provider).cloned() {
+        let provider = match self.infra.registry.get(&self.provider).cloned() {
             Some(p) => p,
             None => {
                 crate::render::feedback::user_error(
@@ -1306,6 +1341,7 @@ impl Repl {
 
         let orchestrator_id = uuid::Uuid::new_v4();
         let working_dir = self
+            .infra
             .config
             .general
             .working_directory
@@ -1319,25 +1355,29 @@ impl Repl {
             });
 
         let fallback_providers: Vec<(String, Arc<dyn halcon_core::traits::ModelProvider>)> = self
+            .infra
             .config
             .agent
             .routing
             .fallback_models
             .iter()
-            .filter_map(|name| self.registry.get(name).cloned().map(|p| (name.clone(), p)))
+            .filter_map(|name| {
+                self.infra
+                    .registry
+                    .get(name)
+                    .cloned()
+                    .map(|p| (name.clone(), p))
+            })
             .collect();
 
-        let guardrails: &[Box<dyn halcon_security::Guardrail>] = if self
-            .config
-            .security
-            .guardrails
-            .enabled
-            && self.config.security.guardrails.builtins
-        {
-            halcon_security::builtin_guardrails()
-        } else {
-            &[]
-        };
+        let guardrails: &[Box<dyn halcon_security::Guardrail>] =
+            if self.infra.config.security.guardrails.enabled
+                && self.infra.config.security.guardrails.builtins
+            {
+                halcon_security::builtin_guardrails()
+            } else {
+                &[]
+            };
 
         eprintln!("Researching: {query}");
 
@@ -1345,23 +1385,23 @@ impl Repl {
             orchestrator_id,
             tasks,
             &provider,
-            &self.tool_registry,
-            &self.event_tx,
-            &self.config.agent.limits,
-            &self.config.orchestrator,
-            &self.config.agent.routing,
-            self.async_db.as_ref(),
-            self.response_cache.as_ref(),
+            &self.infra.tool_registry,
+            &self.infra.event_tx,
+            &self.infra.config.agent.limits,
+            &self.infra.config.orchestrator,
+            &self.infra.config.agent.routing,
+            self.infra.async_db.as_ref(),
+            self.ctx.response_cache.as_ref(),
             &fallback_providers,
             &self.model,
             &working_dir,
             None,
             guardrails,
-            self.config.tools.confirm_destructive,
-            self.config.security.tbac_enabled,
+            self.infra.config.tools.confirm_destructive,
+            self.infra.config.security.tbac_enabled,
             None, // perm_awaiter: slash commands run outside TUI
-            std::sync::Arc::new(self.config.policy.clone()),
-            Some(&self.registry), // provider registry for per-task provider override
+            std::sync::Arc::new(self.infra.config.policy.clone()),
+            Some(&self.infra.registry), // provider registry for per-task provider override
         )
         .await
         {
@@ -1394,7 +1434,7 @@ impl Repl {
         match workload {
             "inference" => {
                 // Run 3 probe invocations and measure latency.
-                let provider = match self.registry.get(&self.provider).cloned() {
+                let provider = match self.infra.registry.get(&self.provider).cloned() {
                     Some(p) => p,
                     None => {
                         crate::render::feedback::user_error("no provider available", None);
@@ -1450,7 +1490,7 @@ impl Repl {
                 console::render_benchmark("inference", &results, &mut out);
             }
             "cache" => {
-                let Some(db) = &self.db else {
+                let Some(db) = &self.infra.db else {
                     crate::render::feedback::user_warning("no database configured", None);
                     return;
                 };
@@ -1476,7 +1516,7 @@ impl Repl {
                 console::render_benchmark("cache", &results, &mut out);
             }
             "tools" | "full" => {
-                let Some(db) = &self.db else {
+                let Some(db) = &self.infra.db else {
                     crate::render::feedback::user_warning("no database configured", None);
                     return;
                 };
@@ -1509,7 +1549,7 @@ impl Repl {
     pub(crate) async fn handle_optimize(&self) {
         let mut out = std::io::stderr().lock();
 
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };
@@ -1563,7 +1603,7 @@ impl Repl {
     pub(crate) async fn handle_analyze(&self) {
         let mut out = std::io::stderr().lock();
 
-        let Some(db) = &self.db else {
+        let Some(db) = &self.infra.db else {
             crate::render::feedback::user_warning("no database configured", None);
             return;
         };

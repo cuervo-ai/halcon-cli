@@ -10,6 +10,18 @@ license.workspace = true
 halcon-core = { workspace = true }
 halcon-storage = { workspace = true }
 
+# Paloma routing engine (formally verified, feature-gated)
+paloma-types = { workspace = true, optional = true }
+paloma-pipeline = { workspace = true, optional = true }
+paloma-health = { workspace = true, optional = true }
+paloma-budget = { workspace = true, optional = true }
+paloma-registry = { workspace = true, optional = true }
+paloma-policy = { workspace = true, optional = true }
+paloma-scoring = { workspace = true, optional = true }
+paloma-planner = { workspace = true, optional = true }
+paloma-trace = { workspace = true, optional = true }
+paloma-ledger = { workspace = true, optional = true }
+
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -38,6 +50,12 @@ bedrock = ["aws-sigv4"]
 vertex = ["gcp_auth"]
 # Enable Cenzontle agent orchestration, MCP bridge, and RAG client
 cenzontle-agents = []
+# Enable Paloma Frontier Fabric Router (formally verified routing)
+paloma = [
+    "paloma-types", "paloma-pipeline", "paloma-health", "paloma-budget",
+    "paloma-registry", "paloma-policy", "paloma-scoring", "paloma-planner",
+    "paloma-trace", "paloma-ledger",
+]
 
 [[bin]]
 name = "mock-claude"

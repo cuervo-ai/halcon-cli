@@ -100,7 +100,7 @@ impl PermissionValidator {
     /// 3. Compatible with tool schema (if registry available)
     fn validate_modification(
         &self,
-        tool: &str,
+        _tool: &str,
         _original_args: &Value,
         clarification: &str,
     ) -> ValidationResult<()> {

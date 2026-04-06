@@ -22,7 +22,6 @@
 //!       → Gate 4: Tool Permissions (per-execution)
 //! ```
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

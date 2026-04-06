@@ -131,7 +131,7 @@ impl Tool for TaskTrackTool {
         false
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let action = input.arguments["action"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("task_track requires 'action' string".into())
         })?;

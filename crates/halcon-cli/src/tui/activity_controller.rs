@@ -5,7 +5,9 @@
 //! Handles user interactions and translates them into navigation actions.
 //! Pure logic layer — no state mutation, returns ControlAction enum.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+#[cfg(test)]
+use crossterm::event::KeyModifiers;
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use super::activity_model::ActivityModel;
@@ -285,7 +287,7 @@ impl ActivityController {
         area: Rect,
         nav: &mut ActivityNavigator,
         model: &ActivityModel,
-        viewport_height: usize,
+        _viewport_height: usize,
     ) -> ControlAction {
         // Check if mouse is within activity area
         if mouse.column < area.x

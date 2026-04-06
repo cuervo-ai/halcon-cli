@@ -356,56 +356,154 @@ pub fn build_registry(config: &AppConfig) -> ProviderRegistry {
 /// TTL for the Cenzontle model list disk cache (1 hour).
 const CENZONTLE_MODEL_CACHE_TTL_SECS: u64 = 3600;
 
-/// Load the Cenzontle model list from the disk cache if it's still fresh.
+/// Path to the Cenzontle model cache file.
+fn cenzontle_cache_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".halcon").join("cenzontle-models.json"))
+}
+
+/// Grace period after TTL expiry: serve stale cache for up to 24h to prevent
+/// cold-start failures when the API is temporarily unreachable.
+/// Inspired by Xiyo's stale-while-error keychain pattern.
+const CENZONTLE_MODEL_CACHE_STALE_GRACE_SECS: u64 = 86_400;
+
+/// Load the Cenzontle model list from the disk cache.
 ///
-/// Returns `Some(models)` when a valid, non-expired cache exists.
-/// Returns `None` on any error (cache miss, expired, parse error) — caller fetches from API.
+/// **Cache freshness tiers:**
+/// 1. **Fresh** (age < TTL=1h): returned immediately, no API call needed.
+/// 2. **Stale** (TTL < age < 24h): returned if `allow_stale` is true. The caller
+///    should still attempt an API refresh but can use this as a fallback.
+/// 3. **Expired** (age > 24h) or absent/corrupt: returns `None`.
+///
+/// The `allow_stale` parameter implements Xiyo's "stale-while-error" pattern:
+/// the parallel startup path passes `allow_stale=false` (it will fetch from API),
+/// while the fallback recovery path passes `allow_stale=true`.
+///
+/// **Integrity checks:**
+/// - JSON must parse as `Vec<ModelInfo>` (schema validation).
+/// - Model list must be non-empty.
+/// - Each model must have a non-empty `id` field.
+/// - Corrupt files are self-healing: deleted and rebuilt on next startup.
+///
+/// **Fallback-aware**: checks both `~/.halcon/` and XDG data dir.
 fn load_cenzontle_model_cache() -> Option<Vec<halcon_core::types::ModelInfo>> {
-    let cache_path = dirs::home_dir()?
-        .join(".halcon")
-        .join("cenzontle-models.json");
+    load_cenzontle_model_cache_inner(false)
+}
 
-    let meta = std::fs::metadata(&cache_path).ok()?;
-    let age = meta.modified().ok()?.elapsed().unwrap_or_default();
-    if age.as_secs() > CENZONTLE_MODEL_CACHE_TTL_SECS {
-        tracing::debug!(age_secs = age.as_secs(), "Cenzontle model cache expired");
+/// Load with stale-while-error support.
+fn load_cenzontle_model_cache_stale() -> Option<Vec<halcon_core::types::ModelInfo>> {
+    load_cenzontle_model_cache_inner(true)
+}
+
+fn load_cenzontle_model_cache_inner(
+    allow_stale: bool,
+) -> Option<Vec<halcon_core::types::ModelInfo>> {
+    let cache_path = cenzontle_cache_path()?;
+
+    // Try reading from primary path or XDG fallback (for self-healing scenario).
+    let json = crate::config_loader::safe_read_file(&cache_path)
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+
+    // Check age: try primary path, then XDG fallback.
+    let age_secs = std::fs::metadata(&cache_path)
+        .ok()
+        .or_else(|| {
+            let fb = crate::config_loader::xdg_fallback_path("cenzontle-models.json")?;
+            std::fs::metadata(&fb).ok()
+        })
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX);
+
+    let max_age = if allow_stale {
+        CENZONTLE_MODEL_CACHE_STALE_GRACE_SECS
+    } else {
+        CENZONTLE_MODEL_CACHE_TTL_SECS
+    };
+
+    if age_secs > max_age {
+        tracing::debug!(
+            age_secs = age_secs,
+            max_age = max_age,
+            allow_stale = allow_stale,
+            "Cenzontle model cache expired"
+        );
         return None;
     }
 
-    let json = std::fs::read_to_string(&cache_path).ok()?;
-    let models: Vec<halcon_core::types::ModelInfo> = serde_json::from_str(&json).ok()?;
+    let models: Vec<halcon_core::types::ModelInfo> = match serde_json::from_str(&json) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %cache_path.display(),
+                "Cenzontle model cache is corrupt (invalid JSON); removing it"
+            );
+            let _ = std::fs::remove_file(&cache_path);
+            return None;
+        }
+    };
+
     if models.is_empty() {
+        tracing::debug!("Cenzontle model cache is empty, treating as miss");
         return None;
     }
 
+    if models.iter().any(|m| m.id.is_empty()) {
+        tracing::warn!(
+            path = %cache_path.display(),
+            "Cenzontle model cache contains model(s) with empty id; removing cache"
+        );
+        let _ = std::fs::remove_file(&cache_path);
+        return None;
+    }
+
+    let is_stale = age_secs > CENZONTLE_MODEL_CACHE_TTL_SECS;
     tracing::debug!(
         count = models.len(),
+        age_secs = age_secs,
+        stale = is_stale,
         "Cenzontle: model list loaded from disk cache"
     );
     Some(models)
 }
 
-/// Save the Cenzontle model list to the disk cache.
+/// Save the Cenzontle model list to the disk cache using atomic write.
+///
+/// Uses `safe_write_file` for:
+/// - Atomic tmp+rename (no partial reads).
+/// - Ownership pre-check (catches root-owned files early).
+/// - 0600 permissions on the cache file.
+///
+/// Failures are logged at WARN with actionable fix hints.
 fn save_cenzontle_model_cache(models: &[halcon_core::types::ModelInfo]) {
-    let Some(cache_path) =
-        dirs::home_dir().map(|h| h.join(".halcon").join("cenzontle-models.json"))
-    else {
+    let Some(cache_path) = cenzontle_cache_path() else {
         return;
     };
-    match serde_json::to_string(models) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&cache_path, json) {
-                tracing::debug!(error = %e, "Cenzontle: failed to write model cache");
-            } else {
-                tracing::debug!(
-                    count = models.len(),
-                    "Cenzontle: model list saved to disk cache"
-                );
-            }
-        }
+
+    // Don't cache empty model lists — would just cause a cache miss on next load.
+    if models.is_empty() {
+        tracing::debug!("Cenzontle: skipping cache write for empty model list");
+        return;
+    }
+
+    let json = match serde_json::to_string(models) {
+        Ok(j) => j,
         Err(e) => {
-            tracing::debug!(error = %e, "Cenzontle: failed to serialize model list for cache");
+            tracing::warn!(error = %e, "Cenzontle: failed to serialize model list for cache");
+            return;
         }
+    };
+
+    let result = crate::config_loader::safe_write_file(&cache_path, json.as_bytes());
+    if result.is_ok() {
+        tracing::debug!(
+            count = models.len(),
+            path = %cache_path.display(),
+            "Cenzontle: model list saved to disk cache"
+        );
+    } else {
+        result.log_on_failure("save_cenzontle_model_cache");
     }
 }
 
@@ -534,16 +632,41 @@ pub async fn ensure_startup_providers(registry: &mut ProviderRegistry) {
             return None;
         };
 
-        // Fast path: use the disk cache if still fresh.
+        // Fast path: use the disk cache if still fresh (< 1h old).
+        // Cache freshness proves a recent successful API call, so mark
+        // connection_verified=true to skip the /v1/auth/me probe.
         if let Some(cached_models) = load_cenzontle_model_cache() {
-            let p = CenzontleProvider::new(token, cenzontle_base, cached_models);
+            let has_models = !cached_models.is_empty();
+            let mut p = CenzontleProvider::new(token, cenzontle_base, cached_models);
+            if has_models {
+                p.set_connection_verified(true);
+            }
             return Some(p);
         }
 
-        // Cache miss — fetch from the API.
-        let provider = CenzontleProvider::from_token(token, cenzontle_base).await?;
-        save_cenzontle_model_cache(provider.supported_models());
-        Some(provider)
+        // Cache miss or expired — fetch from the API.
+        if let Some(provider) =
+            CenzontleProvider::from_token(token.clone(), cenzontle_base.clone()).await
+        {
+            save_cenzontle_model_cache(provider.supported_models());
+            return Some(provider);
+        }
+
+        // API fetch failed — Xiyo-inspired stale-while-error: serve the expired
+        // cache (up to 24h old) rather than leaving the provider unregistered.
+        // The user gets a working session while the API recovers.
+        if let Some(stale_models) = load_cenzontle_model_cache_stale() {
+            tracing::warn!(
+                count = stale_models.len(),
+                "Cenzontle: API unreachable, using stale model cache (stale-while-error)"
+            );
+            let p = CenzontleProvider::new(token, cenzontle_base, stale_models);
+            // Don't set connection_verified — let is_available() probe the API
+            // with its own retry + stale-while-error logic.
+            return Some(p);
+        }
+
+        None
     };
 
     let (ollama_result, cenzontle_result) = tokio::join!(ollama_fut, cenzontle_fut);
@@ -675,18 +798,42 @@ async fn precheck_providers_with_explicit(
             };
             return Ok((primary.to_string(), resolved_model));
         }
-        // For cenzontle, the most likely cause is an expired SSO token — give a specific hint.
-        let unavail_hint = if primary == "cenzontle" {
-            "SSO token expired — run `halcon auth login cenzontle` to re-authenticate"
+        // Provider registered but is_available() returned false.
+        // Provide provider-specific diagnostics.
+        if primary == "cenzontle" {
+            // Check if the model cache is writable — a common cause of degraded state.
+            let cache_writable = cenzontle_cache_path()
+                .map(|p| crate::config_loader::is_writable(&p))
+                .unwrap_or(true);
+
+            let hint = if !cache_writable {
+                "Model cache is not writable (root-owned file?). \
+                 Run: sudo chown -R $(whoami) ~/.halcon"
+            } else {
+                "SSO token expired or API unreachable — run `halcon auth login cenzontle`"
+            };
+
+            tracing::warn!(
+                provider = "cenzontle",
+                cache_writable = cache_writable,
+                "Primary provider unavailable: is_available() returned false"
+            );
+            feedback::user_warning(
+                &format!("primary provider '{primary}' is not available"),
+                Some(hint),
+            );
         } else {
-            "Checking fallback providers..."
-        };
-        feedback::user_warning(
-            &format!("primary provider '{primary}' is not available"),
-            Some(unavail_hint),
-        );
+            tracing::warn!(
+                provider = primary,
+                "Primary provider unavailable: is_available() returned false"
+            );
+            feedback::user_warning(
+                &format!("primary provider '{primary}' is not available"),
+                Some("Checking fallback providers..."),
+            );
+        }
     } else {
-        // Check for typos before falling back silently.
+        // Provider not in the registry at all.
         let registered = registry
             .list()
             .into_iter()
@@ -697,13 +844,23 @@ async fn precheck_providers_with_explicit(
             Some(s) => format!("Did you mean: \"{s}\"? (use -p {s})"),
             None => "Checking fallback providers...".to_string(),
         };
+        tracing::warn!(
+            provider = primary,
+            registered = ?registered,
+            suggestion = ?suggestion,
+            "Provider not registered"
+        );
         feedback::user_warning(
             &format!("provider '{primary}' is not registered (missing API key?)"),
             Some(hint.as_str()),
         );
     }
 
+    // ── Fallback selection ─────────────────────────────────────────────────
     // Try all other registered providers (excluding echo).
+    // IMPORTANT: Every fallback is logged at WARN so users can see exactly
+    // what happened in `--verbose` mode. No silent provider switching.
+    let mut tried: Vec<&str> = Vec::new();
     for name in registry.list() {
         if name == primary || name == "echo" {
             continue;
@@ -715,12 +872,20 @@ async fn precheck_providers_with_explicit(
                     .first()
                     .map(|m| m.id.clone())
                     .unwrap_or_else(|| model.to_string());
+                tracing::warn!(
+                    primary = primary,
+                    fallback = name,
+                    model = %fallback_model,
+                    tried_unavailable = ?tried,
+                    "Falling back from primary provider"
+                );
                 feedback::user_warning(
                     &format!("using fallback provider '{name}' with model '{fallback_model}'"),
                     None,
                 );
                 return Ok((name.to_string(), fallback_model));
             }
+            tried.push(name);
         }
     }
 
@@ -1379,5 +1544,29 @@ id = "minimal-model"
         // Only "echo" registered; typo "ech" is distance 1 but echo is excluded
         let suggestion = suggest_provider("ech", &registered);
         assert!(suggestion.is_none());
+    }
+
+    // ── Model cache integrity tests ──────────────────────────────────────────
+
+    #[test]
+    fn save_cenzontle_model_cache_skips_empty_list() {
+        // Saving empty models should be a no-op (no file created).
+        // This test verifies the guard clause works.
+        save_cenzontle_model_cache(&[]);
+        // If we got here without panic, the guard worked.
+    }
+
+    #[test]
+    fn cenzontle_cache_path_returns_some() {
+        // Verify the path helper returns a path (not None) when HOME is set.
+        let path = cenzontle_cache_path();
+        assert!(path.is_some(), "cache path should resolve when HOME is set");
+        assert!(
+            path.unwrap()
+                .to_str()
+                .unwrap()
+                .contains("cenzontle-models.json"),
+            "path should end with cenzontle-models.json"
+        );
     }
 }

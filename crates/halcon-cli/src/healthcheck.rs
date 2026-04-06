@@ -210,8 +210,30 @@ async fn get_health_metadata(state: &HealthState) -> HealthMetadata {
             })
         });
 
-    // Detect sequence gaps (simplified - would need more complex logic)
-    let sequence_gaps = Vec::new(); // TODO: implement gap detection
+    // Detect sequence gaps: find missing sequence numbers in the sent events.
+    let sequence_gaps: Vec<u64> = buffer
+        .get_sent()
+        .ok()
+        .map(|events| {
+            if events.len() < 2 {
+                return Vec::new();
+            }
+            let mut seqs: Vec<u64> = events.iter().filter_map(|e| e.seq).collect();
+            seqs.sort_unstable();
+            seqs.dedup();
+            let mut gaps = Vec::new();
+            for window in seqs.windows(2) {
+                let expected_next = window[0] + 1;
+                for missing in expected_next..window[1] {
+                    gaps.push(missing);
+                    if gaps.len() >= 100 {
+                        return gaps; // cap to avoid memory explosion
+                    }
+                }
+            }
+            gaps
+        })
+        .unwrap_or_default();
 
     HealthMetadata {
         last_acked_seq: last_seq,

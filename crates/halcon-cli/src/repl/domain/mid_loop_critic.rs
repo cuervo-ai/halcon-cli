@@ -123,7 +123,7 @@ impl MidLoopCritic {
         round: usize,
         max_rounds: usize,
         plan_progress: f64,
-        evidence_coverage: f64,
+        _evidence_coverage: f64,
         drift_score: f64,
     ) -> CriticCheckpoint {
         let budget_fraction = if max_rounds > 0 {

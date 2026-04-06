@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify, RwLock};
 use uuid::Uuid;
 
-use super::mutable_dag::{DagSnapshot, MutationAuthor, MutableDag, NodeStatus};
+use super::mutable_dag::{DagSnapshot, MutableDag, MutationAuthor, NodeStatus};
 use super::{AgentSelector, TaskNode};
 use crate::error::{Result, RuntimeError};
 use halcon_storage::{EventCategory, EventStore};
@@ -374,10 +374,7 @@ impl ExecutionCoordinator {
     ///
     /// `executor_fn` is called for each node and must return (output, tokens_used).
     /// This decouples the coordinator from the actual agent invocation.
-    pub async fn run<F, Fut>(
-        &self,
-        executor_fn: F,
-    ) -> Result<CoordinatorState>
+    pub async fn run<F, Fut>(&self, executor_fn: F) -> Result<CoordinatorState>
     where
         F: Fn(TaskNode) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = std::result::Result<(String, u64), String>> + Send,
@@ -625,10 +622,17 @@ mod tests {
         while let Ok(e) = rx.try_recv() {
             events.push(e);
         }
-        assert!(events.iter().any(|e| matches!(e, CoordinatorEvent::ExecutionStarted { .. })));
-        assert!(events.iter().any(|e| matches!(e, CoordinatorEvent::ExecutionCompleted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CoordinatorEvent::ExecutionStarted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CoordinatorEvent::ExecutionCompleted { .. })));
         assert_eq!(
-            events.iter().filter(|e| matches!(e, CoordinatorEvent::NodeCompleted { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, CoordinatorEvent::NodeCompleted { .. }))
+                .count(),
             3
         );
     }
@@ -666,7 +670,10 @@ mod tests {
             events.push(e);
         }
         assert_eq!(
-            events.iter().filter(|e| matches!(e, CoordinatorEvent::NodeRetrying { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, CoordinatorEvent::NodeRetrying { .. }))
+                .count(),
             2
         );
     }
@@ -785,7 +792,9 @@ mod tests {
         while let Ok(e) = rx.try_recv() {
             events.push(e);
         }
-        assert!(events.iter().any(|e| matches!(e, CoordinatorEvent::BudgetWarning { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CoordinatorEvent::BudgetWarning { .. })));
     }
 
     #[test]

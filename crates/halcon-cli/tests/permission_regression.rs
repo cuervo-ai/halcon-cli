@@ -141,11 +141,20 @@ fn regression_safety_paths_detected() {
     // These paths should always require bypass-immune confirmation
     let sensitive_cases = [
         ("file_write", json!({"path": "/home/user/.git/config"})),
-        ("file_edit", json!({"path": "/home/user/.ssh/authorized_keys"})),
+        (
+            "file_edit",
+            json!({"path": "/home/user/.ssh/authorized_keys"}),
+        ),
         ("file_write", json!({"path": "/home/user/.env"})),
         ("bash", json!({"command": "echo 'alias x=y' >> ~/.bashrc"})),
-        ("file_write", json!({"path": "/project/.claude/settings.json"})),
-        ("file_edit", json!({"file_path": "/project/.halcon/config.toml"})),
+        (
+            "file_write",
+            json!({"path": "/project/.claude/settings.json"}),
+        ),
+        (
+            "file_edit",
+            json!({"file_path": "/project/.halcon/config.toml"}),
+        ),
     ];
 
     for (tool, args) in &sensitive_cases {
@@ -157,7 +166,9 @@ fn regression_safety_paths_detected() {
         assert!(
             matches!(risk, RiskLevel::High | RiskLevel::Critical),
             "Tool '{}' with args {:?} should be High/Critical risk, got {:?}",
-            tool, args, risk
+            tool,
+            args,
+            risk
         );
     }
 }
@@ -165,8 +176,14 @@ fn regression_safety_paths_detected() {
 #[test]
 fn regression_non_sensitive_paths_not_flagged() {
     let safe_cases = [
-        ("file_write", json!({"path": "/tmp/output.txt", "content": "test"})),
-        ("file_edit", json!({"path": "/project/src/main.rs", "old_string": "a", "new_string": "b"})),
+        (
+            "file_write",
+            json!({"path": "/tmp/output.txt", "content": "test"}),
+        ),
+        (
+            "file_edit",
+            json!({"path": "/project/src/main.rs", "old_string": "a", "new_string": "b"}),
+        ),
     ];
 
     let handler = ConversationalPermissionHandler::new(true);
@@ -222,7 +239,8 @@ fn regression_tbac_no_context_passes_through() {
     assert!(
         matches!(
             decision,
-            halcon_core::types::AuthzDecision::NoContext | halcon_core::types::AuthzDecision::Allowed { .. }
+            halcon_core::types::AuthzDecision::NoContext
+                | halcon_core::types::AuthzDecision::Allowed { .. }
         ),
         "TBAC with no context should pass through, got: {:?}",
         decision

@@ -173,7 +173,7 @@ async fn run_event_loop(
 
 /// Handle a WebSocket event.
 async fn handle_event(
-    client: &RemoteControlClient,
+    _client: &RemoteControlClient,
     state: &mut AttachState,
     event: &RemoteControlEvent,
     out: &mut impl Write,
@@ -218,10 +218,7 @@ async fn handle_event(
                 } else {
                     v.clone()
                 };
-                write_line(
-                    out,
-                    &format!("\x1b[33m    {k}: {truncated}\x1b[0m\r\n"),
-                );
+                write_line(out, &format!("\x1b[33m    {k}: {truncated}\x1b[0m\r\n"));
             }
 
             write_line(
@@ -257,9 +254,7 @@ async fn handle_event(
             );
         }
 
-        RemoteControlEvent::PermissionExpired {
-            request_id, ..
-        } => {
+        RemoteControlEvent::PermissionExpired { request_id, .. } => {
             state.pending_permissions.remove(request_id);
             if state.input_mode == InputMode::PermissionPrompt(*request_id) {
                 state.input_mode = InputMode::Watch;
@@ -274,9 +269,7 @@ async fn handle_event(
         }
 
         RemoteControlEvent::ChatStreamToken {
-            token,
-            is_thinking,
-            ..
+            token, is_thinking, ..
         } => {
             if *is_thinking {
                 if !state.is_thinking {
@@ -511,9 +504,7 @@ async fn handle_key(
 
         InputMode::Watch => match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(true),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(true)
-            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
             KeyCode::Char('i') | KeyCode::Char('I') => {
                 state.input_mode = InputMode::Chat;
                 write!(out, "\r\n  \x1b[1m>\x1b[0m ").ok();
@@ -523,7 +514,10 @@ async fn handle_key(
                 // Quick approve: approve the oldest pending permission.
                 if let Some((&rid, _perm)) = state.pending_permissions.iter().next() {
                     if let Some(sid) = &state.session_id {
-                        write_line(out, &format!("\r\n  Approving {}...\r\n", &rid.to_string()[..8]));
+                        write_line(
+                            out,
+                            &format!("\r\n  Approving {}...\r\n", &rid.to_string()[..8]),
+                        );
                         client.resolve_permission(sid, rid, true).await.ok();
                     }
                 }
@@ -532,7 +526,10 @@ async fn handle_key(
                 // Quick reject: reject the oldest pending permission.
                 if let Some((&rid, _perm)) = state.pending_permissions.iter().next() {
                     if let Some(sid) = &state.session_id {
-                        write_line(out, &format!("\r\n  Rejecting {}...\r\n", &rid.to_string()[..8]));
+                        write_line(
+                            out,
+                            &format!("\r\n  Rejecting {}...\r\n", &rid.to_string()[..8]),
+                        );
                         client.resolve_permission(sid, rid, false).await.ok();
                     }
                 }
@@ -584,7 +581,9 @@ fn print_header(client: &RemoteControlClient, session_id: &str) {
     eprintln!("  Server:  {}", client.server_url());
     eprintln!("  Session: {short_id}");
     eprintln!();
-    eprintln!("  \x1b[2mKeys: [i] chat  [a] approve  [r] reject  [x] cancel  [q] quit  [?] help\x1b[0m");
+    eprintln!(
+        "  \x1b[2mKeys: [i] chat  [a] approve  [r] reject  [x] cancel  [q] quit  [?] help\x1b[0m"
+    );
     eprintln!("  \x1b[2mWaiting for events...\x1b[0m");
     eprintln!();
 }

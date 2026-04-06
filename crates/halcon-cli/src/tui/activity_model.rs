@@ -105,7 +105,7 @@ impl InvertedIndex {
         }
 
         // Get line sets for each query word
-        let mut word_sets: Vec<&HashSet<usize>> = query_words
+        let word_sets: Vec<&HashSet<usize>> = query_words
             .iter()
             .filter_map(|w| self.index.get(w))
             .collect();

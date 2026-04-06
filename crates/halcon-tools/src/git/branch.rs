@@ -84,7 +84,7 @@ impl Tool for GitBranchTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "git_branch"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let op = input
             .arguments
             .get("operation")

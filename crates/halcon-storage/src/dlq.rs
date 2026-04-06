@@ -158,18 +158,15 @@ impl DeadLetterQueue {
             self.conn.execute(
                 "UPDATE failed_tasks SET error = ?1, retry_count = ?2, last_attempt_at = ?3, \
                  next_retry_at = ?4, status = ?5 WHERE id = ?6",
-                params![
-                    error,
-                    new_retry_count,
-                    now,
-                    next_retry,
-                    status.as_str(),
-                    id
-                ],
+                params![error, new_retry_count, now, next_retry, status.as_str(), id],
             )?;
 
             if status == DlqStatus::Exhausted {
-                warn!(task_id, retry_count = new_retry_count, "Task exhausted max retries");
+                warn!(
+                    task_id,
+                    retry_count = new_retry_count,
+                    "Task exhausted max retries"
+                );
             } else {
                 info!(
                     task_id,
@@ -240,9 +237,10 @@ impl DeadLetterQueue {
 
     /// Mark a task as successfully retried (remove from DLQ).
     pub fn mark_success(&mut self, task_id: &str) -> Result<()> {
-        let rows = self
-            .conn
-            .execute("DELETE FROM failed_tasks WHERE task_id = ?1", params![task_id])?;
+        let rows = self.conn.execute(
+            "DELETE FROM failed_tasks WHERE task_id = ?1",
+            params![task_id],
+        )?;
 
         if rows > 0 {
             info!(task_id, "Task retry succeeded, removed from DLQ");
@@ -401,7 +399,12 @@ mod tests {
         let mut dlq = DeadLetterQueue::open(tmpfile.path()).unwrap();
 
         let id = dlq
-            .add_failure("task-1", r#"{"test":true}"#.to_string(), "timeout".to_string(), 3)
+            .add_failure(
+                "task-1",
+                r#"{"test":true}"#.to_string(),
+                "timeout".to_string(),
+                3,
+            )
             .unwrap();
         assert!(id > 0);
 

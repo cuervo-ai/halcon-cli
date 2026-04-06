@@ -40,7 +40,7 @@ impl Tool for FileInspectTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let path_str = input.arguments["path"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("file_inspect requires 'path' string".into())
         })?;

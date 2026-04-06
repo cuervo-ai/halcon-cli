@@ -3,6 +3,7 @@ pub mod agents;
 pub mod chat;
 pub mod config;
 pub mod observability;
+pub mod remote_control;
 pub mod system;
 pub mod tasks;
 pub mod tools;

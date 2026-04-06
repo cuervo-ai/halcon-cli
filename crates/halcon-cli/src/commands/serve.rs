@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use halcon_api::server::{start_server_with_executor, ServerConfig};
 use halcon_core::types::ToolsConfig;
 use halcon_runtime::bridges::tool_agent::LocalToolAgent;
@@ -155,8 +155,8 @@ pub async fn run_with_bridge(
     target: &str,
 ) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
-    use std::collections::VecDeque;
-    use tokio_tungstenite::tungstenite::http::Request;
+    use halcon_storage::PersistentEventBuffer;
+
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
     // Resolve bridge URL
@@ -233,10 +233,38 @@ pub async fn run_with_bridge(
     // Give server time to start
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+    // Open persistent event buffer
+    let halcon_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".halcon");
+
+    // Ensure directory exists
+    let _ = std::fs::create_dir_all(&halcon_dir);
+
+    let event_buffer_path = halcon_dir.join("bridge_event_buffer.db");
+    let mut event_buffer = PersistentEventBuffer::open(&event_buffer_path)
+        .context("Failed to open persistent event buffer")?;
+
+    // Open Dead Letter Queue for failed task tracking
+    let dlq_path = halcon_dir.join("dlq.db");
+    let dlq = Arc::new(tokio::sync::Mutex::new(
+        halcon_storage::DeadLetterQueue::open(&dlq_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open DLQ: {}", e))?,
+    ));
+
+    // Recover last sequence from buffer
+    let mut last_acked_seq: u64 = event_buffer.last_seq()?.unwrap_or(0);
+
+    eprintln!("📊 Event buffer ready at {:?}", event_buffer_path);
+    let stats = event_buffer.stats()?;
+    eprintln!(
+        "   Pending: {}, Sent: {}, Acked: {}",
+        stats.pending, stats.sent, stats.acked
+    );
+
     // Bridge relay loop with reconnection
     let mut backoff_secs: u64 = 1;
-    let mut last_acked_seq: u64 = 0;
-    let mut event_buffer: VecDeque<String> = VecDeque::with_capacity(10_000);
+    let mut current_seq: u64 = last_acked_seq;
 
     loop {
         // Build WebSocket request with auth headers
@@ -261,14 +289,17 @@ pub async fn run_with_bridge(
 
                 let (mut write, mut read) = ws_stream.split();
 
-                // Retransmit buffered events
-                let buffered_count = event_buffer.len();
-                if buffered_count > 0 {
-                    eprintln!("🔄 Retransmitting {buffered_count} buffered events...");
-                    while let Some(evt) = event_buffer.pop_front() {
-                        if write.send(Message::Text(evt)).await.is_err() {
+                // Retransmit unsent/unacked events from persistent buffer
+                let unsent = event_buffer.recover_unsent().unwrap_or_default();
+                if !unsent.is_empty() {
+                    eprintln!("🔄 Retransmitting {} buffered events...", unsent.len());
+                    for evt in unsent {
+                        if let Err(e) = write.send(Message::Text(evt.payload.clone())).await {
+                            eprintln!("⚠️  Failed to retransmit seq {}: {}", evt.seq, e);
                             break;
                         }
+                        // Mark as sent (awaiting ACK)
+                        let _ = event_buffer.mark_sent(evt.seq);
                     }
                 }
 
@@ -295,6 +326,16 @@ pub async fn run_with_bridge(
                                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                                             if let Some(seq) = v["seq"].as_u64() {
                                                 last_acked_seq = seq;
+                                                // Mark events as acked in persistent buffer
+                                                match event_buffer.mark_acked(seq) {
+                                                    Ok(n) if n > 0 => {
+                                                        eprintln!("✅ ACK received: seq {} ({} events confirmed)", seq, n);
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("⚠️  Failed to mark acked: {}", e);
+                                                    }
+                                                    _ => {}
+                                                }
                                             }
                                         }
                                     } else if text.contains("\"t\":\"ctx\"") {
@@ -315,6 +356,7 @@ pub async fn run_with_bridge(
                                                     let tx = upstream_tx.clone();
                                                     let registry = tool_registry.clone();
                                                     let wd = working_dir.clone();
+                                                    let dlq_clone = dlq.clone();
                                                     tokio::spawn(async move {
                                                         execute_delegated_task(
                                                             &task_id,
@@ -323,7 +365,9 @@ pub async fn run_with_bridge(
                                                             registry,
                                                             &wd,
                                                             tx,
-                                                        ).await;
+                                                            dlq_clone,
+                                                        )
+                                                        .await;
                                                     });
                                                 }
                                             } else {
@@ -344,8 +388,22 @@ pub async fn run_with_bridge(
 
                         // Task results → send upstream to Cenzontle
                         Some(result_json) = upstream_rx.recv() => {
-                            if write.send(Message::Text(result_json)).await.is_err() {
-                                break;
+                            current_seq += 1;
+                            // Persist BEFORE sending (guarantees zero data loss)
+                            if let Err(e) = event_buffer.push(current_seq, result_json.clone()) {
+                                eprintln!("⚠️  Failed to persist event seq {}: {}", current_seq, e);
+                            }
+
+                            match write.send(Message::Text(result_json)).await {
+                                Ok(_) => {
+                                    // Mark as sent (awaiting ACK)
+                                    let _ = event_buffer.mark_sent(current_seq);
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️  Send failed, event buffered (seq {}): {}", current_seq, e);
+                                    // Event stays in 'pending' status, will be retransmitted on reconnect
+                                    break;
+                                }
                             }
                         }
 
@@ -400,51 +458,99 @@ async fn execute_delegated_task(
     tool_registry: Arc<halcon_tools::ToolRegistry>,
     working_dir: &str,
     upstream: tokio::sync::mpsc::Sender<String>,
+    dlq: Arc<tokio::sync::Mutex<halcon_storage::DeadLetterQueue>>,
 ) {
-    use halcon_core::types::ToolInput;
     use tokio::time::{timeout, Duration};
 
     let deadline = Duration::from_millis(timeout_ms);
 
-    // Parse instructions to determine which tools to run.
-    // The LLM on the backend has already converted the user's natural language
-    // into actionable instructions.  We interpret them as a sequence of tool calls.
-    let tool_calls = parse_instructions_to_tool_calls(instructions, working_dir);
+    // Wrap ENTIRE execution in global timeout
+    let result = timeout(deadline, async {
+        // Parse instructions to determine which tools to run
+        let tool_calls = parse_instructions_to_tool_calls(instructions, working_dir);
 
-    if tool_calls.is_empty() {
-        // Fallback: run as a single bash command
-        let tool_calls = vec![ToolCall {
-            name: "bash".to_string(),
-            args: serde_json::json!({"command": instructions}),
-        }];
-        run_tool_calls(
-            task_id,
-            &tool_calls,
-            &tool_registry,
-            working_dir,
-            &upstream,
-            deadline,
-        )
-        .await;
-    } else {
-        run_tool_calls(
-            task_id,
-            &tool_calls,
-            &tool_registry,
-            working_dir,
-            &upstream,
-            deadline,
-        )
-        .await;
+        if tool_calls.is_empty() {
+            // Fallback: run as a single bash command
+            let fallback = vec![ToolCall {
+                name: "bash".to_string(),
+                args: serde_json::json!({"command": instructions}),
+            }];
+            run_tool_calls(task_id, &fallback, &tool_registry, working_dir, &upstream).await
+        } else {
+            run_tool_calls(task_id, &tool_calls, &tool_registry, working_dir, &upstream).await
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            // Success
+            let done_msg = serde_json::json!({
+                "t": "done",
+                "d": { "taskId": task_id }
+            });
+            let _ = upstream.send(done_msg.to_string()).await;
+            eprintln!("✅ Task {task_id} completed");
+        }
+        Ok(Err(e)) => {
+            // Tool execution error
+            let error = format!("Task failed: {}", e);
+            eprintln!("❌ {}", error);
+
+            // Add to DLQ
+            let payload = serde_json::json!({
+                "taskId": task_id,
+                "instructions": instructions,
+                "timeout": timeout_ms
+            })
+            .to_string();
+
+            let mut dlq_guard = dlq.lock().await;
+            let _ = dlq_guard.add_failure(task_id, payload, error, 3);
+
+            // Send done (with failure)
+            let done_msg = serde_json::json!({
+                "t": "done",
+                "d": { "taskId": task_id }
+            });
+            let _ = upstream.send(done_msg.to_string()).await;
+        }
+        Err(_) => {
+            // Global timeout exceeded
+            let error = format!("Task timed out after {}ms", timeout_ms);
+            eprintln!("⏰ {}", error);
+
+            // Send failure result
+            let timeout_result = serde_json::json!({
+                "t": "tresult",
+                "d": {
+                    "id": format!("{task_id}-timeout"),
+                    "name": "global_timeout",
+                    "output": error.clone(),
+                    "ok": false,
+                }
+            });
+            let _ = upstream.send(timeout_result.to_string()).await;
+
+            // Add to DLQ
+            let payload = serde_json::json!({
+                "taskId": task_id,
+                "instructions": instructions,
+                "timeout": timeout_ms
+            })
+            .to_string();
+
+            let mut dlq_guard = dlq.lock().await;
+            let _ = dlq_guard.add_failure(task_id, payload, error, 3);
+
+            // Send done (with failure)
+            let done_msg = serde_json::json!({
+                "t": "done",
+                "d": { "taskId": task_id }
+            });
+            let _ = upstream.send(done_msg.to_string()).await;
+        }
     }
-
-    // Send completion signal
-    let done_msg = serde_json::json!({
-        "t": "done",
-        "d": { "taskId": task_id }
-    });
-    let _ = upstream.send(done_msg.to_string()).await;
-    eprintln!("✅ Task {task_id} completed");
 }
 
 struct ToolCall {
@@ -459,45 +565,32 @@ async fn run_tool_calls(
     registry: &halcon_tools::ToolRegistry,
     working_dir: &str,
     upstream: &tokio::sync::mpsc::Sender<String>,
-    deadline: tokio::time::Duration,
-) {
+) -> Result<()> {
     use halcon_core::types::ToolInput;
 
-    let start = tokio::time::Instant::now();
-
     for (i, call) in calls.iter().enumerate() {
-        // Check deadline
-        if start.elapsed() > deadline {
-            eprintln!("⏰ Task {task_id} timeout after {} tool calls", i);
-            let timeout_result = serde_json::json!({
-                "t": "tresult",
-                "d": {
-                    "id": format!("{task_id}-{i}"),
-                    "name": "timeout",
-                    "output": format!("Task timed out after {}ms", deadline.as_millis()),
-                    "ok": false,
-                }
-            });
-            let _ = upstream.send(timeout_result.to_string()).await;
-            break;
-        }
-
         let tool = match registry.get(&call.name) {
             Some(t) => t,
             None => {
-                eprintln!("⚠️  Unknown tool: {}", call.name);
+                let error = format!("Unknown tool: {}", call.name);
+                eprintln!("⚠️  {}", error);
                 let err_result = serde_json::json!({
                     "t": "tresult",
                     "d": {
                         "id": format!("{task_id}-{i}"),
                         "name": &call.name,
                         "input": call.args.to_string(),
-                        "error": format!("Unknown tool: {}", call.name),
+                        "error": error.clone(),
                         "ok": false,
                     }
                 });
-                let _ = upstream.send(err_result.to_string()).await;
-                continue;
+                upstream
+                    .send(err_result.to_string())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Upstream send error: {}", e))?;
+
+                // Return error to propagate to execute_delegated_task
+                return Err(anyhow::anyhow!(error));
             }
         };
 
@@ -563,8 +656,13 @@ async fn run_tool_calls(
             }
         };
 
-        let _ = upstream.send(result.to_string()).await;
+        upstream
+            .send(result.to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!("Upstream send error: {}", e))?;
     }
+
+    Ok(())
 }
 
 /// Parse LLM-generated instructions into a sequence of tool calls.

@@ -39,7 +39,7 @@ impl Tool for BackgroundOutputTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let job_id = input.arguments["job_id"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("background_output requires 'job_id' string".into())
         })?;

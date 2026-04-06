@@ -1,8 +1,24 @@
-// Allow deprecated rand methods and unused test imports — these are caught
-// only on CI's newer Rust version (1.85) and will be cleaned up progressively.
-#![allow(deprecated, unused_imports, unused_variables, dead_code)]
+// NOTE: This crate is experimental (feature-gated behind "gdem-primary") and
+// contains modules that are actively being developed. Individual modules use
+// targeted #[allow(...)] attributes where needed rather than blanket suppression.
+// CI clippy warnings should be fixed progressively, not suppressed globally.
+#![allow(unused_imports)]
 
 //! # halcon-agent-core — SOTA Goal-Driven Execution Model (GDEM)
+//!
+//! ## ⚠️ Integration Status
+//!
+//! This crate is an **optional dependency** (`feature = "gdem-primary"`) and is
+//! **NOT compiled into default production builds** as of v0.3.14.
+//!
+//! The production agent loop lives in `halcon-cli/src/repl/agent/mod.rs`.
+//! This crate contains the next-generation GDEM engine designed to replace that
+//! loop once the `gdem-primary` feature flag is stabilised.
+//!
+//! **Do NOT modify this crate expecting changes to affect CLI behaviour** unless
+//! the `gdem-primary` feature is explicitly enabled in `halcon-cli/Cargo.toml`.
+//!
+//! See `halcon-cli/src/agent_bridge/gdem_bridge.rs` for the integration bridge.
 //!
 //! ## Architecture
 //!

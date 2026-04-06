@@ -249,7 +249,7 @@ impl Tool for JsonSchemaValidateTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "json_schema_validate"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         // Accept data as an embedded JSON string ({"x":1}) or a direct value.
         // When a String is provided, try parsing it as JSON first; if it fails
         // (e.g. bare "red"), treat the string itself as the data value.

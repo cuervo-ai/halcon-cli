@@ -47,7 +47,7 @@ impl Tool for DirectoryTreeTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let path_str =
             input.arguments["path"]
                 .as_str()

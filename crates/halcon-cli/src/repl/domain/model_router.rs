@@ -385,7 +385,7 @@ impl ModelRouter {
     }
 
     /// Resolve placeholder model names ("__fast__", "__balanced__", "__deep__") to actual IDs.
-    fn resolve_model(&self, placeholder: &str, tier: &ModelTier) -> String {
+    fn resolve_model(&self, placeholder: &str, _tier: &ModelTier) -> String {
         match placeholder {
             "__fast__" => self.fast_model.clone(),
             "__balanced__" => self.balanced_model.clone(),

@@ -171,7 +171,7 @@ impl Tool for ExternalTool {
         self.schema.clone()
     }
 
-    async fn execute(&self, input: ToolInput) -> HalconResult<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> HalconResult<ToolOutput> {
         let rendered = self.render_command(&input.arguments);
 
         tracing::debug!(tool = %self.name, command = %rendered, "ExternalTool executing");
@@ -475,7 +475,7 @@ template = "echo ok"
             fn input_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, input: ToolInput) -> HalconResult<ToolOutput> {
+            async fn execute_inner(&self, input: ToolInput) -> HalconResult<ToolOutput> {
                 Ok(ToolOutput {
                     tool_use_id: input.tool_use_id,
                     content: "original".into(),

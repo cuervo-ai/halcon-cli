@@ -4543,7 +4543,7 @@ mod audit {
             assert!(result.is_err(), "rm -rf / should be blocked");
             let err = result.unwrap_err().to_string();
             assert!(
-                err.contains("Dangerous command blocked"),
+                err.contains("security policy") || err.contains("Dangerous command blocked"),
                 "Expected blacklist error, got: {}",
                 err
             );
@@ -4556,10 +4556,12 @@ mod audit {
             let result = tool.execute(input).await;
 
             assert!(result.is_err(), "rm -rf /* should be blocked");
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("Dangerous command blocked"));
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("security policy") || err.contains("Dangerous command blocked"),
+                "Expected blacklist error, got: {}",
+                err
+            );
         }
 
         #[tokio::test]
@@ -4641,7 +4643,8 @@ mod audit {
             // Should NOT be blocked (may fail for other reasons like missing dir)
             if let Err(e) = tool.execute(input).await {
                 assert!(
-                    !e.to_string().contains("Dangerous command blocked"),
+                    !e.to_string().contains("Dangerous command blocked")
+                        && !e.to_string().contains("security policy"),
                     "Safe rm should not be blocked, but got: {}",
                     e
                 );
@@ -4699,7 +4702,8 @@ mod audit {
             // Should be allowed now (though may fail for other reasons)
             if let Err(e) = tool.execute(input).await {
                 assert!(
-                    !e.to_string().contains("Dangerous command blocked"),
+                    !e.to_string().contains("Dangerous command blocked")
+                        && !e.to_string().contains("security policy"),
                     "Disabled blacklist should not block, got: {}",
                     e
                 );

@@ -166,6 +166,18 @@ pub enum WsServerEvent {
         session_id: Uuid,
     },
 
+    // Remote-control events
+    /// A replan was accepted and will be executed.
+    RemoteControlReplanAccepted {
+        session_id: Uuid,
+        step_count: usize,
+    },
+    /// A replan was rejected (invalid DAG or authorization failure).
+    RemoteControlReplanRejected {
+        session_id: Uuid,
+        reason: String,
+    },
+
     // Media attachment processing
     /// Fired when the server begins processing inline attachments.
     MediaAnalysisStarted {

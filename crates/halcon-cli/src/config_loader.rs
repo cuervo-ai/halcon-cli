@@ -1,7 +1,461 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use halcon_core::types::{AppConfig, McpServerConfig};
+
+// ── Filesystem safety utilities ─────────────────────────────────────────────
+
+/// Guard against running as root / under `sudo`.
+///
+/// Running as root causes all created files to be owned by root, which breaks
+/// subsequent non-root runs. This is the #1 cause of "Permission denied"
+/// cascading failures.
+///
+/// **Behavior:**
+/// - `HALCON_ALLOW_ROOT=1` → skip the guard entirely (for Docker/systemd use cases).
+/// - Running via `sudo` (SUDO_USER set) → warn with actionable fix.
+/// - Running as root directly → warn.
+///
+/// Never blocks startup — the warning is informational. The real protection comes
+/// from `safe_write_file`'s ownership pre-check and XDG fallback.
+pub fn warn_if_sudo() {
+    #[cfg(unix)]
+    {
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            return;
+        }
+
+        // Escape hatch: HALCON_ALLOW_ROOT=1 silences the warning.
+        // Used in Docker containers and systemd services where root is expected.
+        if std::env::var("HALCON_ALLOW_ROOT")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            tracing::debug!("Running as root with HALCON_ALLOW_ROOT=1 — guard suppressed");
+            return;
+        }
+
+        let dir_display = dirs_path().display().to_string();
+
+        if let Ok(real_user) = std::env::var("SUDO_USER") {
+            eprintln!();
+            eprintln!("WARNING: halcon is running as root (via sudo). Files created this session");
+            eprintln!("  will be owned by root, which will cause 'Permission denied' errors");
+            eprintln!("  when you next run halcon as '{real_user}'.");
+            eprintln!();
+            eprintln!("  Options:");
+            eprintln!("    1. Run without sudo:  halcon chat");
+            eprintln!("    2. Fix existing files: sudo chown -R {real_user} {dir_display}");
+            eprintln!("    3. Silence this:      HALCON_ALLOW_ROOT=1 halcon chat");
+            eprintln!();
+            tracing::warn!(
+                real_user = %real_user,
+                halcon_dir = %dir_display,
+                "Running under sudo — files will be root-owned"
+            );
+        } else {
+            // Running as root directly (not via sudo) — likely Docker or systemd.
+            tracing::info!(
+                "Running as root (no SUDO_USER). Set HALCON_ALLOW_ROOT=1 to suppress warnings."
+            );
+        }
+    }
+}
+
+/// Check that `~/.halcon/` and its critical files are writable by the current user.
+///
+/// Detects root-owned files left behind by accidental `sudo halcon` invocations.
+/// Prints an actionable fix to stderr. Best-effort: never errors or blocks startup.
+pub fn check_data_dir_permissions() {
+    let halcon_dir = dirs_path();
+    if !halcon_dir.exists() {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let current_uid = unsafe { libc::getuid() };
+
+        // Don't warn when running as root — root can write to anything.
+        if current_uid == 0 {
+            return;
+        }
+
+        // Critical files that halcon must be able to write during normal operation.
+        let critical_paths = [
+            halcon_dir.join("config.toml"),
+            halcon_dir.join("cenzontle-models.json"),
+            halcon_dir.join("workspace-trust.json"),
+            halcon_dir.join("config-trust.json"),
+            halcon_dir.join("mcp-trust.json"),
+        ];
+
+        let mut root_owned: Vec<String> = Vec::new();
+
+        // Check the directory itself.
+        if let Ok(meta) = std::fs::metadata(&halcon_dir) {
+            if meta.uid() == 0 {
+                root_owned.push(halcon_dir.display().to_string());
+            }
+        }
+
+        for path in &critical_paths {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.uid() == 0 {
+                    root_owned.push(path.display().to_string());
+                }
+            }
+        }
+
+        if root_owned.is_empty() {
+            return;
+        }
+
+        let dir_display = halcon_dir.display();
+        eprintln!();
+        eprintln!(
+            "WARNING: {} file(s) in {dir_display} are owned by root.",
+            root_owned.len()
+        );
+        eprintln!("  This causes 'Permission denied' errors when writing config and cache files,");
+        eprintln!("  which can make providers appear unavailable.");
+        eprintln!();
+        eprintln!("  Fix with:");
+        eprintln!("    sudo chown -R $(whoami) {dir_display}");
+        eprintln!();
+        tracing::warn!(
+            count = root_owned.len(),
+            dir = %dir_display,
+            files = ?root_owned,
+            "~/.halcon/ contains root-owned files — run: sudo chown -R $(whoami) {dir_display}"
+        );
+    }
+}
+
+/// Result type for [`safe_write_file`].
+#[derive(Debug)]
+pub enum WriteResult {
+    /// File written successfully.
+    Ok,
+    /// Primary path failed but file was written to a fallback location.
+    /// The caller should continue normally — data is persisted.
+    /// Inspired by Xiyo's `createFallbackStorage(primary, secondary)` pattern.
+    FallbackUsed {
+        primary_path: PathBuf,
+        fallback_path: PathBuf,
+        reason: String,
+    },
+    /// Write failed due to permission denied (root-owned file or directory).
+    PermissionDenied {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// Write failed for a non-permission reason (disk full, I/O error, etc.).
+    OtherError {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl WriteResult {
+    /// Returns `true` if the data was successfully persisted (either primary or fallback).
+    pub fn is_ok(&self) -> bool {
+        matches!(self, WriteResult::Ok | WriteResult::FallbackUsed { .. })
+    }
+
+    /// Log the error at warn level with an actionable fix hint.
+    pub fn log_on_failure(&self, context: &str) {
+        match self {
+            WriteResult::Ok => {}
+            WriteResult::FallbackUsed {
+                primary_path,
+                fallback_path,
+                reason,
+            } => {
+                tracing::warn!(
+                    primary = %primary_path.display(),
+                    fallback = %fallback_path.display(),
+                    reason = reason,
+                    context = context,
+                    "Write used fallback location (primary unwritable). \
+                     Fix: sudo chown -R $(whoami) {}",
+                    primary_path.parent().map(|p| p.display().to_string()).unwrap_or_default()
+                );
+            }
+            WriteResult::PermissionDenied { path, source } => {
+                tracing::warn!(
+                    error = %source,
+                    path = %path.display(),
+                    context = context,
+                    "Permission denied writing file. \
+                     Fix: sudo chown $(whoami) {}",
+                    path.display()
+                );
+            }
+            WriteResult::OtherError { path, source } => {
+                tracing::warn!(
+                    error = %source,
+                    path = %path.display(),
+                    context = context,
+                    "Failed to write file"
+                );
+            }
+        }
+    }
+}
+
+/// XDG-compliant fallback path for when `~/.halcon/` is unwritable.
+///
+/// Returns `$XDG_DATA_HOME/halcon/<filename>` (typically `~/.local/share/halcon/<filename>`).
+/// This mirrors the credential store fallback in halcon-auth/file_store.rs.
+pub fn xdg_fallback_path(filename: &str) -> Option<PathBuf> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))?;
+    Some(base.join("halcon").join(filename))
+}
+
+/// Safely write `content` to `path` using atomic tmp+rename with correct permissions.
+///
+/// Guarantees:
+/// - **Atomic**: readers never see a partial file (write to `.tmp`, then `rename`).
+/// - **Permission-safe**: checks ownership before writing; returns `PermissionDenied`
+///   with an actionable message instead of a cryptic OS error.
+/// - **Secure**: file is created with mode `0600` (owner rw only) on Unix.
+/// - **Directory creation**: parent directory is created with `0700` if missing.
+/// - **Self-healing fallback**: when the primary path is unwritable (root-owned),
+///   automatically writes to XDG fallback (`~/.local/share/halcon/`) and returns
+///   `FallbackUsed` so the caller knows data is persisted (inspired by Xiyo's
+///   `createFallbackStorage(primary, secondary)` pattern).
+///
+/// This function is the single chokepoint for all config/cache writes in halcon-cli.
+/// Use it instead of raw `std::fs::write` for any file in `~/.halcon/`.
+pub fn safe_write_file(path: &Path, content: &[u8]) -> WriteResult {
+    let result = atomic_write_inner(path, content);
+
+    // Xiyo-inspired fallback: if the primary path fails with PermissionDenied,
+    // try writing to the XDG data directory instead. This ensures the CLI keeps
+    // working even when ~/.halcon/ is root-owned — the user can fix ownership
+    // later without losing their session.
+    if let WriteResult::PermissionDenied { .. } = &result {
+        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(fallback) = xdg_fallback_path(filename) {
+                // Don't fallback to the same path.
+                if fallback != path {
+                    let fb_result = atomic_write_inner(&fallback, content);
+                    if fb_result.is_ok() {
+                        return WriteResult::FallbackUsed {
+                            primary_path: path.to_path_buf(),
+                            fallback_path: fallback,
+                            reason: "primary path owned by root".to_string(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Core atomic write: tmp file → chmod 0600 → rename. No fallback logic.
+fn atomic_write_inner(path: &Path, content: &[u8]) -> WriteResult {
+    // 1. Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return classify_io_error(path, e);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
+
+    // 2. Pre-flight ownership check (Unix only): detect root-owned files early
+    //    so we return PermissionDenied with an actionable message.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current_uid = unsafe { libc::getuid() };
+        if current_uid != 0 {
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.uid() == 0 {
+                    return WriteResult::PermissionDenied {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!(
+                                "file owned by root (uid 0), current uid is {current_uid}. \
+                                 Fix: sudo chown $(whoami) {}",
+                                path.display()
+                            ),
+                        ),
+                    };
+                }
+            }
+            if let Some(parent) = path.parent() {
+                if let Ok(meta) = std::fs::metadata(parent) {
+                    if meta.uid() == 0 {
+                        return WriteResult::PermissionDenied {
+                            path: path.to_path_buf(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                format!(
+                                    "directory {} owned by root. \
+                                     Fix: sudo chown -R $(whoami) {}",
+                                    parent.display(),
+                                    parent.display()
+                                ),
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Write to a sibling tmp file (atomic — readers never see partial content).
+    let tmp = path.with_extension(format!(
+        "tmp.{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    ));
+
+    if let Err(e) = std::fs::write(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return classify_io_error(path, e);
+    }
+
+    // 4. Set permissions to 0600 BEFORE rename (file is never world-readable).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&tmp);
+            return WriteResult::OtherError {
+                path: path.to_path_buf(),
+                source: e,
+            };
+        }
+    }
+
+    // 5. Atomic rename.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return classify_io_error(path, e);
+    }
+
+    WriteResult::Ok
+}
+
+/// Classify an IO error into the appropriate WriteResult variant.
+fn classify_io_error(path: &Path, e: std::io::Error) -> WriteResult {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        WriteResult::PermissionDenied {
+            path: path.to_path_buf(),
+            source: e,
+        }
+    } else {
+        WriteResult::OtherError {
+            path: path.to_path_buf(),
+            source: e,
+        }
+    }
+}
+
+/// Read a file from the primary path, falling back to the XDG data directory.
+///
+/// This is the read counterpart to [`safe_write_file`]'s fallback behavior.
+/// When `safe_write_file` writes to `~/.local/share/halcon/<file>` because
+/// `~/.halcon/<file>` is unwritable, `safe_read_file` checks both locations.
+///
+/// Priority: primary path first, then XDG fallback.
+pub fn safe_read_file(path: &Path) -> Option<Vec<u8>> {
+    // Try primary path first.
+    if let Ok(content) = std::fs::read(path) {
+        return Some(content);
+    }
+    // Try XDG fallback.
+    if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+        if let Some(fallback) = xdg_fallback_path(filename) {
+            if fallback != path {
+                if let Ok(content) = std::fs::read(&fallback) {
+                    tracing::debug!(
+                        primary = %path.display(),
+                        fallback = %fallback.display(),
+                        "Read file from XDG fallback (primary unreadable)"
+                    );
+                    return Some(content);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check whether the current process can write to `path` (or its parent directory).
+///
+/// Returns `true` if the write is expected to succeed. Returns `false` with a
+/// structured log when a permission issue is detected.
+///
+/// This is a cheap pre-flight check — it does NOT guarantee the write will succeed
+/// (the filesystem can change between check and write), but it catches the common
+/// case of root-owned files without attempting a write.
+#[cfg(unix)]
+pub fn is_writable(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let current_uid = unsafe { libc::getuid() };
+    if current_uid == 0 {
+        return true; // root can write anything
+    }
+
+    // Check the file itself (if it exists).
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.uid() == 0 {
+            tracing::debug!(
+                path = %path.display(),
+                file_uid = 0,
+                current_uid = current_uid,
+                "Pre-flight write check failed: file owned by root"
+            );
+            return false;
+        }
+    }
+
+    // Check the parent directory.
+    if let Some(parent) = path.parent() {
+        if let Ok(meta) = std::fs::metadata(parent) {
+            if meta.uid() == 0 {
+                tracing::debug!(
+                    path = %path.display(),
+                    dir = %parent.display(),
+                    dir_uid = 0,
+                    current_uid = current_uid,
+                    "Pre-flight write check failed: directory owned by root"
+                );
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+#[cfg(not(unix))]
+pub fn is_writable(_path: &Path) -> bool {
+    true
+}
 
 /// Migrates ~/.cuervo/ → ~/.halcon/ on first Halcon run (legacy user migration).
 pub fn migrate_legacy_dir() {
@@ -288,6 +742,126 @@ mod tests {
 
     /// Serialize tests that read/write process-global env vars.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── safe_write_file tests ────────────────────────────────────────────────
+
+    #[test]
+    fn safe_write_file_creates_file_and_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subdir").join("nested").join("test.json");
+        let result = safe_write_file(&path, b"hello world");
+        assert!(result.is_ok(), "safe_write_file should succeed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn safe_write_file_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overwrite.txt");
+        safe_write_file(&path, b"first");
+        safe_write_file(&path, b"second");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn safe_write_file_atomic_no_tmp_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic.json");
+        safe_write_file(&path, b"{\"ok\":true}");
+        // No .tmp files should remain after a successful write.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.contains(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(entries.is_empty(), "tmp files should be cleaned up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_file_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secure.txt");
+        safe_write_file(&path, b"secret");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "file should be 0600, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_file_creates_parent_with_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("new_subdir");
+        let path = subdir.join("file.txt");
+        safe_write_file(&path, b"content");
+        let mode = std::fs::metadata(&subdir).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "directory should be 0700, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_file_permission_denied_on_readonly_dir() {
+        // Root can write anywhere, so skip this test when running as root.
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 {
+            eprintln!("Skipping permission test (running as root)");
+            return;
+        }
+
+        // Create a read-only directory so the write fails.
+        let dir = tempfile::tempdir().unwrap();
+        let ro_dir = dir.path().join("readonly");
+        std::fs::create_dir(&ro_dir).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let path = ro_dir.join("should_fail.txt");
+        let result = safe_write_file(&path, b"content");
+
+        // Restore permissions so tempdir cleanup succeeds.
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!result.is_ok(), "write to read-only dir should fail");
+    }
+
+    #[test]
+    fn write_result_log_on_failure_noop_on_ok() {
+        // Just verify log_on_failure doesn't panic on Ok.
+        WriteResult::Ok.log_on_failure("test");
+    }
+
+    #[test]
+    fn is_writable_returns_true_for_user_owned_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user_file.txt");
+        std::fs::write(&path, "content").unwrap();
+        assert!(is_writable(&path));
+    }
+
+    #[test]
+    fn is_writable_returns_true_for_nonexistent_file_in_user_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doesnt_exist.txt");
+        assert!(is_writable(&path));
+    }
 
     #[test]
     fn default_config_loads() {

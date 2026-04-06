@@ -9,10 +9,8 @@
 use crate::render::theme;
 use crate::tui::highlight::HighlightManager;
 use crate::tui::transition_engine::TransitionEngine;
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::Frame;
 use std::time::Duration;
 
 /// Context tier data for visualization.
@@ -62,7 +60,7 @@ impl ContextVisualization {
     pub fn update(&mut self, data: TierData) {
         // Start L0 gauge transition if percentage changed
         if data.l0_pct != self.last_l0_pct {
-            let p = &theme::active().palette;
+            let _p = &theme::active().palette;
             let from_color = self.gauge_color(self.last_l0_pct);
             let to_color = self.gauge_color(data.l0_pct);
 
@@ -102,7 +100,7 @@ impl ContextVisualization {
     ///
     /// Returns a styled string like: "[████████░░] 80%"
     fn render_gauge(&self, pct: u8, width: usize) -> Vec<Span<'static>> {
-        let p = &theme::active().palette;
+        let _p = &theme::active().palette;
         let gauge_width = width.saturating_sub(2); // Account for [ ]
         let filled = (gauge_width * pct as usize / 100).min(gauge_width);
         let empty = gauge_width.saturating_sub(filled);

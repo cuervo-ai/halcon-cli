@@ -649,8 +649,11 @@ pub(crate) fn activate_cenzontle_in_config() {
     }
 
     let new_content = lines.join("\n") + "\n";
-    match std::fs::write(&config_path, new_content) {
-        Ok(()) => {
+
+    // Use safe_write_file for atomic write with ownership pre-check.
+    let result = crate::config_loader::safe_write_file(&config_path, new_content.as_bytes());
+    match result {
+        crate::config_loader::WriteResult::Ok => {
             if default_provider_patched || cenzontle_enabled_patched {
                 println!(
                     "Config updated: default_provider = \"cenzontle\", \
@@ -659,8 +662,27 @@ pub(crate) fn activate_cenzontle_in_config() {
                 );
             }
         }
-        Err(e) => {
-            tracing::warn!("activate_cenzontle_in_config: failed to write config: {e}");
+        crate::config_loader::WriteResult::FallbackUsed {
+            ref fallback_path, ..
+        } => {
+            result.log_on_failure("activate_cenzontle_in_config");
+            if default_provider_patched || cenzontle_enabled_patched {
+                println!(
+                    "Config updated (written to fallback: {})",
+                    fallback_path.display()
+                );
+            }
+        }
+        crate::config_loader::WriteResult::PermissionDenied { ref path, .. } => {
+            result.log_on_failure("activate_cenzontle_in_config");
+            eprintln!(
+                "WARNING: Cannot update {} (Permission denied).",
+                path.display()
+            );
+            eprintln!("  Fix: sudo chown $(whoami) {}", path.display());
+        }
+        crate::config_loader::WriteResult::OtherError { .. } => {
+            result.log_on_failure("activate_cenzontle_in_config");
         }
     }
 }

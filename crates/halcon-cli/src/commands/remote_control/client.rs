@@ -6,9 +6,7 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::protocol::{
-    RemoteControlEvent, RemoteSessionInfo, ReplanPayload,
-};
+use super::protocol::{RemoteControlEvent, RemoteSessionInfo, ReplanPayload};
 
 /// Client for the Halcon remote-control API.
 pub struct RemoteControlClient {
@@ -41,11 +39,7 @@ impl RemoteControlClient {
     // ── REST API Methods ────────────────────────────────────────────────────
 
     /// Create a new chat session.
-    pub async fn create_session(
-        &self,
-        model: &str,
-        provider: &str,
-    ) -> Result<RemoteSessionInfo> {
+    pub async fn create_session(&self, model: &str, provider: &str) -> Result<RemoteSessionInfo> {
         let url = format!("{}/api/v1/chat/sessions", self.base_url);
         let body = serde_json::json!({
             "model": model,
@@ -72,23 +66,11 @@ impl RemoteControlClient {
         let session = &data["session"];
 
         Ok(RemoteSessionInfo {
-            id: session["id"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            id: session["id"].as_str().unwrap_or_default().to_string(),
             title: session["title"].as_str().map(|s| s.to_string()),
-            model: session["model"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            provider: session["provider"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            status: session["status"]
-                .as_str()
-                .unwrap_or("idle")
-                .to_string(),
+            model: session["model"].as_str().unwrap_or_default().to_string(),
+            provider: session["provider"].as_str().unwrap_or_default().to_string(),
+            status: session["status"].as_str().unwrap_or("idle").to_string(),
             message_count: session["message_count"].as_u64().unwrap_or(0) as usize,
         })
     }
@@ -111,10 +93,7 @@ impl RemoteControlClient {
         }
 
         let data: serde_json::Value = resp.json().await?;
-        let sessions = data["sessions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let sessions = data["sessions"].as_array().cloned().unwrap_or_default();
 
         Ok(sessions
             .iter()
@@ -122,10 +101,7 @@ impl RemoteControlClient {
                 id: s["id"].as_str().unwrap_or_default().to_string(),
                 title: s["title"].as_str().map(|t| t.to_string()),
                 model: s["model"].as_str().unwrap_or_default().to_string(),
-                provider: s["provider"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string(),
+                provider: s["provider"].as_str().unwrap_or_default().to_string(),
                 status: s["status"].as_str().unwrap_or("idle").to_string(),
                 message_count: s["message_count"].as_u64().unwrap_or(0) as usize,
             })
@@ -204,11 +180,7 @@ impl RemoteControlClient {
     }
 
     /// Submit a replan payload.
-    pub async fn submit_replan(
-        &self,
-        session_id: &str,
-        payload: &ReplanPayload,
-    ) -> Result<()> {
+    pub async fn submit_replan(&self, session_id: &str, payload: &ReplanPayload) -> Result<()> {
         // Replan is submitted as a special user message with metadata.
         // The backend interprets messages starting with `@replan` as plan replacements.
         let url = format!(
@@ -358,7 +330,10 @@ mod tests {
 
     #[test]
     fn test_extract_host() {
-        assert_eq!(extract_host("ws://127.0.0.1:9849/ws/events"), "127.0.0.1:9849");
+        assert_eq!(
+            extract_host("ws://127.0.0.1:9849/ws/events"),
+            "127.0.0.1:9849"
+        );
         assert_eq!(extract_host("wss://example.com/ws"), "example.com");
     }
 

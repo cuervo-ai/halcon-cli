@@ -22,6 +22,7 @@ pub(crate) struct MatchedOutcome {
 /// Centralized tracker for plan execution with step timing and state management.
 ///
 /// Owned mutably by the agent loop (same ownership model as `ToolLoopGuard`).
+#[derive(Debug)]
 pub(crate) struct ExecutionTracker {
     plan: ExecutionPlan,
     steps: Vec<TrackedStep>,

@@ -58,6 +58,14 @@ impl ToolUseAccumulator {
                     pending.json_buf.push_str(partial_json);
                     true
                 } else {
+                    // B4 remediation: orphaned delta — no ToolUseStart preceded this index.
+                    // Log warning instead of silently discarding, so operators can detect
+                    // provider streaming issues that cause tool call argument loss.
+                    tracing::warn!(
+                        index,
+                        partial_json_len = partial_json.len(),
+                        "ToolUseDelta received without prior ToolUseStart for index — chunk discarded"
+                    );
                     false
                 }
             }

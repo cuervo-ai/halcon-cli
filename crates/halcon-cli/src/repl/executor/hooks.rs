@@ -6,7 +6,7 @@
 use halcon_core::types::ContentBlock;
 
 // Import hook types at module level — no super::super:: inline references.
-use crate::repl::hooks::{HookEventName, HookOutcome, HookRunner, tool_event};
+use crate::repl::hooks::{tool_event, HookEventName, HookOutcome, HookRunner};
 
 use super::{CompletedToolUse, ToolExecResult};
 

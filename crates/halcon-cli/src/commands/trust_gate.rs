@@ -14,14 +14,12 @@
 //!   → Session runs with appropriate restrictions
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use crate::repl::security::config_trust::{
-    ConfigTrustDecision, ConfigTrustStore, McpTrustDecision, McpTrustStore,
-};
+use crate::repl::security::config_trust::{ConfigTrustDecision, ConfigTrustStore};
 use crate::repl::security::workspace_trust::{
     RestrictedMode, RestrictedReason, TrustDecision, WorkspaceTrustStore,
 };
@@ -224,7 +222,7 @@ fn evaluate_config_trust(workspace: &Path, is_interactive: bool) -> bool {
 
 // ── Gate 3: MCP Trust ────────────────────────────────────────────────────
 
-fn evaluate_mcp_trust(workspace: &Path, _is_interactive: bool) -> (Vec<String>, Vec<String>) {
+fn evaluate_mcp_trust(_workspace: &Path, _is_interactive: bool) -> (Vec<String>, Vec<String>) {
     // MCP trust is evaluated lazily when servers are actually connected.
     // At this point we just return empty lists — the actual gating happens
     // in the MCP manager when it calls connect().
@@ -238,7 +236,7 @@ fn evaluate_mcp_trust(workspace: &Path, _is_interactive: bool) -> (Vec<String>, 
 // ── User Prompts ─────────────────────────────────────────────────────────
 
 fn prompt_workspace_trust(workspace: &Path) -> bool {
-    let dir_name = workspace
+    let _dir_name = workspace
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| workspace.to_string_lossy().to_string());

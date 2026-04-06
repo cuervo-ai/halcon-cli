@@ -205,9 +205,7 @@ fn has_cycle(steps: &[ReplanStep]) -> bool {
     for step in steps {
         in_degree.entry(step.id.as_str()).or_insert(0);
         for dep in &step.depends_on {
-            adj.entry(dep.as_str())
-                .or_default()
-                .push(step.id.as_str());
+            adj.entry(dep.as_str()).or_default().push(step.id.as_str());
             *in_degree.entry(step.id.as_str()).or_insert(0) += 1;
         }
     }

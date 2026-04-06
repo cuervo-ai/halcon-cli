@@ -547,6 +547,20 @@ impl TuiApp {
                             error_context.as_deref(),
                         );
                     }
+                    Some(OverlayKind::Settings) => {
+                        let sections = overlay::build_settings_entries(&self.app_config);
+                        overlay::render_settings(
+                            frame,
+                            area,
+                            &sections,
+                            self.settings_selected,
+                            self.settings_editing,
+                            &self.settings_edit_buffer,
+                        );
+                    }
+                    Some(OverlayKind::LspStatus) => {
+                        overlay::render_lsp_status(frame, area, &self.lsp_info);
+                    }
                     None => {}
                 }
 
@@ -562,7 +576,7 @@ impl TuiApp {
                 Some(ev) = key_rx.recv() => {
                     match ev {
                         Event::Key(key) => {
-                            use crossterm::event::{KeyCode, KeyModifiers};
+                            use crossterm::event::KeyCode;
 
                             // NOTE: Ctrl+S is now handled via dispatch_key → InputAction::OpenContextServers.
                             // All keybindings are unified in input::dispatch_key for consistency.

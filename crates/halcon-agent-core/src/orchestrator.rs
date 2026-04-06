@@ -193,21 +193,53 @@ impl DagOrchestrator {
             };
 
             if wave.is_empty() {
-                let ts = tasks.lock().await;
+                let mut ts = tasks.lock().await;
                 let _done = completed.lock().await;
-                let has_pending = ts.iter().any(|t| t.status == SubTaskStatus::Pending);
-                if has_pending {
+                let pending_count = ts
+                    .iter()
+                    .filter(|t| t.status == SubTaskStatus::Pending)
+                    .count();
+                if pending_count > 0 {
                     warn!(
-                        "DAG execution stalled — {} tasks pending but none ready (cycle or missing dep?)",
-                        ts.iter().filter(|t| t.status == SubTaskStatus::Pending).count()
+                        pending_count,
+                        "B6: DAG execution stalled — tasks pending but none ready (dependency failure)"
                     );
+                    // Mark stalled tasks as Failed so callers get explicit error instead of
+                    // silently missing results.
+                    for t in ts.iter_mut() {
+                        if t.status == SubTaskStatus::Pending {
+                            t.status = SubTaskStatus::Failed(
+                                "Dependency stall — prerequisite task failed or was never completed"
+                                    .into(),
+                            );
+                        }
+                    }
                 }
                 break;
             }
 
-            // Check token budget.
-            if self.total_tokens.load(Ordering::Relaxed) >= self.config.max_total_tokens {
-                warn!("Orchestrator token budget exhausted — stopping wave execution");
+            // B6 remediation: Check token budget with explicit failure semantics.
+            // BEFORE: silent `break` left remaining tasks as Pending forever.
+            // AFTER: mark remaining tasks as Failed(BudgetExhausted) and log clearly.
+            if self.total_tokens.load(Ordering::Acquire) >= self.config.max_total_tokens {
+                let consumed = self.total_tokens.load(Ordering::Acquire);
+                warn!(
+                    consumed,
+                    limit = self.config.max_total_tokens,
+                    "B6: orchestrator token budget exhausted — marking remaining tasks as failed"
+                );
+                // Mark all Pending tasks as Failed so they don't hang indefinitely.
+                {
+                    let mut ts = tasks.lock().await;
+                    for t in ts.iter_mut() {
+                        if t.status == SubTaskStatus::Pending {
+                            t.status = SubTaskStatus::Failed(format!(
+                                "Budget exhausted ({consumed}/{} tokens) — task never started",
+                                self.config.max_total_tokens
+                            ));
+                        }
+                    }
+                }
                 break;
             }
 

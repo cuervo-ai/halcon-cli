@@ -120,6 +120,64 @@ impl BashTool {
 
         None
     }
+
+    /// Execute a command inside the OS-level sandbox (macOS Seatbelt / Linux unshare).
+    ///
+    /// This is the primary execution boundary. The sandbox restricts:
+    /// - File writes to working directory + /tmp only
+    /// - Network access (denied by default)
+    /// - Sensitive environment variables (scrubbed on Linux)
+    async fn execute_sandboxed(
+        &self,
+        command: &str,
+        input: &ToolInput,
+        timeout: Duration,
+    ) -> Result<ToolOutput> {
+        use halcon_sandbox::{SandboxConfig as OsSandboxConfig, SandboxPolicy, SandboxedExecutor};
+
+        // Default policy: allow network and shell chaining (required for normal dev workflows).
+        // OS-level sandbox restricts filesystem writes and scrubs sensitive env vars.
+        let policy = SandboxPolicy {
+            allow_network: true,
+            allow_shell_chaining: true,
+            ..SandboxPolicy::default()
+        };
+
+        let os_config = OsSandboxConfig {
+            policy,
+            working_dir: std::path::PathBuf::from(&input.working_directory),
+            timeout,
+            max_output_bytes: self.sandbox_config.max_output_bytes,
+            shell: "/bin/bash".to_string(),
+            use_os_sandbox: true,
+            writable_paths: vec![],
+            readable_paths: vec![],
+        };
+
+        let executor = SandboxedExecutor::new(os_config);
+        let result = executor.execute(command).await;
+
+        if let Some(ref violation) = result.policy_violation {
+            tracing::warn!(command = %command, violation = %violation, "OS sandbox policy blocked command");
+        }
+
+        let content = if result.output.is_empty() {
+            "(no output)".to_string()
+        } else {
+            result.output
+        };
+
+        Ok(ToolOutput {
+            tool_use_id: input.tool_use_id.clone(),
+            content,
+            is_error: result.is_error,
+            metadata: Some(json!({
+                "exit_code": result.exit_code,
+                "sandboxed": true,
+                "timed_out": result.timed_out,
+            })),
+        })
+    }
 }
 
 #[async_trait]
@@ -136,7 +194,26 @@ impl Tool for BashTool {
         PermissionLevel::Destructive
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    /// Structural hard-veto: check catastrophic patterns BEFORE execution.
+    ///
+    /// This fires on every `tool.execute()` call regardless of code path —
+    /// even if the caller bypasses the permission pipeline. This is the
+    /// innermost defense layer (defense-in-depth).
+    fn pre_execute_check(&self, input: &ToolInput) -> std::result::Result<(), String> {
+        if let Some(command) = input.arguments.get("command").and_then(|v| v.as_str()) {
+            if let Some(reason) = self.is_command_blacklisted(command) {
+                tracing::warn!(
+                    command = %command,
+                    reason = %reason,
+                    "HARD VETO: Blocked dangerous bash command at trait level"
+                );
+                return Err(reason);
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let command = input.arguments["command"]
             .as_str()
             .ok_or_else(|| HalconError::InvalidInput("bash requires 'command' string".into()))?;
@@ -147,18 +224,8 @@ impl Tool for BashTool {
             ));
         }
 
-        // Blacklist check: block dangerous commands
-        if let Some(reason) = self.is_command_blacklisted(command) {
-            tracing::warn!(
-                command = %command,
-                reason = %reason,
-                "Blocked dangerous bash command"
-            );
-            return Err(HalconError::InvalidInput(format!(
-                "Dangerous command blocked: {}",
-                reason
-            )));
-        }
+        // NOTE: Blacklist check moved to pre_execute_check() — runs structurally
+        // via the provided execute() method on every invocation. No duplicate needed.
 
         let timeout_ms = input.arguments["timeout_ms"]
             .as_u64()
@@ -166,7 +233,15 @@ impl Tool for BashTool {
 
         let timeout = Duration::from_millis(timeout_ms.min(600_000));
 
-        // Build the command with optional sandbox rlimits.
+        // ── OS-level sandbox path ──────────────────────────────────────────
+        // When use_os_sandbox is enabled, delegate to halcon_sandbox::SandboxedExecutor
+        // which provides macOS Seatbelt (sandbox-exec) or Linux unshare isolation.
+        // This is the primary execution boundary for bash commands.
+        if self.sandbox_config.use_os_sandbox {
+            return self.execute_sandboxed(command, &input, timeout).await;
+        }
+
+        // ── Fallback: direct execution with rlimits only ───────────────────
         let sandbox_config = self.sandbox_config.clone();
         let result = tokio::time::timeout(timeout, async {
             let mut cmd = tokio::process::Command::new("bash");

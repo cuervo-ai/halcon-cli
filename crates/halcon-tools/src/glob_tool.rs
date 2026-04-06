@@ -36,7 +36,7 @@ impl Tool for GlobTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let pattern = input.arguments["pattern"]
             .as_str()
             .ok_or_else(|| HalconError::InvalidInput("glob requires 'pattern' string".into()))?;

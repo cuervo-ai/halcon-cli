@@ -439,7 +439,7 @@ impl Tool for DepCheckTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "dep_check"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let working_dir = &input.working_directory;
 
         // Allow caller to override ecosystem detection.

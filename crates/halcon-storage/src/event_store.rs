@@ -143,8 +143,15 @@ pub struct EventStore {
 
 impl EventStore {
     /// Get a locked reference to the connection.
+    ///
+    /// If the Mutex is poisoned (a previous thread panicked while holding the lock),
+    /// we recover the guard and continue — the SQLite connection itself is still valid
+    /// because WAL mode + busy_timeout handle concurrent access at the DB level.
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap()
+        self.conn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("EventStore mutex was poisoned; recovering guard");
+            poisoned.into_inner()
+        })
     }
 
     /// Open or create the event store at the given path.
@@ -324,8 +331,7 @@ impl EventStore {
             Ok(StoredEvent {
                 seq: seq as u64,
                 event_id: Uuid::parse_str(&event_id_str).unwrap_or_default(),
-                session_id: session_id_str
-                    .and_then(|s| Uuid::parse_str(&s).ok()),
+                session_id: session_id_str.and_then(|s| Uuid::parse_str(&s).ok()),
                 category: EventCategory::from_str(&category_str),
                 event_type,
                 payload,
@@ -341,7 +347,11 @@ impl EventStore {
     }
 
     /// Get events after a sequence number (for streaming / polling).
-    pub fn events_after(&self, after_seq: u64, limit: usize) -> Result<Vec<StoredEvent>, rusqlite::Error> {
+    pub fn events_after(
+        &self,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, rusqlite::Error> {
         self.replay(&ReplayQuery {
             from_seq: after_seq + 1,
             limit,
@@ -418,38 +428,29 @@ impl EventStore {
         let total_events: i64 =
             self.conn()
                 .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
-        let max_seq: i64 = self
-            .conn()
-            .query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |row| {
-                row.get(0)
-            })?;
+        let max_seq: i64 =
+            self.conn()
+                .query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |row| {
+                    row.get(0)
+                })?;
         let snapshot_count: i64 =
             self.conn()
                 .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))?;
 
         let oldest: Option<String> = self
             .conn()
-            .query_row(
-                "SELECT MIN(timestamp) FROM events",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MIN(timestamp) FROM events", [], |row| row.get(0))
             .optional()?
             .flatten();
 
         let newest: Option<String> = self
             .conn()
-            .query_row(
-                "SELECT MAX(timestamp) FROM events",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(timestamp) FROM events", [], |row| row.get(0))
             .optional()?
             .flatten();
 
         let conn = self.conn();
-        let mut stmt = conn
-            .prepare("SELECT category, COUNT(*) FROM events GROUP BY category")?;
+        let mut stmt = conn.prepare("SELECT category, COUNT(*) FROM events GROUP BY category")?;
         let by_category: Vec<(String, u64)> = stmt
             .query_map([], |row| {
                 let cat: String = row.get(0)?;
@@ -564,13 +565,37 @@ mod tests {
         let sid2 = Uuid::new_v4();
 
         store
-            .append(Uuid::new_v4(), Some(sid1), EventCategory::Execution, "e1", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                Some(sid1),
+                EventCategory::Execution,
+                "e1",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), Some(sid2), EventCategory::Execution, "e2", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                Some(sid2),
+                EventCategory::Execution,
+                "e2",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), Some(sid1), EventCategory::Tool, "e3", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                Some(sid1),
+                EventCategory::Tool,
+                "e3",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
 
         let filtered = store
@@ -588,13 +613,37 @@ mod tests {
         let store = EventStore::open_in_memory().unwrap();
 
         store
-            .append(Uuid::new_v4(), None, EventCategory::Execution, "e1", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::Execution,
+                "e1",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), None, EventCategory::Permission, "e2", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::Permission,
+                "e2",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), None, EventCategory::Execution, "e3", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::Execution,
+                "e3",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
 
         let filtered = store
@@ -614,10 +663,26 @@ mod tests {
         let sid = Uuid::new_v4();
 
         store
-            .append(Uuid::new_v4(), Some(sid), EventCategory::Execution, "e1", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                Some(sid),
+                EventCategory::Execution,
+                "e1",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), Some(sid), EventCategory::Execution, "e2", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                Some(sid),
+                EventCategory::Execution,
+                "e2",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
 
         let snap_seq = store
@@ -635,13 +700,37 @@ mod tests {
         let store = EventStore::open_in_memory().unwrap();
 
         store
-            .append(Uuid::new_v4(), None, EventCategory::System, "e1", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::System,
+                "e1",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), None, EventCategory::System, "e2", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::System,
+                "e2",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), None, EventCategory::System, "e3", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::System,
+                "e3",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
 
         let after_1 = store.events_after(1, 100).unwrap();
@@ -655,21 +744,51 @@ mod tests {
         let store = EventStore::open_in_memory().unwrap();
 
         store
-            .append(Uuid::new_v4(), None, EventCategory::Execution, "e1", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::Execution,
+                "e1",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), None, EventCategory::Execution, "e2", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::Execution,
+                "e2",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .append(Uuid::new_v4(), None, EventCategory::Permission, "e3", "{}", None, None)
+            .append(
+                Uuid::new_v4(),
+                None,
+                EventCategory::Permission,
+                "e3",
+                "{}",
+                None,
+                None,
+            )
             .unwrap();
 
         let stats = store.stats().unwrap();
         assert_eq!(stats.total_events, 3);
         assert_eq!(stats.max_seq, 3);
         assert_eq!(stats.snapshot_count, 0);
-        assert!(stats.events_by_category.iter().any(|(c, n)| c == "execution" && *n == 2));
-        assert!(stats.events_by_category.iter().any(|(c, n)| c == "permission" && *n == 1));
+        assert!(stats
+            .events_by_category
+            .iter()
+            .any(|(c, n)| c == "execution" && *n == 2));
+        assert!(stats
+            .events_by_category
+            .iter()
+            .any(|(c, n)| c == "permission" && *n == 1));
     }
 
     #[test]
@@ -754,12 +873,57 @@ mod tests {
         let store = EventStore::open_in_memory().unwrap();
         let sid = Uuid::new_v4();
 
-        store.append(Uuid::new_v4(), Some(sid), EventCategory::Tool, "t1", "{}", None, None).unwrap();
-        store.append(Uuid::new_v4(), Some(sid), EventCategory::Tool, "t2", "{}", None, None).unwrap();
-        store.append(Uuid::new_v4(), Some(sid), EventCategory::Permission, "p1", "{}", None, None).unwrap();
+        store
+            .append(
+                Uuid::new_v4(),
+                Some(sid),
+                EventCategory::Tool,
+                "t1",
+                "{}",
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .append(
+                Uuid::new_v4(),
+                Some(sid),
+                EventCategory::Tool,
+                "t2",
+                "{}",
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .append(
+                Uuid::new_v4(),
+                Some(sid),
+                EventCategory::Permission,
+                "p1",
+                "{}",
+                None,
+                None,
+            )
+            .unwrap();
 
-        assert_eq!(store.count_by_category(Some(sid), EventCategory::Tool).unwrap(), 2);
-        assert_eq!(store.count_by_category(Some(sid), EventCategory::Permission).unwrap(), 1);
-        assert_eq!(store.count_by_category(Some(sid), EventCategory::Agent).unwrap(), 0);
+        assert_eq!(
+            store
+                .count_by_category(Some(sid), EventCategory::Tool)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .count_by_category(Some(sid), EventCategory::Permission)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_by_category(Some(sid), EventCategory::Agent)
+                .unwrap(),
+            0
+        );
     }
 }

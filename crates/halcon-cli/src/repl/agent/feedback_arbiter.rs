@@ -113,9 +113,9 @@ impl Default for AggregatedSignals {
             escalation_count: 0,
             max_escalation_attempts: 3, // Xiyo: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
             compact_count: 0,
-            max_compact_attempts: 2,    // Spec: max 2 compaction attempts
+            max_compact_attempts: 2, // Spec: max 2 compaction attempts
             replan_count: 0,
-            max_replan_attempts: 2,     // Spec: max 2 replan attempts
+            max_replan_attempts: 2, // Spec: max 2 replan attempts
             diminishing_returns: false,
         }
     }
@@ -168,10 +168,7 @@ impl FeedbackArbiter {
     ) -> TurnDecision {
         // ── 1. Hard limits (unconditional halts) ─────────────────────────
         if signals.user_cancelled {
-            tracing::debug!(
-                turn = state.turn_count,
-                "arbiter: HALT — user cancelled"
-            );
+            tracing::debug!(turn = state.turn_count, "arbiter: HALT — user cancelled");
             return TurnDecision::Halt(HaltReason::UserCancelled);
         }
 
@@ -212,9 +209,20 @@ impl FeedbackArbiter {
             });
         }
 
-        // Diminishing returns (Xiyo pattern: delta < 500 tokens for 2 consecutive)
-        if signals.diminishing_returns {
-            tracing::info!("arbiter: HALT — diminishing returns");
+        // Diminishing returns — soft signal (Frontier AAA).
+        //
+        // Token-based diminishing returns alone is unreliable: two short responses
+        // may be perfectly productive (e.g., "run test" → "test passed"). Only halt
+        // when BOTH token deltas are low AND the stagnation tracker confirms repeated
+        // patterns. This prevents false positives on short but productive rounds.
+        //
+        // Paper: Renze 2024 — "self-reflection most effective when accuracy is low;
+        // for easier prompts, reflection can cause performance deterioration."
+        if signals.diminishing_returns && signals.consecutive_stalls >= 2 {
+            tracing::info!(
+                stalls = signals.consecutive_stalls,
+                "arbiter: HALT — diminishing returns confirmed by stagnation"
+            );
             return TurnDecision::Halt(HaltReason::DiminishingReturns);
         }
 
@@ -225,12 +233,10 @@ impl FeedbackArbiter {
                     attempts = signals.compact_count,
                     "arbiter: HALT — compaction exhausted"
                 );
-                return TurnDecision::Halt(HaltReason::UnrecoverableError(
-                    format!(
-                        "prompt_too_long recovery exhausted after {} compaction attempts",
-                        signals.compact_count
-                    ),
-                ));
+                return TurnDecision::Halt(HaltReason::UnrecoverableError(format!(
+                    "prompt_too_long recovery exhausted after {} compaction attempts",
+                    signals.compact_count
+                )));
             }
             tracing::debug!(
                 attempt = signals.compact_count + 1,
@@ -258,12 +264,10 @@ impl FeedbackArbiter {
                     attempts = signals.escalation_count,
                     "arbiter: HALT — escalation exhausted"
                 );
-                return TurnDecision::Halt(HaltReason::UnrecoverableError(
-                    format!(
-                        "max_output_tokens recovery exhausted after {} attempts",
-                        signals.escalation_count
-                    ),
-                ));
+                return TurnDecision::Halt(HaltReason::UnrecoverableError(format!(
+                    "max_output_tokens recovery exhausted after {} attempts",
+                    signals.escalation_count
+                )));
             }
             tracing::debug!(
                 attempt = signals.escalation_count + 1,
@@ -354,7 +358,11 @@ mod tests {
     }
 
     fn state() -> TurnState {
-        TurnState { turn_count: 0, max_turns: 20, budget_exhausted: false }
+        TurnState {
+            turn_count: 0,
+            max_turns: 20,
+            budget_exhausted: false,
+        }
     }
 
     fn sigs() -> AggregatedSignals {
@@ -365,80 +373,128 @@ mod tests {
 
     #[test]
     fn halt_user_cancelled() {
-        let sig = AggregatedSignals { user_cancelled: true, ..Default::default() };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Halt(HaltReason::UserCancelled));
+        let sig = AggregatedSignals {
+            user_cancelled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Halt(HaltReason::UserCancelled)
+        );
     }
 
     #[test]
     fn halt_max_turns() {
-        let s = TurnState { turn_count: 20, max_turns: 20, budget_exhausted: false };
-        assert_eq!(arbiter().decide(&resp(), &s, &sigs()),
-            TurnDecision::Halt(HaltReason::MaxTurnsReached));
+        let s = TurnState {
+            turn_count: 20,
+            max_turns: 20,
+            budget_exhausted: false,
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &s, &sigs()),
+            TurnDecision::Halt(HaltReason::MaxTurnsReached)
+        );
     }
 
     #[test]
     fn halt_budget() {
-        let s = TurnState { turn_count: 5, max_turns: 20, budget_exhausted: true };
-        assert_eq!(arbiter().decide(&resp(), &s, &sigs()),
-            TurnDecision::Halt(HaltReason::BudgetExhausted));
+        let s = TurnState {
+            turn_count: 5,
+            max_turns: 20,
+            budget_exhausted: true,
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &s, &sigs()),
+            TurnDecision::Halt(HaltReason::BudgetExhausted)
+        );
     }
 
     #[test]
     fn halt_cost_limit() {
         let sig = AggregatedSignals {
-            cost_usd: 5.0, cost_limit_usd: 4.0, ..Default::default()
+            cost_usd: 5.0,
+            cost_limit_usd: 4.0,
+            ..Default::default()
         };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
             TurnDecision::Halt(HaltReason::CostLimitExceeded {
-                spent_usd: 5.0, limit_usd: 4.0
-            }));
+                spent_usd: 5.0,
+                limit_usd: 4.0
+            })
+        );
     }
 
     #[test]
     fn halt_stagnation_abort() {
         let sig = AggregatedSignals {
-            consecutive_stalls: 5, ..Default::default()
+            consecutive_stalls: 5,
+            ..Default::default()
         };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
             TurnDecision::Halt(HaltReason::StagnationAbort {
                 consecutive_stalls: 5
-            }));
+            })
+        );
     }
 
     // ── Recovery ─────────────────────────────────────────────────────────
 
     #[test]
     fn recover_compact() {
-        let r = TurnResponse { is_prompt_too_long: true, ..resp() };
-        assert_eq!(arbiter().decide(&r, &state(), &sigs()),
-            TurnDecision::Recover(RecoveryAction::Compact));
+        let r = TurnResponse {
+            is_prompt_too_long: true,
+            ..resp()
+        };
+        assert_eq!(
+            arbiter().decide(&r, &state(), &sigs()),
+            TurnDecision::Recover(RecoveryAction::Compact)
+        );
     }
 
     #[test]
     fn recover_reactive_compact() {
-        let r = TurnResponse { is_reactive_overflow: true, ..resp() };
-        assert_eq!(arbiter().decide(&r, &state(), &sigs()),
-            TurnDecision::Recover(RecoveryAction::ReactiveCompact));
+        let r = TurnResponse {
+            is_reactive_overflow: true,
+            ..resp()
+        };
+        assert_eq!(
+            arbiter().decide(&r, &state(), &sigs()),
+            TurnDecision::Recover(RecoveryAction::ReactiveCompact)
+        );
     }
 
     #[test]
     fn recover_escalate() {
-        let r = TurnResponse { hit_max_output_tokens: true, ..resp() };
-        assert_eq!(arbiter().decide(&r, &state(), &sigs()),
-            TurnDecision::Recover(RecoveryAction::EscalateTokens));
+        let r = TurnResponse {
+            hit_max_output_tokens: true,
+            ..resp()
+        };
+        assert_eq!(
+            arbiter().decide(&r, &state(), &sigs()),
+            TurnDecision::Recover(RecoveryAction::EscalateTokens)
+        );
     }
 
     #[test]
     fn recover_stop_hook() {
-        let sig = AggregatedSignals { stop_hook_blocked: true, ..Default::default() };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Recover(RecoveryAction::StopHookBlocked));
+        let sig = AggregatedSignals {
+            stop_hook_blocked: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Recover(RecoveryAction::StopHookBlocked)
+        );
     }
 
     #[test]
     fn recover_stagnation_replan() {
-        let sig = AggregatedSignals { consecutive_stalls: 3, ..Default::default() };
+        let sig = AggregatedSignals {
+            consecutive_stalls: 3,
+            ..Default::default()
+        };
         match arbiter().decide(&resp(), &state(), &sig) {
             TurnDecision::Recover(RecoveryAction::Replan { .. }) => {}
             other => panic!("expected Replan, got {other:?}"),
@@ -451,10 +507,12 @@ mod tests {
             critic_feedback: Some("missing edge case handling".into()),
             ..Default::default()
         };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
             TurnDecision::Recover(RecoveryAction::ReplanWithFeedback(
                 "missing edge case handling".into()
-            )));
+            ))
+        );
     }
 
     #[test]
@@ -464,23 +522,34 @@ mod tests {
             ..Default::default()
         };
         // Should complete, not replan
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Complete { stop_reason: StopReason::EndTurn });
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Complete {
+                stop_reason: StopReason::EndTurn
+            }
+        );
     }
 
     // ── Complete ─────────────────────────────────────────────────────────
 
     #[test]
     fn complete_end_turn() {
-        assert_eq!(arbiter().decide(&resp(), &state(), &sigs()),
-            TurnDecision::Complete { stop_reason: StopReason::EndTurn });
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sigs()),
+            TurnDecision::Complete {
+                stop_reason: StopReason::EndTurn
+            }
+        );
     }
 
     // ── Fallback halt ────────────────────────────────────────────────────
 
     #[test]
     fn halt_unknown_stop() {
-        let r = TurnResponse { stop_reason: StopReason::StopSequence, ..resp() };
+        let r = TurnResponse {
+            stop_reason: StopReason::StopSequence,
+            ..resp()
+        };
         match arbiter().decide(&r, &state(), &sigs()) {
             TurnDecision::Halt(HaltReason::UnrecoverableError(m)) => {
                 assert!(m.contains("StopSequence"));
@@ -493,78 +562,134 @@ mod tests {
 
     #[test]
     fn cancel_beats_max_turns() {
-        let s = TurnState { turn_count: 20, max_turns: 20, budget_exhausted: false };
-        let sig = AggregatedSignals { user_cancelled: true, ..Default::default() };
-        assert_eq!(arbiter().decide(&resp(), &s, &sig),
-            TurnDecision::Halt(HaltReason::UserCancelled));
+        let s = TurnState {
+            turn_count: 20,
+            max_turns: 20,
+            budget_exhausted: false,
+        };
+        let sig = AggregatedSignals {
+            user_cancelled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &s, &sig),
+            TurnDecision::Halt(HaltReason::UserCancelled)
+        );
     }
 
     #[test]
     fn hard_limits_beat_recovery() {
-        let r = TurnResponse { is_prompt_too_long: true, ..resp() };
-        let s = TurnState { turn_count: 20, max_turns: 20, budget_exhausted: false };
-        assert_eq!(arbiter().decide(&r, &s, &sigs()),
-            TurnDecision::Halt(HaltReason::MaxTurnsReached));
+        let r = TurnResponse {
+            is_prompt_too_long: true,
+            ..resp()
+        };
+        let s = TurnState {
+            turn_count: 20,
+            max_turns: 20,
+            budget_exhausted: false,
+        };
+        assert_eq!(
+            arbiter().decide(&r, &s, &sigs()),
+            TurnDecision::Halt(HaltReason::MaxTurnsReached)
+        );
     }
 
     #[test]
     fn compact_beats_reactive() {
         let r = TurnResponse {
-            is_prompt_too_long: true, is_reactive_overflow: true, ..resp()
+            is_prompt_too_long: true,
+            is_reactive_overflow: true,
+            ..resp()
         };
-        assert_eq!(arbiter().decide(&r, &state(), &sigs()),
-            TurnDecision::Recover(RecoveryAction::Compact));
+        assert_eq!(
+            arbiter().decide(&r, &state(), &sigs()),
+            TurnDecision::Recover(RecoveryAction::Compact)
+        );
     }
 
     #[test]
     fn hook_beats_stagnation() {
         let sig = AggregatedSignals {
-            stop_hook_blocked: true, consecutive_stalls: 3, ..Default::default()
+            stop_hook_blocked: true,
+            consecutive_stalls: 3,
+            ..Default::default()
         };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Recover(RecoveryAction::StopHookBlocked));
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Recover(RecoveryAction::StopHookBlocked)
+        );
     }
 
     #[test]
     fn stop_hook_prevents_completion() {
-        let sig = AggregatedSignals { stop_hook_blocked: true, ..Default::default() };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Recover(RecoveryAction::StopHookBlocked));
+        let sig = AggregatedSignals {
+            stop_hook_blocked: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Recover(RecoveryAction::StopHookBlocked)
+        );
     }
 
     #[test]
     fn one_turn_before_max_allows_completion() {
-        let s = TurnState { turn_count: 19, max_turns: 20, budget_exhausted: false };
-        assert_eq!(arbiter().decide(&resp(), &s, &sigs()),
-            TurnDecision::Complete { stop_reason: StopReason::EndTurn });
+        let s = TurnState {
+            turn_count: 19,
+            max_turns: 20,
+            budget_exhausted: false,
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &s, &sigs()),
+            TurnDecision::Complete {
+                stop_reason: StopReason::EndTurn
+            }
+        );
     }
 
     #[test]
     fn stagnation_abort_beats_replan() {
-        let sig = AggregatedSignals { consecutive_stalls: 5, ..Default::default() };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
+        let sig = AggregatedSignals {
+            consecutive_stalls: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
             TurnDecision::Halt(HaltReason::StagnationAbort {
                 consecutive_stalls: 5
-            }));
+            })
+        );
     }
 
     // ── Recovery counter tests ───────────────────────────────────────────
 
     #[test]
     fn escalate_allowed_when_under_limit() {
-        let r = TurnResponse { hit_max_output_tokens: true, ..resp() };
-        let sig = AggregatedSignals {
-            escalation_count: 1, max_escalation_attempts: 3, ..Default::default()
+        let r = TurnResponse {
+            hit_max_output_tokens: true,
+            ..resp()
         };
-        assert_eq!(arbiter().decide(&r, &state(), &sig),
-            TurnDecision::Recover(RecoveryAction::EscalateTokens));
+        let sig = AggregatedSignals {
+            escalation_count: 1,
+            max_escalation_attempts: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&r, &state(), &sig),
+            TurnDecision::Recover(RecoveryAction::EscalateTokens)
+        );
     }
 
     #[test]
     fn escalate_halts_when_exhausted() {
-        let r = TurnResponse { hit_max_output_tokens: true, ..resp() };
+        let r = TurnResponse {
+            hit_max_output_tokens: true,
+            ..resp()
+        };
         let sig = AggregatedSignals {
-            escalation_count: 3, max_escalation_attempts: 3, ..Default::default()
+            escalation_count: 3,
+            max_escalation_attempts: 3,
+            ..Default::default()
         };
         match arbiter().decide(&r, &state(), &sig) {
             TurnDecision::Halt(HaltReason::UnrecoverableError(m)) => {
@@ -575,21 +700,46 @@ mod tests {
     }
 
     #[test]
-    fn halt_diminishing_returns() {
+    fn diminishing_returns_alone_allows_completion() {
+        // Frontier AAA: diminishing returns alone is NOT enough to halt.
+        // Without stagnation confirmation, model completes normally.
         let sig = AggregatedSignals {
-            diminishing_returns: true, ..Default::default()
+            diminishing_returns: true,
+            ..Default::default()
         };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Halt(HaltReason::DiminishingReturns));
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Complete {
+                stop_reason: StopReason::EndTurn
+            }
+        );
     }
 
     #[test]
-    fn diminishing_returns_beats_completion() {
-        // Even if model says EndTurn, diminishing returns is a hard limit
+    fn diminishing_returns_with_stagnation_halts() {
+        // Frontier AAA: diminishing returns + stagnation = confirmed halt.
         let sig = AggregatedSignals {
-            diminishing_returns: true, ..Default::default()
+            diminishing_returns: true,
+            consecutive_stalls: 2,
+            ..Default::default()
         };
-        assert_eq!(arbiter().decide(&resp(), &state(), &sig),
-            TurnDecision::Halt(HaltReason::DiminishingReturns));
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Halt(HaltReason::DiminishingReturns)
+        );
+    }
+
+    #[test]
+    fn diminishing_returns_with_stagnation_beats_completion() {
+        // Combined signal overrides normal completion
+        let sig = AggregatedSignals {
+            diminishing_returns: true,
+            consecutive_stalls: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter().decide(&resp(), &state(), &sig),
+            TurnDecision::Halt(HaltReason::DiminishingReturns)
+        );
     }
 }

@@ -45,13 +45,27 @@ pub struct ContextPipelineConfig {
 impl Default for ContextPipelineConfig {
     fn default() -> Self {
         Self {
-            max_context_tokens: 200_000,
+            max_context_tokens: 200_000, // Safe default for Claude; override with for_model().
             hot_buffer_capacity: 8,
             default_tool_output_budget: 2_000,
             l1_merge_threshold: 3_000,
             max_cold_entries: 100,
             max_semantic_entries: 200,
             max_archive_entries: 500,
+        }
+    }
+}
+
+impl ContextPipelineConfig {
+    /// Create a config derived from the model's actual context window.
+    ///
+    /// Uses `halcon_core::types::model_context_window()` as the single source
+    /// of truth, avoiding the 200K hardcode for models with different capacities.
+    pub fn for_model(model: &str) -> Self {
+        let context_window = halcon_core::types::model_context_window(model);
+        Self {
+            max_context_tokens: context_window,
+            ..Self::default()
         }
     }
 }

@@ -197,7 +197,7 @@ fn rgb_to_ansi(r: u8, g: u8, b: u8) -> Color {
     let luminance = 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64;
 
     // Dark vs bright threshold
-    let is_bright = luminance > 128.0;
+    let _is_bright = luminance > 128.0;
 
     // Determine dominant channel
     let max_channel = r.max(g).max(b);

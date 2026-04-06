@@ -397,18 +397,21 @@ pub(super) async fn build(
     }
 
     // Emit AgentCompleted event.
-    let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-        agent_type: halcon_core::types::AgentType::Chat,
-        result: halcon_core::types::AgentResult {
-            success: matches!(
-                stop_condition,
-                StopCondition::EndTurn | StopCondition::ForcedSynthesis
-            ),
-            summary: format!("{} rounds, {:?}", state.rounds, stop_condition),
-            files_modified: vec![],
-            tools_used: vec![],
-        },
-    }));
+    halcon_core::emit_event(
+        event_tx,
+        DomainEvent::new(EventPayload::AgentCompleted {
+            agent_type: halcon_core::types::AgentType::Chat,
+            result: halcon_core::types::AgentResult {
+                success: matches!(
+                    stop_condition,
+                    StopCondition::EndTurn | StopCondition::ForcedSynthesis
+                ),
+                summary: format!("{} rounds, {:?}", state.rounds, stop_condition),
+                files_modified: vec![],
+                tools_used: vec![],
+            },
+        }),
+    );
 
     // ── PHASE-2 COMPLETION VALIDATOR (advisory only, feature-gated) ──────────
     // When feature = "completion-validator" is enabled, run a keyword-based
@@ -625,6 +628,7 @@ pub(super) async fn build(
             current_rounds,
             None,
         ),
+        decision_log: state.decision_log.clone(),
     };
 
     // BRECHA-A: DirectExecution hallucination guard.

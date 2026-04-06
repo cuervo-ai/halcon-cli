@@ -312,7 +312,7 @@ mod tests {
                 "required": ["message"]
             })
         }
-        async fn execute(&self, input: ToolInput) -> CoreResult<ToolOutput> {
+        async fn execute_inner(&self, input: ToolInput) -> CoreResult<ToolOutput> {
             let msg = input
                 .arguments
                 .get("message")
@@ -348,7 +348,7 @@ mod tests {
                 "required": []
             })
         }
-        async fn execute(&self, _input: ToolInput) -> CoreResult<ToolOutput> {
+        async fn execute_inner(&self, _input: ToolInput) -> CoreResult<ToolOutput> {
             Err(halcon_core::error::HalconError::ToolExecutionFailed {
                 tool: "fail".into(),
                 message: "intentional failure".into(),

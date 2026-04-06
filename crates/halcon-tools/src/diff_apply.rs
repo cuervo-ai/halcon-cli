@@ -206,7 +206,7 @@ impl Tool for DiffApplyTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "diff_apply"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let path = input.arguments["path"]
             .as_str()
             .ok_or_else(|| HalconError::InvalidInput("diff_apply requires 'path' string".into()))?;

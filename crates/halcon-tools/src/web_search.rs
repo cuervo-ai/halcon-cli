@@ -130,7 +130,7 @@ impl Tool for WebSearchTool {
         false
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         // Extract and validate query
         let query = input.arguments["query"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("web_search requires 'query' string".into())

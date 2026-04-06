@@ -13,6 +13,21 @@ pub fn event_bus(capacity: usize) -> (EventSender, EventReceiver) {
     tokio::sync::broadcast::channel(capacity)
 }
 
+/// Send a domain event, logging a warning if the channel has no receivers.
+///
+/// Replaces the `let _ = event_tx.send(...)` anti-pattern that silently discards
+/// send errors. Critical events (AgentCompleted, GuardrailTriggered, PlanGenerated)
+/// should use this to ensure observability when listeners are missing.
+#[inline]
+pub fn emit_event(tx: &EventSender, event: types::DomainEvent) {
+    if let Err(e) = tx.send(event) {
+        tracing::debug!(
+            payload = %format!("{:?}", e.0.payload).chars().take(120).collect::<String>(),
+            "event_tx: no receivers for domain event"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

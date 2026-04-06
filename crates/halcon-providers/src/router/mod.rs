@@ -28,8 +28,14 @@
 mod intent;
 mod policy;
 
+#[cfg(feature = "paloma")]
+pub mod paloma_adapter;
+
 pub use intent::{IntentClassifier, TaskIntent};
 pub use policy::{RoutingDecision, RoutingTierExt};
+
+#[cfg(feature = "paloma")]
+pub use paloma_adapter::PalomaRouter;
 
 use policy::{
     BudgetConstraintStrategy, FallbackChain, ForceOverrideStrategy, IntentBasedStrategy,

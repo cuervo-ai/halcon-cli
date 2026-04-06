@@ -47,7 +47,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
 
 use crate::tui::events::UiEvent;
 use architecture_intelligence::{
@@ -91,10 +90,10 @@ use tools::{
 ///
 /// Same public API as before — all call sites in app.rs remain unchanged.
 /// Internally uses 5-wave parallel execution with resource discovery (Ph 103–109).
-pub async fn analyze_and_emit(tx: mpsc::UnboundedSender<UiEvent>, cwd: PathBuf) {
+pub async fn analyze_and_emit(tx: crate::tui::events::BoundedUiSender, cwd: PathBuf) {
     macro_rules! info {
         ($msg:expr) => {
-            let _ = tx.send(UiEvent::Info($msg));
+            tx.send(UiEvent::Info($msg));
         };
     }
 
@@ -118,12 +117,12 @@ pub async fn analyze_and_emit(tx: mpsc::UnboundedSender<UiEvent>, cwd: PathBuf) 
             .join("HALCON.md")
             .to_string_lossy()
             .to_string();
-        let _ = tx.send(UiEvent::ProjectHealthCalculated {
+        tx.send(UiEvent::ProjectHealthCalculated {
             score: cached.health_score,
             issues: cached.health_issues.clone(),
             recommendations: cached.health_recommendations.clone(),
         });
-        let _ = tx.send(UiEvent::ProjectAnalysisComplete {
+        tx.send(UiEvent::ProjectAnalysisComplete {
             root: root.to_string_lossy().to_string(),
             project_type: cached.project_type.clone(),
             package_name: cached.package_name.clone(),
@@ -385,14 +384,14 @@ pub async fn analyze_and_emit(tx: mpsc::UnboundedSender<UiEvent>, cwd: PathBuf) 
 
     info!("[init] ✓ Bootstrap completo — análisis contextual listo".to_string());
 
-    let _ = tx.send(UiEvent::ProjectHealthCalculated {
+    tx.send(UiEvent::ProjectHealthCalculated {
         score,
         issues: issues.clone(),
         recommendations: recommendations.clone(),
     });
 
     let has_git = ctx.branch.is_some();
-    let _ = tx.send(UiEvent::ProjectAnalysisComplete {
+    tx.send(UiEvent::ProjectAnalysisComplete {
         root: ctx.root.clone(),
         project_type: ctx.project_type.clone(),
         package_name: ctx.package_name.clone(),
@@ -474,7 +473,11 @@ mod tests {
         .unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        analyze_and_emit(tx, tmp.path().to_path_buf()).await;
+        analyze_and_emit(
+            crate::tui::events::BoundedUiSender::new(tx),
+            tmp.path().to_path_buf(),
+        )
+        .await;
 
         let mut got_complete = false;
         let mut got_health = false;
@@ -511,7 +514,11 @@ mod tests {
     async fn no_panic_on_empty_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        analyze_and_emit(tx, tmp.path().to_path_buf()).await;
+        analyze_and_emit(
+            crate::tui::events::BoundedUiSender::new(tx),
+            tmp.path().to_path_buf(),
+        )
+        .await;
         let mut events = vec![];
         while let Ok(ev) = rx.try_recv() {
             events.push(ev);
@@ -530,7 +537,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        analyze_and_emit(tx, tmp.path().to_path_buf()).await;
+        analyze_and_emit(
+            crate::tui::events::BoundedUiSender::new(tx),
+            tmp.path().to_path_buf(),
+        )
+        .await;
         let infos: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|ev| {
                 if let UiEvent::Info(s) = ev {

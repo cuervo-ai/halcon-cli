@@ -465,7 +465,7 @@ impl Tool for SymbolSearchTool {
         false
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let query = input.arguments["query"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("symbol_search requires 'query' string".into())
         })?;

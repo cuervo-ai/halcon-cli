@@ -74,7 +74,7 @@ impl Tool for CenzontleMcpTool {
         self.permission
     }
 
-    async fn execute(&self, input: ToolInput) -> HalconResult<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> HalconResult<ToolOutput> {
         let req = McpToolCallRequest {
             name: self.original_name.clone(),
             arguments: input.arguments,

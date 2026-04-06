@@ -12,14 +12,14 @@ pub(crate) use crossterm::event::{
 pub(crate) use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 pub(crate) use crossterm::ExecutableCommand;
 pub(crate) use ratatui::backend::CrosstermBackend;
-pub(crate) use ratatui::layout::{Constraint, Direction, Layout, Rect};
-pub(crate) use ratatui::style::{Modifier, Style};
+pub(crate) use ratatui::layout::Rect;
+pub(crate) use ratatui::style::Style;
 pub(crate) use ratatui::text::{Line, Span};
 pub(crate) use ratatui::widgets::{Block, Borders, Paragraph};
 pub(crate) use ratatui::Terminal;
 pub(crate) use tokio::sync::mpsc;
 
-pub(crate) use super::activity_types::ActivityLine; // P0.1B: Migrated to activity_types
+// P0.1B: Migrated to activity_types
 pub(crate) use super::clipboard::{paste_safe, PasteOutcome};
 pub(crate) use super::constants;
 pub(crate) use super::conversational_overlay::ConversationalOverlay;
@@ -28,7 +28,7 @@ pub(crate) use super::highlight::HighlightManager;
 pub(crate) use super::input;
 pub(crate) use super::layout;
 pub(crate) use super::overlay::{self, OverlayKind};
-pub(crate) use super::permission_context::{PermissionContext, RiskLevel};
+pub(crate) use super::permission_context::PermissionContext;
 pub(crate) use super::state::{AgentControl, AppState, FocusZone, PendingAttachment, UiMode};
 pub(crate) use super::transition_engine::TransitionEngine;
 pub(crate) use super::widgets::activity_indicator::AgentState;
@@ -144,7 +144,8 @@ pub struct TuiApp {
     status: StatusState,
     panel: SidePanel,
     /// Receives UiEvents from the agent loop (via TuiSink).
-    /// Unbounded to prevent PermissionAwaiting from being dropped on high-throughput streams.
+    /// P0-C2: Sender side uses BoundedUiSender which enforces a soft capacity limit
+    /// and sheds non-critical events under pressure to prevent OOM.
     ui_rx: mpsc::UnboundedReceiver<UiEvent>,
     /// Sends prompt text to the agent loop.
     prompt_tx: mpsc::UnboundedSender<String>,
@@ -234,7 +235,8 @@ pub struct TuiApp {
     /// Computed provider/model area for click-to-open-model-selector detection.
     model_button_area: Rect,
     /// Sender clone used by background async tasks to push UiEvents back to the app.
-    ui_tx_for_bg: Option<tokio::sync::mpsc::UnboundedSender<UiEvent>>,
+    /// P0-C2: Uses BoundedUiSender for backpressure-aware delivery.
+    ui_tx_for_bg: Option<crate::tui::events::BoundedUiSender>,
     /// Cached session list loaded from DB (for SessionList overlay).
     session_list: Vec<SessionInfo>,
     /// Cursor index in the session list overlay.
@@ -272,6 +274,20 @@ pub struct TuiApp {
     /// Set to `true` by the overlay handler when the user chooses to install.
     /// Checked by repl/mod.rs after TUI exits; triggers `run_update_from_info` + re-exec.
     pub(crate) update_install_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    // ─── Settings overlay (F7) ────────────────────────────────────────────────
+    /// Current AppConfig snapshot for settings viewer.
+    pub(crate) app_config: halcon_core::types::AppConfig,
+    /// Selected index in the settings list.
+    settings_selected: usize,
+    /// Whether currently editing a setting value.
+    settings_editing: bool,
+    /// Edit buffer for inline settings editing.
+    settings_edit_buffer: String,
+
+    // ─── LSP status (F8) ─────────────────────────────────────────────────────
+    /// LSP connection info for display.
+    pub(crate) lsp_info: crate::tui::overlay::LspConnectionInfo,
 }
 
 /// Detect the OS username for the user avatar in the activity feed.
@@ -379,6 +395,11 @@ impl TuiApp {
             model_error_context: None,
             pending_update: None,
             update_install_signal: None,
+            app_config: halcon_core::types::AppConfig::default(),
+            settings_selected: 0,
+            settings_editing: false,
+            settings_edit_buffer: String::new(),
+            lsp_info: crate::tui::overlay::LspConnectionInfo::default(),
         }
     }
 
@@ -400,7 +421,7 @@ impl TuiApp {
 
     /// Set a background sender so async tasks can push UiEvents back into the app.
     /// Called from repl/mod.rs after TuiApp::with_mode().
-    pub fn set_ui_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
+    pub fn set_ui_tx(&mut self, tx: crate::tui::events::BoundedUiSender) {
         self.ui_tx_for_bg = Some(tx);
     }
 
@@ -412,8 +433,8 @@ impl TuiApp {
         provider_connected: bool,
         model: &str,
         session_id: &str,
-        session_type: &str,
-        routing: Option<&crate::render::banner::RoutingDisplay>,
+        _session_type: &str,
+        _routing: Option<&crate::render::banner::RoutingDisplay>,
         features: &crate::render::banner::FeatureStatus,
     ) {
         // Minimalist SOTA banner using momoto design principles

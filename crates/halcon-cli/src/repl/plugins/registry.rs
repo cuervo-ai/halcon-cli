@@ -203,32 +203,41 @@ impl PluginRegistry {
             }
         }
 
-        // Permission gate: find the capability descriptor
+        // Permission gate: find the capability descriptor.
+        //
+        // SECURITY: If the tool is NOT in the plugin's declared capabilities, deny.
+        // This enforces the declared capability contract — plugins can only invoke
+        // tools they explicitly declared in their manifest. Fail-closed by default.
         let cap = plugin
             .manifest
             .capabilities
             .iter()
             .find(|c| c.name == tool_name);
-        if let Some(cap) = cap {
-            let decision = self.permission_gate.evaluate(plugin_id, cap, budget_low);
-            match decision {
-                PluginPermissionDecision::Allowed => {}
-                PluginPermissionDecision::NeedsConfirmation => {
-                    // SECURITY: NeedsConfirmation means the plugin manifest declared that this
-                    // capability requires explicit human sign-off (e.g., RiskTier::High or a
-                    // capability with requires_confirmation=true). Without an interactive
-                    // confirmation prompt wired (Phase 9), we must deny the call.
-                    //
-                    // Audit fix: the previous behaviour silently fell through to Proceed,
-                    // effectively treating NeedsConfirmation as Allowed — bypassing the plugin
-                    // developer's explicit intent. Fail-closed is the correct default.
-                    return InvokeGateResult::Deny(format!(
-                        "plugin '{plugin_id}' tool '{tool_name}' requires user confirmation \
-                         (non-interactive execution is not permitted for this capability)"
-                    ));
-                }
-                PluginPermissionDecision::Denied { reason } => {
-                    return InvokeGateResult::Deny(reason);
+        match cap {
+            None => {
+                tracing::warn!(
+                    plugin = %plugin_id,
+                    tool = %tool_name,
+                    "Plugin attempted to invoke undeclared tool — denied by capability enforcement"
+                );
+                return InvokeGateResult::Deny(format!(
+                    "plugin '{plugin_id}' has no declared capability for tool '{tool_name}' — \
+                     plugins can only invoke tools listed in their manifest capabilities"
+                ));
+            }
+            Some(cap) => {
+                let decision = self.permission_gate.evaluate(plugin_id, cap, budget_low);
+                match decision {
+                    PluginPermissionDecision::Allowed => {}
+                    PluginPermissionDecision::NeedsConfirmation => {
+                        return InvokeGateResult::Deny(format!(
+                            "plugin '{plugin_id}' tool '{tool_name}' requires user confirmation \
+                             (non-interactive execution is not permitted for this capability)"
+                        ));
+                    }
+                    PluginPermissionDecision::Denied { reason } => {
+                        return InvokeGateResult::Deny(reason);
+                    }
                 }
             }
         }

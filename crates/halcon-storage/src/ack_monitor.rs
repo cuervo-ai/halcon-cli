@@ -26,9 +26,9 @@ pub struct AckMonitorConfig {
 impl Default for AckMonitorConfig {
     fn default() -> Self {
         Self {
-            warning_threshold_secs: 300,  // 5 min
-            dlq_threshold_secs: 900,      // 15 min
-            check_interval_secs: 60,      // 1 min
+            warning_threshold_secs: 300, // 5 min
+            dlq_threshold_secs: 900,     // 15 min
+            check_interval_secs: 60,     // 1 min
         }
     }
 }
@@ -47,7 +47,11 @@ impl AckMonitor {
         dlq: Arc<Mutex<DeadLetterQueue>>,
         config: AckMonitorConfig,
     ) -> Self {
-        Self { buffer, dlq, config }
+        Self {
+            buffer,
+            dlq,
+            config,
+        }
     }
 
     /// Start monitoring loop (spawns background task).
@@ -59,9 +63,8 @@ impl AckMonitor {
 
     /// Main monitoring loop.
     async fn run(&self) {
-        let mut interval = tokio::time::interval(Duration::from_secs(
-            self.config.check_interval_secs,
-        ));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(self.config.check_interval_secs));
 
         loop {
             interval.tick().await;
@@ -95,8 +98,7 @@ impl AckMonitor {
                 // Escalate to DLQ
                 warn!(
                     seq = event.seq,
-                    age_secs,
-                    "ACK timeout exceeded, moving to DLQ"
+                    age_secs, "ACK timeout exceeded, moving to DLQ"
                 );
 
                 let mut dlq = self.dlq.lock().await;
@@ -115,15 +117,13 @@ impl AckMonitor {
 
                 info!(
                     seq = event.seq,
-                    age_secs,
-                    "Event moved to DLQ due to ACK timeout"
+                    age_secs, "Event moved to DLQ due to ACK timeout"
                 );
             } else if age_secs >= self.config.warning_threshold_secs {
                 // Warning log
                 warn!(
                     seq = event.seq,
-                    age_secs,
-                    "ACK timeout warning: event waiting for ACK"
+                    age_secs, "ACK timeout warning: event waiting for ACK"
                 );
             }
         }

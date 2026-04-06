@@ -2,7 +2,7 @@
 
 use crossterm::event::KeyEvent;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color as RatatuiColor, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -454,9 +454,16 @@ impl PromptState {
     }
 
     /// Get current text without taking it.
-    #[allow(dead_code)]
     pub fn text(&self) -> String {
         self.textarea.lines().join("\n")
+    }
+
+    /// Select all text in the textarea.
+    ///
+    /// Uses tui-textarea's built-in select_all when available,
+    /// otherwise moves cursor to start then shifts-selects to end.
+    pub fn select_all(&mut self) {
+        self.textarea.select_all();
     }
 
     /// Set the input state (Phase 2.1).

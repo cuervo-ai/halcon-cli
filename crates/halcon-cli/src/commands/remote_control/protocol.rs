@@ -31,10 +31,7 @@ pub enum RemoteCommand {
     /// Cancel a running session/task.
     Cancel { session_id: String },
     /// Inject context into the running session.
-    InjectContext {
-        session_id: String,
-        context: String,
-    },
+    InjectContext { session_id: String, context: String },
     /// Submit a user message (human-in-the-loop chat).
     SubmitMessage {
         session_id: String,

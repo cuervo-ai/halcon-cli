@@ -3,40 +3,23 @@
 //! This library interface allows benchmarks and integration tests to access
 //! internal modules like render, tui, and repl without duplicating code.
 
-// When building with --no-default-features, many modules become unreachable
-// because the `tui` feature gates most of the interactive UI code.
+// Crate-level lint policy.
+//
+// `dead_code` + `private_interfaces`: structural — lib.rs exposes modules for
+// testing/benchmarking but the real consumer is the binary target (main.rs).
+// Functions used only from main.rs appear "dead" when checking the lib target.
+//
+// `unexpected_cfgs`: custom feature flags (tui, headless, cenzontle-agents, etc.).
+//
+// All other lints (unused_imports, unused_variables, clippy) are NOT suppressed
+// here — they must be fixed at the source or suppressed with targeted attributes.
+#![allow(dead_code, private_interfaces, unexpected_cfgs)]
+// Clippy style conventions accepted project-wide:
 #![allow(
-    dead_code,
-    unused_imports,
-    unused_variables,
-    unused_assignments,
-    unused_mut,
-    unexpected_cfgs,
-    private_interfaces,
     clippy::too_many_arguments,
     clippy::type_complexity,
-    clippy::should_implement_trait,
-    clippy::if_same_then_else,
-    clippy::manual_strip,
     clippy::doc_lazy_continuation,
-    clippy::doc_overindented_list_items,
-    clippy::manual_clamp,
-    clippy::nonminimal_bool,
-    unreachable_patterns,
-    clippy::len_without_is_empty,
-    clippy::needless_question_mark,
-    clippy::manual_let_else,
-    clippy::format_in_format_args,
-    clippy::unwrap_or_default,
-    clippy::empty_line_after_doc_comments,
-    clippy::manual_unwrap_or_default,
-    clippy::question_mark,
-    clippy::needless_range_loop,
-    clippy::ptr_arg,
-    clippy::enum_variant_names,
-    clippy::derivable_impls,
-    clippy::unnecessary_cast,
-    clippy::needless_return
+    clippy::doc_overindented_list_items
 )]
 
 // Module declarations (same as main.rs)

@@ -11,8 +11,10 @@
 //! - subagent_contract: Validates sub-agent results against their assigned contracts
 
 pub mod blacklist;
+pub mod denial_tracker;
 pub mod lifecycle;
 pub mod output_risk;
+pub(crate) mod permission_pipeline;
 pub mod risk_tier;
 pub mod subagent_contract;
 pub(crate) mod tool_policy;

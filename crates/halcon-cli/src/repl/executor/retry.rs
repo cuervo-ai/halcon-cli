@@ -92,6 +92,20 @@ pub fn is_deterministic_error(error: &str) -> bool {
         || lower.contains("process failed")
 }
 
+/// Classify an error using the typed `ToolFailureKind` enum.
+///
+/// This is the recommended entry point for new code. Existing code continues
+/// to use `is_transient_error()` / `is_deterministic_error()` until migration completes.
+///
+/// # Example
+/// ```ignore
+/// let kind = classify_error("Rate limit exceeded (429)");
+/// if kind.is_transient() { /* retry */ }
+/// ```
+pub fn classify_error(error: &str) -> crate::repl::failure_handler::typed_errors::ToolFailureKind {
+    crate::repl::failure_handler::typed_errors::ToolFailureKind::classify(error)
+}
+
 /// IMP-1 Adaptive Retry — mutate tool arguments for the second retry attempt.
 ///
 /// Applies conservative, reversible modifications that make transient failures

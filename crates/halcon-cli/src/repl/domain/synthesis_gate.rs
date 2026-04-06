@@ -134,12 +134,56 @@ pub struct SynthesisVerdict {
 /// regardless of how much work has been done.
 pub fn evaluate(trigger: SynthesisTrigger, ctx: &SynthesisContext) -> SynthesisVerdict {
     let kind = classify_kind(trigger, ctx);
+
+    // B8 remediation: Block synthesis when there are pending execution tools,
+    // UNLESS the trigger is a hard stop that cannot wait.
+    //
+    // Rationale: Synthesizing while tools are pending produces incomplete results.
+    // The agent should execute remaining tools first, then synthesize.
+    //
+    // Hard stops that override pending tools:
+    //   - OracleConvergence: Goal achieved — remaining tools are unnecessary
+    //   - ManualInterrupt: User explicitly wants to stop
+    //   - MaxRoundsReached: Budget exhaustion, cannot continue
+    //   - ReplanTimeout: Wall-clock deadline, must respond now
+    let hard_stop = matches!(
+        trigger,
+        SynthesisTrigger::OracleConvergence
+            | SynthesisTrigger::ManualInterrupt
+            | SynthesisTrigger::MaxRoundsReached
+            | SynthesisTrigger::ReplanTimeout
+    );
+    let pending_tool_block = ctx.has_pending_tools && !hard_stop;
+    if pending_tool_block {
+        tracing::info!(
+            trigger = ?trigger,
+            rounds_executed = ctx.rounds_executed,
+            "B8: synthesis suppressed — pending execution tools exist"
+        );
+    }
+
     // Suppress GovernanceRescue when convergence ratio is too low to synthesize usefully.
     // Threshold: reflection_score < 0.15 (agent has <15% coverage) AND rounds_executed < 3
     // (very early session). Prevents empty/fabricated synthesis on first-round stalls.
-    let allow = !matches!(trigger, SynthesisTrigger::GovernanceRescue)
-        || ctx.reflection_score >= 0.15
-        || ctx.rounds_executed >= 3;
+    let governance_suppress = matches!(trigger, SynthesisTrigger::GovernanceRescue)
+        && ctx.reflection_score < 0.15
+        && ctx.rounds_executed < 3;
+
+    let allow = !pending_tool_block && !governance_suppress;
+
+    // Phase 2: Observability metric for synthesis decisions.
+    if !allow {
+        tracing::info!(
+            metric.synthesis_suppressed = true,
+            trigger = ?trigger,
+            pending_tool_block,
+            governance_suppress,
+            rounds_executed = ctx.rounds_executed,
+            has_pending_tools = ctx.has_pending_tools,
+            "metric: synthesis suppressed by gate"
+        );
+    }
+
     SynthesisVerdict {
         allow,
         kind,
@@ -244,10 +288,10 @@ mod tests {
         assert_eq!(v.kind, SynthesisKind::Rescue);
     }
 
-    // ── Phase 2 invariant: allow is always true ───────────────────────────
+    // ── All triggers allowed when no pending tools ─────────────────────────
 
     #[test]
-    fn allow_always_true_in_phase2() {
+    fn allow_true_when_no_pending_tools() {
         let all_triggers = [
             SynthesisTrigger::OracleConvergence,
             SynthesisTrigger::MaxRoundsReached,
@@ -259,10 +303,64 @@ mod tests {
             SynthesisTrigger::ManualInterrupt,
             SynthesisTrigger::GovernanceRescue,
         ];
-        let ctx = ctx_default();
+        let ctx = ctx_default(); // has_pending_tools = false
         for trigger in all_triggers {
             let v = evaluate(trigger, &ctx);
-            assert!(v.allow, "Phase 2: allow must be true for {:?}", trigger);
+            assert!(
+                v.allow,
+                "allow must be true for {:?} with no pending tools",
+                trigger
+            );
+        }
+    }
+
+    // ── B8: Pending tools suppress non-hard-stop triggers ────────────────
+
+    #[test]
+    fn pending_tools_suppress_soft_triggers() {
+        let ctx = SynthesisContext {
+            has_pending_tools: true,
+            ..ctx_default()
+        };
+        // Soft triggers should be suppressed when tools are pending.
+        let soft_triggers = [
+            SynthesisTrigger::LoopGuard,
+            SynthesisTrigger::ParallelBatchCollapse,
+            SynthesisTrigger::ReflectionCollapse,
+            SynthesisTrigger::ToolExhaustion,
+            SynthesisTrigger::GovernanceRescue,
+        ];
+        for trigger in soft_triggers {
+            let v = evaluate(trigger, &ctx);
+            assert!(
+                !v.allow,
+                "B8: {:?} must be suppressed with pending tools",
+                trigger
+            );
+        }
+    }
+
+    #[test]
+    fn hard_stops_override_pending_tools() {
+        let ctx = SynthesisContext {
+            has_pending_tools: true,
+            ..ctx_default()
+        };
+        // Hard stops must always be allowed, even with pending tools.
+        // OracleConvergence is a hard stop: goal achieved, remaining tools unnecessary.
+        let hard_stops = [
+            SynthesisTrigger::OracleConvergence,
+            SynthesisTrigger::ManualInterrupt,
+            SynthesisTrigger::MaxRoundsReached,
+            SynthesisTrigger::ReplanTimeout,
+        ];
+        for trigger in hard_stops {
+            let v = evaluate(trigger, &ctx);
+            assert!(
+                v.allow,
+                "B8: hard stop {:?} must override pending tools",
+                trigger
+            );
         }
     }
 

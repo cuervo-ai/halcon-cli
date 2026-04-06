@@ -393,8 +393,6 @@ fn cvd(args: CvdArgs) -> Result<()> {
 
 #[cfg(feature = "color-science")]
 fn generate(args: GenerateArgs) -> Result<()> {
-    use momoto_intelligence::HarmonyType;
-
     if !(0.0..=360.0).contains(&args.hue) {
         anyhow::bail!("Hue must be between 0 and 360 degrees");
     }
@@ -515,7 +513,7 @@ fn generate(args: GenerateArgs) -> Result<()> {
 #[cfg(feature = "color-science")]
 fn harmony(args: HarmonyArgs) -> Result<()> {
     use momoto_core::OKLCH;
-    use momoto_intelligence::{generate_palette, harmony_score, HarmonyType};
+    use momoto_intelligence::{generate_palette, harmony_score};
 
     if !(0.0..=360.0).contains(&args.hue) {
         anyhow::bail!("Hue must be between 0 and 360 degrees");

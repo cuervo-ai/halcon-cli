@@ -224,14 +224,9 @@ impl PostBatchSupervisor {
         // Gate 3: Zero plan progress despite successful tool execution.
         // Indicates tools ran but plan step outcomes were not recorded — alignment drift.
         //
-        // Warmup guard: skip rounds 0–2 (ExecutionTracker needs at least 2 rounds to map
+        // Warmup guard: skip rounds 0-2 (ExecutionTracker needs at least 2 rounds to map
         // MCP-provided tool names to plan step tool_name fields via fuzzy matching; firing
         // earlier produces token-expensive corrections that are guaranteed to be spurious).
-        //
-        // - Round 0: model initializing, hasn't mapped tools→steps yet.
-        // - Round 1: first batch completed, tracker may still not have matched names.
-        // - Round 2: second batch, still calibrating (e.g., MCP tools vs halcon native names).
-        // - Round ≥ 3: by now, genuine alignment drift if progress is still 0%.
         if round >= 3
             && plan_progress_ratio == 0.0
             && any_tool_succeeded
@@ -243,6 +238,65 @@ impl PostBatchSupervisor {
                  plan step's tool in the following round."
                     .to_string(),
             );
+        }
+
+        // B9 remediation: Gate 4 — Pattern-based error recovery hints.
+        //
+        // Provides targeted recovery hints when failures match known patterns
+        // (permission denied, file not found). Fires for ANY number of failures (>=1)
+        // since Gate 1 already handles the >=2 case with ForceReplanNow.
+        //
+        // For 1 failure: exact pattern match → hint.
+        // For 2+ failures: this is unreachable (Gate 1 returns ForceReplanNow first),
+        //   but the logic handles it correctly via majority-match if Gate 1 is ever relaxed.
+        if !critical_failures.is_empty() {
+            let permission_denied_count = critical_failures
+                .iter()
+                .filter(|(_, err)| {
+                    let lower = err.to_lowercase();
+                    lower.contains("permission denied")
+                        || lower.contains("access denied")
+                        || lower.contains("not permitted")
+                        || lower.contains("forbidden")
+                        || lower.contains("unauthorized")
+                        || lower.contains("operation not allowed")
+                })
+                .count();
+            let file_not_found_count = critical_failures
+                .iter()
+                .filter(|(_, err)| {
+                    let lower = err.to_lowercase();
+                    lower.contains("not found")
+                        || lower.contains("no such file")
+                        || lower.contains("does not exist")
+                        || lower.contains("invalid path")
+                        || lower.contains("path not valid")
+                })
+                .count();
+
+            let total = critical_failures.len();
+            let majority_threshold = (total + 1) / 2; // ceil(total/2)
+
+            if permission_denied_count >= majority_threshold {
+                let denied_tools: Vec<&str> = critical_failures
+                    .iter()
+                    .filter(|(_, err)| err.to_lowercase().contains("permission"))
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                return BatchVerdict::InjectCorrection(format!(
+                    "[Supervisor] B9: {permission_denied_count}/{total} failures are permission \
+                     denied (tools: {denied_tools:?}). Switch to read-only alternatives or \
+                     request user confirmation before retrying write operations."
+                ));
+            }
+
+            if file_not_found_count >= majority_threshold {
+                return BatchVerdict::InjectCorrection(format!(
+                    "[Supervisor] B9: {file_not_found_count}/{total} failures are file/path \
+                     not found. Use 'directory_tree' or 'glob' to discover actual paths \
+                     before retrying. Do not guess paths."
+                ));
+            }
         }
 
         BatchVerdict::Continue
@@ -629,10 +683,23 @@ mod tests {
 
     #[test]
     fn supervisor_single_critical_failure_does_not_force_replan() {
-        let critical = vec![("bash".to_string(), "command not found".to_string())];
+        // Use an error that doesn't match Gate 4's pattern detection
+        // ("not found" would trigger Gate 4's file_not_found hint).
+        let critical = vec![("bash".to_string(), "exit code 1".to_string())];
         let verdict = PostBatchSupervisor::check(0, None, &[], &critical, 0.0, false, None);
-        // Threshold is ≥2 — one failure doesn't trigger ForceReplanNow.
+        // Threshold is ≥2 for ForceReplanNow; single unrecognized error → Continue.
         assert!(matches!(verdict, BatchVerdict::Continue));
+    }
+
+    #[test]
+    fn supervisor_single_permission_failure_injects_hint() {
+        // Gate 4: single failure with permission pattern → InjectCorrection hint.
+        let critical = vec![("file_write".to_string(), "permission denied".to_string())];
+        let verdict = PostBatchSupervisor::check(0, None, &[], &critical, 0.0, false, None);
+        assert!(
+            matches!(verdict, BatchVerdict::InjectCorrection(ref msg) if msg.contains("permission")),
+            "Gate 4 should inject hint for single permission denied failure"
+        );
     }
 
     #[test]

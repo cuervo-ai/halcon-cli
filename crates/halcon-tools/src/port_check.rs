@@ -51,7 +51,7 @@ impl Tool for PortCheckTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "port_check"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let port = match input.arguments["port"].as_u64() {
             Some(p) if p > 0 && p <= 65535 => p as u16,
             Some(p) => {

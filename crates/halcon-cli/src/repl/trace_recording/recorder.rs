@@ -119,10 +119,7 @@ impl TraceRecorder {
                 };
 
                 if let Err(e) = db.inner().append_trace_step(&step) {
-                    tracing::warn!(
-                        "trace recording failed (step {}): {e}",
-                        step.step_index
-                    );
+                    tracing::warn!("trace recording failed (step {}): {e}", step.step_index);
                 }
             }
         });

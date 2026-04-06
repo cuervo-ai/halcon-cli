@@ -170,10 +170,9 @@ impl PersistentEventBuffer {
 
     /// Mark an event as failed (removed from active tracking).
     pub fn mark_failed(&mut self, seq: u64) -> Result<()> {
-        let rows = self.conn.execute(
-            "DELETE FROM event_buffer WHERE seq = ?1",
-            params![seq],
-        )?;
+        let rows = self
+            .conn
+            .execute("DELETE FROM event_buffer WHERE seq = ?1", params![seq])?;
 
         if rows > 0 {
             warn!(seq, "Event marked as failed and removed from buffer");
@@ -407,8 +406,8 @@ mod tests {
 
         let stats = buffer.stats().unwrap();
         assert_eq!(stats.pending, 1); // Event 3
-        assert_eq!(stats.sent, 0);    // Event 1 was marked acked
-        assert_eq!(stats.acked, 2);   // Events 1 and 2
+        assert_eq!(stats.sent, 0); // Event 1 was marked acked
+        assert_eq!(stats.acked, 2); // Events 1 and 2
         assert_eq!(stats.total, 3);
     }
 

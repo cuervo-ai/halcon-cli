@@ -257,10 +257,7 @@ impl MutableDag {
     pub fn mark_failed(&self, node_id: Uuid, error: String, retryable: bool) {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if let Some(node) = inner.nodes.get_mut(&node_id) {
-            node.status = NodeStatus::Failed {
-                error,
-                retryable,
-            };
+            node.status = NodeStatus::Failed { error, retryable };
             node.completed_at = Some(Utc::now());
         }
     }
@@ -350,17 +347,13 @@ impl MutableDag {
     }
 
     /// Remove a node from the DAG. Only mutable (Pending/Ready/Speculative) nodes.
-    pub fn remove_node(
-        &self,
-        node_id: Uuid,
-        cascade: bool,
-        author: MutationAuthor,
-    ) -> Result<()> {
+    pub fn remove_node(&self, node_id: Uuid, cascade: bool, author: MutationAuthor) -> Result<()> {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
-        let node = inner.nodes.get(&node_id).ok_or(RuntimeError::Execution(
-            format!("Node {node_id} not found"),
-        ))?;
+        let node = inner
+            .nodes
+            .get(&node_id)
+            .ok_or(RuntimeError::Execution(format!("Node {node_id} not found")))?;
 
         if !node.status.is_mutable() {
             return Err(RuntimeError::Execution(format!(
@@ -381,9 +374,10 @@ impl MutableDag {
             }
         } else {
             // Check if any non-terminal node depends on this one.
-            let has_active_dependents = inner.nodes.values().any(|n| {
-                n.task.depends_on.contains(&node_id) && !n.status.is_terminal()
-            });
+            let has_active_dependents = inner
+                .nodes
+                .values()
+                .any(|n| n.task.depends_on.contains(&node_id) && !n.status.is_terminal());
             if has_active_dependents {
                 return Err(RuntimeError::Execution(format!(
                     "Node {node_id} has active dependents; use cascade=true to remove"
@@ -418,9 +412,7 @@ impl MutableDag {
         let node = inner
             .nodes
             .get_mut(&node_id)
-            .ok_or(RuntimeError::Execution(format!(
-                "Node {node_id} not found"
-            )))?;
+            .ok_or(RuntimeError::Execution(format!("Node {node_id} not found")))?;
 
         if !node.status.is_mutable() {
             return Err(RuntimeError::Execution(format!(
@@ -450,12 +442,7 @@ impl MutableDag {
     }
 
     /// Add a dependency edge (from depends on to).
-    pub fn add_dependency(
-        &self,
-        from: Uuid,
-        to: Uuid,
-        author: MutationAuthor,
-    ) -> Result<()> {
+    pub fn add_dependency(&self, from: Uuid, to: Uuid, author: MutationAuthor) -> Result<()> {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         if !inner.nodes.contains_key(&from) || !inner.nodes.contains_key(&to) {
@@ -499,20 +486,13 @@ impl MutableDag {
     }
 
     /// Remove a dependency edge.
-    pub fn remove_dependency(
-        &self,
-        from: Uuid,
-        to: Uuid,
-        author: MutationAuthor,
-    ) -> Result<()> {
+    pub fn remove_dependency(&self, from: Uuid, to: Uuid, author: MutationAuthor) -> Result<()> {
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         let node = inner
             .nodes
             .get_mut(&from)
-            .ok_or(RuntimeError::Execution(format!(
-                "Node {from} not found"
-            )))?;
+            .ok_or(RuntimeError::Execution(format!("Node {from} not found")))?;
 
         node.task.depends_on.retain(|d| *d != to);
 
@@ -573,9 +553,7 @@ impl MutableDag {
 
         while let Some(current) = queue.pop_front() {
             for node in nodes.values() {
-                if node.task.depends_on.contains(&current)
-                    && !result.contains(&node.task.task_id)
-                {
+                if node.task.depends_on.contains(&current) && !result.contains(&node.task.task_id) {
                     result.push(node.task.task_id);
                     queue.push_back(node.task.task_id);
                 }
@@ -661,10 +639,20 @@ mod tests {
     fn cycle_detection_on_insert() {
         let dag = MutableDag::new();
         let a = dag
-            .insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
+            .insert_node(
+                "A".to_string(),
+                make_selector(),
+                None,
+                MutationAuthor::System,
+            )
             .unwrap();
         let b = dag
-            .insert_node("B".to_string(), make_selector(), Some(a), MutationAuthor::System)
+            .insert_node(
+                "B".to_string(),
+                make_selector(),
+                Some(a),
+                MutationAuthor::System,
+            )
             .unwrap();
 
         // Try to add dependency A → B (would create cycle A→B→A).
@@ -676,7 +664,12 @@ mod tests {
     fn remove_node_no_cascade() {
         let dag = MutableDag::new();
         let a = dag
-            .insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
+            .insert_node(
+                "A".to_string(),
+                make_selector(),
+                None,
+                MutationAuthor::System,
+            )
             .unwrap();
 
         dag.remove_node(a, false, MutationAuthor::System).unwrap();
@@ -687,7 +680,12 @@ mod tests {
     fn remove_running_node_fails() {
         let dag = MutableDag::new();
         let a = dag
-            .insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
+            .insert_node(
+                "A".to_string(),
+                make_selector(),
+                None,
+                MutationAuthor::System,
+            )
             .unwrap();
 
         dag.mark_running(a);
@@ -699,13 +697,28 @@ mod tests {
     fn cascade_remove() {
         let dag = MutableDag::new();
         let a = dag
-            .insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
+            .insert_node(
+                "A".to_string(),
+                make_selector(),
+                None,
+                MutationAuthor::System,
+            )
             .unwrap();
         let _b = dag
-            .insert_node("B".to_string(), make_selector(), Some(a), MutationAuthor::System)
+            .insert_node(
+                "B".to_string(),
+                make_selector(),
+                Some(a),
+                MutationAuthor::System,
+            )
             .unwrap();
         let _c = dag
-            .insert_node("C".to_string(), make_selector(), Some(a), MutationAuthor::System)
+            .insert_node(
+                "C".to_string(),
+                make_selector(),
+                Some(a),
+                MutationAuthor::System,
+            )
             .unwrap();
 
         dag.remove_node(a, true, MutationAuthor::System).unwrap();
@@ -718,7 +731,12 @@ mod tests {
     fn update_node() {
         let dag = MutableDag::new();
         let a = dag
-            .insert_node("old".to_string(), make_selector(), None, MutationAuthor::System)
+            .insert_node(
+                "old".to_string(),
+                make_selector(),
+                None,
+                MutationAuthor::System,
+            )
             .unwrap();
 
         dag.update_node(a, Some("new".to_string()), MutationAuthor::System)
@@ -731,10 +749,20 @@ mod tests {
     #[test]
     fn mutation_log_tracks_all() {
         let dag = MutableDag::new();
-        dag.insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
-            .unwrap();
-        dag.insert_node("B".to_string(), make_selector(), None, MutationAuthor::System)
-            .unwrap();
+        dag.insert_node(
+            "A".to_string(),
+            make_selector(),
+            None,
+            MutationAuthor::System,
+        )
+        .unwrap();
+        dag.insert_node(
+            "B".to_string(),
+            make_selector(),
+            None,
+            MutationAuthor::System,
+        )
+        .unwrap();
 
         let log = dag.mutation_log();
         assert_eq!(log.len(), 2);
@@ -747,8 +775,13 @@ mod tests {
         let dag = MutableDag::new();
         assert_eq!(dag.version(), 0);
 
-        dag.insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
-            .unwrap();
+        dag.insert_node(
+            "A".to_string(),
+            make_selector(),
+            None,
+            MutationAuthor::System,
+        )
+        .unwrap();
         assert_eq!(dag.version(), 1);
 
         let a_id = dag.ready_nodes()[0].task_id;
@@ -789,8 +822,13 @@ mod tests {
     #[test]
     fn snapshot_serializable() {
         let dag = MutableDag::new();
-        dag.insert_node("A".to_string(), make_selector(), None, MutationAuthor::System)
-            .unwrap();
+        dag.insert_node(
+            "A".to_string(),
+            make_selector(),
+            None,
+            MutationAuthor::System,
+        )
+        .unwrap();
 
         let snap = dag.snapshot();
         let json = serde_json::to_string(&snap).unwrap();

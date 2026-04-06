@@ -429,7 +429,7 @@ fn render_oklch_spectrum(
     use super::theme::ThemeColor;
 
     let dim = palette.text_dim.fg();
-    let accent = palette.accent.fg();
+    let _accent = palette.accent.fg();
 
     // Spectrum Bar 1: Hue dimension (40 steps, 9° each = 0° to 351°)
     let _ = writeln!(

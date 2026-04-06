@@ -43,7 +43,7 @@ impl Tool for GitCommitTool {
         true
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let working_dir = &input.working_directory;
 
         if !helpers::is_git_repo(working_dir).await {

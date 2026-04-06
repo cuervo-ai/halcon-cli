@@ -440,6 +440,101 @@ pub enum UiEvent {
     },
 }
 
+impl UiEvent {
+    /// Returns `true` for events that MUST NOT be dropped under backpressure.
+    ///
+    /// Critical events control user-blocking flows (permissions, agent lifecycle).
+    /// Non-critical events (stream chunks, metrics) can be shed when the channel
+    /// is near capacity without affecting correctness — only visual fidelity.
+    pub fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            UiEvent::PermissionAwaiting { .. }
+                | UiEvent::SudoPasswordRequest { .. }
+                | UiEvent::AgentDone
+                | UiEvent::Quit
+                | UiEvent::StreamDone
+                | UiEvent::StreamError(_)
+                | UiEvent::Error { .. }
+        )
+    }
+}
+
+/// Soft capacity limit for the UI event channel.
+///
+/// At ~120 FPS drain rate and typical streaming throughput, 16384 events
+/// represents ~136 seconds of buffer — more than enough for any normal
+/// burst while preventing unbounded memory growth.
+pub const UI_CHANNEL_CAPACITY: usize = 16_384;
+
+/// Priority-aware UI event sender with queue-depth tracking.
+///
+/// Wraps an unbounded mpsc channel with a soft capacity limit:
+/// - **Critical events** (`PermissionAwaiting`, `AgentDone`, etc.) are always
+///   delivered regardless of queue depth.
+/// - **Non-critical events** (`StreamChunk`, metrics, etc.) are shed when the
+///   queue depth exceeds `UI_CHANNEL_CAPACITY`, preventing OOM.
+///
+/// The queue depth is tracked via an `AtomicUsize` counter that is incremented
+/// on send and should be decremented by the receiver when events are consumed.
+#[derive(Clone)]
+pub struct BoundedUiSender {
+    tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    /// Approximate queue depth (incremented on send, decremented by receiver).
+    queue_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Monotonically increasing count of shed events (for diagnostics).
+    shed_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl BoundedUiSender {
+    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) -> Self {
+        Self {
+            tx,
+            queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shed_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Send a UI event with priority-aware backpressure.
+    pub fn send(&self, event: UiEvent) {
+        let depth = self.queue_depth.load(std::sync::atomic::Ordering::Relaxed);
+
+        if !event.is_critical() && depth >= UI_CHANNEL_CAPACITY {
+            // Shed non-critical events when queue is at soft capacity.
+            let n = self
+                .shed_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n % 100 == 0 {
+                tracing::warn!(
+                    shed_count = n + 1,
+                    queue_depth = depth,
+                    "UI event channel at soft capacity — shedding non-critical events"
+                );
+            }
+            return;
+        }
+
+        // Deliver the event. Unbounded send never blocks.
+        if let Err(_) = self.tx.send(event) {
+            tracing::error!("TUI event channel closed — receiver terminated");
+            return;
+        }
+        self.queue_depth
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the shared queue depth counter.
+    /// The receiver should call `fetch_sub(1)` on this for each consumed event.
+    pub fn queue_depth_counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        self.queue_depth.clone()
+    }
+
+    /// Number of events shed due to backpressure (diagnostic counter).
+    pub fn shed_count(&self) -> u64 {
+        self.shed_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// A single suggestion item for the PluginSuggest overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSuggestionItem {

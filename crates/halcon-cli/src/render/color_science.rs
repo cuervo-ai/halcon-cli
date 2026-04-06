@@ -3,7 +3,7 @@
 //! Provides WCAG/APCA contrast evaluation, accessible palette generation,
 //! perceptual color distance calculations, CVD simulation, and semantic APCA.
 
-use momoto_core::color::cvd::{cvd_delta_e, simulate_cvd, suggest_cvd_safe_alternative, CVDType};
+use momoto_core::color::cvd::{simulate_cvd, suggest_cvd_safe_alternative, CVDType};
 use momoto_core::ContrastMetric;
 use momoto_intelligence::UsageContext;
 use momoto_metrics::{APCAMetric, WCAGMetric};

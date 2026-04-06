@@ -4,6 +4,39 @@ use crate::error::ApiError;
 use crate::server::state::AppState;
 use crate::types::system::*;
 
+/// Get current process memory usage in bytes (RSS).
+///
+/// Uses /proc/self/statm on Linux. Falls back to 0 on other platforms
+/// where libc types aren't available in this crate.
+fn get_process_memory_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+            if let Some(rss_pages) = statm.split_whitespace().nth(1) {
+                if let Ok(pages) = rss_pages.parse::<u64>() {
+                    return pages * 4096;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Parse `ps -o rss= -p <pid>` output (RSS in KB).
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+        {
+            if let Ok(rss_kb) = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u64>()
+            {
+                return rss_kb * 1024;
+            }
+        }
+    }
+    0
+}
+
 /// GET /api/v1/system/status — get system status.
 pub async fn get_status(State(state): State<AppState>) -> Result<Json<SystemStatus>, ApiError> {
     let agents = state.runtime.all_agents().await;
@@ -47,7 +80,7 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<SystemStat
             arch: std::env::consts::ARCH.to_string(),
             rust_version: "1.80+".to_string(),
             pid: std::process::id(),
-            memory_usage_bytes: 0, // TODO: platform-specific memory query
+            memory_usage_bytes: get_process_memory_bytes(),
         },
     }))
 }

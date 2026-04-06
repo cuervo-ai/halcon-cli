@@ -18,6 +18,7 @@ pub mod memory;
 pub mod metrics;
 pub mod plugin;
 pub mod provider_factory;
+pub mod remote_control;
 pub mod schedule;
 pub mod serve;
 pub mod sso;

@@ -42,6 +42,11 @@ pub struct SandboxConfig {
     pub shell: String,
     /// Whether to use OS-level sandboxing (macOS sandbox-exec, Linux unshare).
     pub use_os_sandbox: bool,
+    /// Additional paths that the sandbox may write to (besides working_dir).
+    /// Used for temp directories, build output, etc.
+    pub writable_paths: Vec<std::path::PathBuf>,
+    /// Additional paths that the sandbox may read from (besides standard system paths).
+    pub readable_paths: Vec<std::path::PathBuf>,
 }
 
 impl Default for SandboxConfig {
@@ -53,6 +58,8 @@ impl Default for SandboxConfig {
             max_output_bytes: 256 * 1024, // 256 KB
             shell: "/bin/sh".to_string(),
             use_os_sandbox: true,
+            writable_paths: Vec::new(),
+            readable_paths: Vec::new(),
         }
     }
 }
@@ -217,12 +224,7 @@ impl SandboxedExecutor {
 
     #[cfg(target_os = "macos")]
     fn build_macos_sandboxed(&self, command: &str) -> Command {
-        // macOS Seatbelt profile: allow read-only fs, deny network by default.
-        let profile = if self.config.policy.allow_network {
-            "(version 1)\n(allow default)\n(deny network*)\n"
-        } else {
-            "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*\n  (subpath \"/etc\")\n  (subpath \"/var\"))\n"
-        };
+        let profile = self.build_seatbelt_profile();
 
         let mut cmd = Command::new("sandbox-exec");
         cmd.arg("-p")
@@ -235,19 +237,159 @@ impl SandboxedExecutor {
         cmd
     }
 
+    /// Build a deny-default macOS Seatbelt profile.
+    ///
+    /// Strategy: deny everything, then explicitly allow:
+    /// - Process execution (required for the shell itself)
+    /// - File reads on system paths + working directory
+    /// - File writes only in working directory + explicit writable paths
+    /// - Network only when policy allows
+    #[cfg(target_os = "macos")]
+    fn build_seatbelt_profile(&self) -> String {
+        use std::fmt::Write;
+
+        let mut profile = String::with_capacity(2048);
+        let _ = writeln!(profile, "(version 1)");
+        let _ = writeln!(profile, "(deny default)");
+        let _ = writeln!(profile);
+
+        // Allow process execution (required for shell + subcommands).
+        let _ = writeln!(profile, "(allow process-exec)");
+        let _ = writeln!(profile, "(allow process-fork)");
+        let _ = writeln!(profile);
+
+        // Allow signal handling.
+        let _ = writeln!(profile, "(allow signal)");
+        let _ = writeln!(profile);
+
+        // Allow sysctl reads (required for many programs).
+        let _ = writeln!(profile, "(allow sysctl-read)");
+        let _ = writeln!(profile);
+
+        // Allow mach-* (required for basic process functionality on macOS).
+        let _ = writeln!(profile, "(allow mach-lookup)");
+        let _ = writeln!(profile, "(allow mach-register)");
+        let _ = writeln!(profile);
+
+        // Allow file reads on standard system paths.
+        let _ = writeln!(profile, "; System read access");
+        for sys_path in &[
+            "/usr/lib",
+            "/usr/bin",
+            "/usr/local",
+            "/bin",
+            "/sbin",
+            "/dev",
+            "/private/var/tmp",
+            "/private/tmp",
+            "/tmp",
+            "/etc",
+            "/var",
+            "/Library",
+            "/System",
+            "/Applications",
+        ] {
+            let _ = writeln!(profile, "(allow file-read* (subpath \"{}\"))", sys_path);
+        }
+        // Home directory read access (for shell config, tools like git, etc.)
+        if let Ok(home) = std::env::var("HOME") {
+            let _ = writeln!(profile, "(allow file-read* (subpath \"{}\"))", home);
+        }
+        let _ = writeln!(profile);
+
+        // Working directory: full read access.
+        let workdir = self.config.working_dir.display();
+        let _ = writeln!(profile, "; Working directory read access");
+        let _ = writeln!(profile, "(allow file-read* (subpath \"{}\"))", workdir);
+        let _ = writeln!(profile);
+
+        // Additional readable paths.
+        if !self.config.readable_paths.is_empty() {
+            let _ = writeln!(profile, "; Additional readable paths");
+            for path in &self.config.readable_paths {
+                let _ = writeln!(
+                    profile,
+                    "(allow file-read* (subpath \"{}\"))",
+                    path.display()
+                );
+            }
+            let _ = writeln!(profile);
+        }
+
+        // File writes: only working directory + /tmp + explicit writable paths.
+        let _ = writeln!(profile, "; Write access");
+        let _ = writeln!(profile, "(allow file-write* (subpath \"{}\"))", workdir);
+        let _ = writeln!(profile, "(allow file-write* (subpath \"/private/tmp\"))");
+        let _ = writeln!(profile, "(allow file-write* (subpath \"/tmp\"))");
+        let _ = writeln!(profile, "(allow file-write* (subpath \"/dev/null\"))");
+        let _ = writeln!(profile, "(allow file-write* (subpath \"/dev/tty\"))");
+        // Additional writable paths (e.g., build output dirs).
+        for path in &self.config.writable_paths {
+            let _ = writeln!(
+                profile,
+                "(allow file-write* (subpath \"{}\"))",
+                path.display()
+            );
+        }
+        let _ = writeln!(profile);
+
+        // Network: only when policy allows.
+        if self.config.policy.allow_network {
+            let _ = writeln!(profile, "; Network access enabled");
+            let _ = writeln!(profile, "(allow network*)");
+        } else {
+            let _ = writeln!(profile, "; Network access denied");
+        }
+
+        profile
+    }
+
     #[cfg(target_os = "linux")]
     fn build_linux_sandboxed(&self, command: &str) -> Command {
-        // Linux: use unshare to isolate network namespace (rootless).
+        // Linux: use unshare for namespace isolation (rootless).
+        //
+        // Isolation layers:
+        // 1. --net: isolated network namespace (no network access unless policy allows)
+        // 2. --user --map-root-user: user namespace isolation
+        // 3. Environment scrubbing: remove sensitive env vars
+        // 4. HOME/TMPDIR set to working directory (constrain writes)
         let mut cmd = Command::new("unshare");
+
+        // Network isolation.
         if !self.config.policy.allow_network {
             cmd.arg("--net");
         }
+
+        // User namespace for UID/GID isolation.
+        // --map-root-user maps current user to root inside namespace (safe, no real root).
+        cmd.arg("--user").arg("--map-root-user");
+
         cmd.arg("--")
             .arg(&self.config.shell)
             .arg("-c")
             .arg(command)
             .current_dir(&self.config.working_dir)
             .kill_on_drop(true);
+
+        // Scrub sensitive environment variables from the sandboxed process.
+        for var in &[
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "AZURE_CLIENT_SECRET",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "DATABASE_URL",
+        ] {
+            cmd.env_remove(var);
+        }
+
+        // Constrain TMPDIR to working directory.
+        cmd.env("TMPDIR", &self.config.working_dir);
+
         cmd
     }
 

@@ -446,7 +446,7 @@ impl Tool for LintCheckTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "lint_check"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let working_dir = &input.working_directory;
 
         // Allow explicit linter override

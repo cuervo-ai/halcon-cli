@@ -180,7 +180,14 @@ impl ConversationState {
             }
 
             // From ShowingDetails → back to decision
-            (ConversationState::ShowingDetails { tool, args, .. }, PermissionMessage::Approve) => {
+            (
+                ConversationState::ShowingDetails {
+                    tool: _tool,
+                    args: _args,
+                    ..
+                },
+                PermissionMessage::Approve,
+            ) => {
                 *self = ConversationState::Resolved {
                     decision: PermissionDecision::Allowed,
                     feedback: None,
@@ -188,7 +195,14 @@ impl ConversationState {
                 StateTransition::Approved
             }
 
-            (ConversationState::ShowingDetails { tool, args, .. }, PermissionMessage::Reject) => {
+            (
+                ConversationState::ShowingDetails {
+                    tool: _tool,
+                    args: _args,
+                    ..
+                },
+                PermissionMessage::Reject,
+            ) => {
                 *self = ConversationState::Resolved {
                     decision: PermissionDecision::Denied,
                     feedback: Some("User rejected after viewing details".into()),
@@ -211,7 +225,11 @@ impl ConversationState {
 
             // From RespondingToQuestion → back to prompting or decision
             (
-                ConversationState::RespondingToQuestion { tool, args, .. },
+                ConversationState::RespondingToQuestion {
+                    tool: _tool,
+                    args: _args,
+                    ..
+                },
                 PermissionMessage::Approve,
             ) => {
                 *self = ConversationState::Resolved {
@@ -222,7 +240,11 @@ impl ConversationState {
             }
 
             (
-                ConversationState::RespondingToQuestion { tool, args, .. },
+                ConversationState::RespondingToQuestion {
+                    tool: _tool,
+                    args: _args,
+                    ..
+                },
                 PermissionMessage::Reject,
             ) => {
                 *self = ConversationState::Resolved {
@@ -235,8 +257,8 @@ impl ConversationState {
             // From ValidatingModification → send feedback to agent
             (
                 ConversationState::ValidatingModification {
-                    tool,
-                    original_args,
+                    tool: _tool,
+                    original_args: _original_args,
                     requested_change,
                 },
                 PermissionMessage::Approve,
@@ -260,7 +282,14 @@ impl ConversationState {
             }
 
             // From Deferred → resume or timeout
-            (ConversationState::Deferred { tool, args, .. }, PermissionMessage::Approve) => {
+            (
+                ConversationState::Deferred {
+                    tool: _tool,
+                    args: _args,
+                    ..
+                },
+                PermissionMessage::Approve,
+            ) => {
                 *self = ConversationState::Resolved {
                     decision: PermissionDecision::Allowed,
                     feedback: None,
@@ -268,7 +297,14 @@ impl ConversationState {
                 StateTransition::Approved
             }
 
-            (ConversationState::Deferred { tool, args, .. }, PermissionMessage::Reject) => {
+            (
+                ConversationState::Deferred {
+                    tool: _tool,
+                    args: _args,
+                    ..
+                },
+                PermissionMessage::Reject,
+            ) => {
                 *self = ConversationState::Resolved {
                     decision: PermissionDecision::Denied,
                     feedback: Some("User rejected after deferring".into()),

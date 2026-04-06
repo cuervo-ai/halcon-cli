@@ -39,7 +39,7 @@ use momoto_intelligence::{
     UsageContext,
 };
 
-use super::terminal_caps::{ColorLevel, TerminalCapabilities};
+use super::terminal_caps::ColorLevel;
 use super::theme::{Palette, ThemeColor};
 
 /// M1: Card backgrounds generated via RecommendationEngine.
@@ -117,7 +117,7 @@ impl IntelligentPaletteBuilder {
     pub fn generate_from_hue(&self, base_hue: f64) -> Option<PaletteWithMetadata> {
         // Step 1: Generate base brand color at medium lightness/chroma
         let brand = ThemeColor::oklch(0.75, 0.15, base_hue);
-        let brand_color = *brand.color();
+        let _brand_color = *brand.color();
 
         // Step 2: Define background (dark panel for TUI)
         let bg_panel = ThemeColor::oklch(0.18, 0.02, base_hue);

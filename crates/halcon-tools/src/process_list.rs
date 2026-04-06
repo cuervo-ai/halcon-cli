@@ -50,7 +50,7 @@ impl Tool for ProcessListTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "process_list"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let filter_name = input
             .arguments
             .get("name")

@@ -46,7 +46,7 @@ impl Tool for BackgroundStartTool {
         true
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let command = input.arguments["command"].as_str().ok_or_else(|| {
             HalconError::InvalidInput("background_start requires 'command' string".into())
         })?;

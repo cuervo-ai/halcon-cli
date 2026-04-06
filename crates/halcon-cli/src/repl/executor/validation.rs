@@ -4,8 +4,8 @@
 
 use halcon_core::types::PermissionLevel;
 
-use crate::repl::output_risk_scorer;
 use super::{make_error_result, CompletedToolUse, ToolExecResult};
+use crate::repl::output_risk_scorer;
 
 /// Validate tool arguments: reject poisoned parse errors and high-risk args.
 /// Returns Some(error_result) if the call must be blocked, None if safe to proceed.

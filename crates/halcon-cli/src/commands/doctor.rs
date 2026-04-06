@@ -43,6 +43,7 @@ pub fn run(config: &AppConfig, db_path: Option<&Path>) -> Result<()> {
     );
 
     print_config_section(config, &mut out);
+    print_filesystem_section(&mut out);
     print_provider_section(config, &db, &mut out);
     print_health_section(config, &db, &mut out);
     print_cache_section(&db, &mut out);
@@ -109,6 +110,152 @@ fn print_config_section(config: &AppConfig, out: &mut impl Write) {
                 let hint = t.palette.muted.fg();
                 let _ = writeln!(out, "      {hint}-> {suggestion}{r}");
             }
+        }
+    }
+}
+
+fn print_filesystem_section(out: &mut impl Write) {
+    let t = theme::active();
+    let r = theme::reset();
+
+    components::section_header("Filesystem Permissions", out);
+
+    let halcon_dir = dirs::home_dir().unwrap_or_default().join(".halcon");
+
+    if !halcon_dir.exists() {
+        let muted = t.palette.muted.fg();
+        let _ = writeln!(
+            out,
+            "    {muted}~/.halcon/ does not exist (not yet initialized){r}"
+        );
+        return;
+    }
+
+    // Check critical files for root ownership.
+    let critical_files = [
+        "config.toml",
+        "cenzontle-models.json",
+        "workspace-trust.json",
+        "config-trust.json",
+        "mcp-trust.json",
+        "halcon.db",
+    ];
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let current_uid = unsafe { libc::getuid() };
+        let mut problems: Vec<(&str, u32)> = Vec::new();
+
+        // Check the directory itself.
+        if let Ok(meta) = std::fs::metadata(&halcon_dir) {
+            if meta.uid() != current_uid && current_uid != 0 {
+                problems.push(("~/.halcon/", meta.uid()));
+            }
+        }
+
+        for name in &critical_files {
+            let path = halcon_dir.join(name);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.uid() != current_uid && current_uid != 0 {
+                    problems.push((name, meta.uid()));
+                }
+            }
+        }
+
+        if problems.is_empty() {
+            let success = t.palette.success.fg();
+            let _ = writeln!(
+                out,
+                "    {success}All critical files owned by current user (uid {current_uid}){r}"
+            );
+        } else {
+            let error_badge = components::badge("ERROR", components::BadgeLevel::Error);
+            let _ = writeln!(
+                out,
+                "    {error_badge} {} file(s) have incorrect ownership:",
+                problems.len()
+            );
+            for (name, uid) in &problems {
+                let _ = writeln!(out, "      - {name}  (owned by uid {uid})");
+            }
+            let muted = t.palette.muted.fg();
+            let dir_display = halcon_dir.display();
+            let _ = writeln!(
+                out,
+                "      {muted}-> Fix: sudo chown -R $(whoami) {dir_display}{r}"
+            );
+        }
+
+        // Also check if running as root via sudo.
+        if current_uid == 0 {
+            if let Ok(real_user) = std::env::var("SUDO_USER") {
+                let warn_badge = components::badge("WARN", components::BadgeLevel::Warning);
+                let _ = writeln!(
+                    out,
+                    "    {warn_badge} Running as root (SUDO_USER={real_user}). \
+                     Files created now will cause permission errors later."
+                );
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let success = t.palette.success.fg();
+        let _ = writeln!(out, "    {success}Ownership check skipped (non-Unix){r}");
+    }
+
+    // Check Cenzontle model cache freshness.
+    let cache_path = halcon_dir.join("cenzontle-models.json");
+    if cache_path.exists() {
+        if let Ok(meta) = std::fs::metadata(&cache_path) {
+            let age = meta.modified().ok().and_then(|t| t.elapsed().ok());
+            if let Some(age) = age {
+                let age_mins = age.as_secs() / 60;
+                let muted = t.palette.muted.fg();
+                if age.as_secs() > 3600 {
+                    let warn_badge = components::badge("WARN", components::BadgeLevel::Warning);
+                    let _ = writeln!(
+                        out,
+                        "    {warn_badge} Model cache expired ({age_mins}m old, TTL=60m)"
+                    );
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "    {muted}Model cache fresh ({age_mins}m old, TTL=60m){r}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Check Cenzontle credential store.
+    let keystore = halcon_auth::KeyStore::new("halcon-cli");
+    let muted = t.palette.muted.fg();
+    let _ = writeln!(
+        out,
+        "    {muted}Credential backend: {}{r}",
+        keystore.backend_info()
+    );
+    match keystore.get_secret("cenzontle:access_token") {
+        Ok(Some(_)) => {
+            let success = t.palette.success.fg();
+            let _ = writeln!(out, "    {success}Cenzontle access token present{r}");
+        }
+        Ok(None) => {
+            let _ = writeln!(
+                out,
+                "    {muted}Cenzontle: not logged in (run `halcon auth login cenzontle`){r}"
+            );
+        }
+        Err(e) => {
+            let error_badge = components::badge("ERROR", components::BadgeLevel::Error);
+            let _ = writeln!(
+                out,
+                "    {error_badge} Cenzontle credential store error: {e}"
+            );
         }
     }
 }

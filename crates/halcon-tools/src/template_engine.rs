@@ -316,7 +316,7 @@ impl Tool for TemplateEngineTool {
         input.arguments["output_file"].as_str().is_some()
     }
 
-    async fn execute(
+    async fn execute_inner(
         &self,
         input: ToolInput,
     ) -> Result<ToolOutput, halcon_core::error::HalconError> {

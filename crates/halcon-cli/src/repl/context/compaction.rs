@@ -19,6 +19,27 @@ impl ContextCompactor {
         Self { config }
     }
 
+    /// Expose configuration for propagation to TieredCompactor / dispatch.
+    pub fn config(&self) -> &CompactionConfig {
+        &self.config
+    }
+
+    /// Apply compaction with an explicit keep count, respecting tool pair safety.
+    ///
+    /// Returns the effective keep count after `safe_keep_boundary_n` adjustment.
+    /// Used by TieredCompactor for degraded/emergency levels that need a
+    /// keep count different from the config default or adaptive formula.
+    pub fn apply_compaction_with_keep_count(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        summary: &str,
+        keep_count: usize,
+    ) -> usize {
+        let safe = self.safe_keep_boundary_n(messages, keep_count);
+        self.apply_compaction_keep(messages, summary, safe);
+        safe
+    }
+
     /// Estimate the total token count across all messages.
     pub fn estimate_message_tokens(messages: &[ChatMessage]) -> usize {
         messages
@@ -291,6 +312,7 @@ mod tests {
             threshold_fraction: threshold,
             keep_recent: keep,
             max_context_tokens: max_tokens,
+            ..Default::default()
         }
     }
 

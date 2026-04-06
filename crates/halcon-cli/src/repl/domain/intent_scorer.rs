@@ -763,7 +763,7 @@ impl IntentScorer {
         }
         let wlen = word.len();
         let tbytes = text.as_bytes();
-        let wbytes = word.as_bytes();
+        let _wbytes = word.as_bytes();
 
         let mut start = 0usize;
         while start + wlen <= tbytes.len() {

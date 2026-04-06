@@ -247,7 +247,7 @@ mod tests {
             PermissionLevel::ReadOnly
         }
 
-        async fn execute(&self, input: ToolInput) -> CoreResult<ToolOutput> {
+        async fn execute_inner(&self, input: ToolInput) -> CoreResult<ToolOutput> {
             Ok(ToolOutput {
                 tool_use_id: input.tool_use_id,
                 content: format!("echo:{}", input.arguments),
@@ -285,7 +285,7 @@ mod tests {
             PermissionLevel::ReadOnly
         }
 
-        async fn execute(&self, _input: ToolInput) -> CoreResult<ToolOutput> {
+        async fn execute_inner(&self, _input: ToolInput) -> CoreResult<ToolOutput> {
             Err(HalconError::ToolExecutionFailed {
                 tool: self.tool_name.clone(),
                 message: "intentional failure".to_string(),

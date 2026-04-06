@@ -381,7 +381,7 @@ impl Tool for ArchiveTool {
     }
 
     #[tracing::instrument(skip(self), fields(tool = "archive"))]
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let op = input
             .arguments
             .get("operation")

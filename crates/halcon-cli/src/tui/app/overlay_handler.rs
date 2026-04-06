@@ -503,6 +503,84 @@ impl TuiApp {
             return;
         }
 
+        // Settings overlay: navigate and edit settings.
+        if matches!(self.state.overlay.active, Some(OverlayKind::Settings)) {
+            match key.code {
+                KeyCode::Esc => {
+                    if self.settings_editing {
+                        self.settings_editing = false;
+                        self.settings_edit_buffer.clear();
+                    } else {
+                        self.state.overlay.close();
+                    }
+                }
+                KeyCode::Up => {
+                    if !self.settings_editing && self.settings_selected > 0 {
+                        self.settings_selected -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if !self.settings_editing {
+                        let sections = overlay::build_settings_entries(&self.app_config);
+                        let total: usize = sections.iter().map(|(_, e)| e.len()).sum();
+                        if self.settings_selected + 1 < total {
+                            self.settings_selected += 1;
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if self.settings_editing {
+                        // Apply the edit
+                        let sections = overlay::build_settings_entries(&self.app_config);
+                        let mut flat_idx = 0usize;
+                        for (_section_name, entries) in &sections {
+                            for entry in entries {
+                                if flat_idx == self.settings_selected && entry.editable {
+                                    self.apply_setting_edit(
+                                        &entry.key,
+                                        &self.settings_edit_buffer.clone(),
+                                    );
+                                    break;
+                                }
+                                flat_idx += 1;
+                            }
+                        }
+                        self.settings_editing = false;
+                        self.settings_edit_buffer.clear();
+                    } else {
+                        // Start editing
+                        let sections = overlay::build_settings_entries(&self.app_config);
+                        let mut flat_idx = 0usize;
+                        for (_section_name, entries) in &sections {
+                            for entry in entries {
+                                if flat_idx == self.settings_selected && entry.editable {
+                                    self.settings_editing = true;
+                                    self.settings_edit_buffer = entry.value.clone();
+                                }
+                                flat_idx += 1;
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(c) if self.settings_editing => {
+                    self.settings_edit_buffer.push(c);
+                }
+                KeyCode::Backspace if self.settings_editing => {
+                    self.settings_edit_buffer.pop();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // LSP status overlay: Esc to close.
+        if matches!(self.state.overlay.active, Some(OverlayKind::LspStatus)) {
+            if matches!(key.code, KeyCode::Esc) {
+                self.state.overlay.close();
+            }
+            return;
+        }
+
         // Non-permission overlays: use original logic.
         match key.code {
             KeyCode::Esc => {
@@ -596,6 +674,84 @@ impl TuiApp {
                 self.rerun_search();
             }
             _ => {}
+        }
+    }
+
+    /// Apply a setting edit to the in-memory config.
+    fn apply_setting_edit(&mut self, key: &str, value: &str) {
+        let ok = |s: &mut Self, msg: String| {
+            s.toasts.push(Toast::new(msg, ToastLevel::Success));
+        };
+        let err = |s: &mut Self, msg: String| {
+            s.toasts.push(Toast::new(msg, ToastLevel::Error));
+        };
+        match key {
+            "provider" => {
+                self.app_config.general.default_provider = value.to_string();
+                ok(self, format!("Provider → {value}"));
+            }
+            "model" => {
+                self.app_config.general.default_model = value.to_string();
+                ok(self, format!("Model → {value}"));
+            }
+            "temperature" => match value.parse::<f32>() {
+                Ok(t) => {
+                    self.app_config.general.temperature = t;
+                    ok(self, format!("Temperature → {t:.2}"));
+                }
+                Err(_) => err(self, format!("Invalid temperature: {value}")),
+            },
+            "max_tokens" => match value.parse::<u32>() {
+                Ok(t) => {
+                    self.app_config.general.max_tokens = t;
+                    ok(self, format!("Max tokens → {t}"));
+                }
+                Err(_) => err(self, format!("Invalid max_tokens: {value}")),
+            },
+            "max_rounds" => {
+                if let Ok(t) = value.parse::<usize>() {
+                    self.app_config.agent.limits.max_rounds = t;
+                    ok(self, format!("Max rounds → {t}"));
+                }
+            }
+            "tool_timeout_secs" => {
+                if let Ok(t) = value.parse::<u64>() {
+                    self.app_config.agent.limits.tool_timeout_secs = t;
+                    ok(self, format!("Tool timeout → {t}s"));
+                }
+            }
+            "timeout_secs" => {
+                if let Ok(t) = value.parse::<u64>() {
+                    self.app_config.tools.timeout_secs = t;
+                    ok(self, format!("Tools timeout → {t}s"));
+                }
+            }
+            "confirm_destructive" => {
+                if let Ok(b) = value.parse::<bool>() {
+                    self.app_config.tools.confirm_destructive = b;
+                    ok(self, format!("Confirm destructive → {b}"));
+                }
+            }
+            "pii_detection" => {
+                if let Ok(b) = value.parse::<bool>() {
+                    self.app_config.security.pii_detection = b;
+                    ok(self, format!("PII detection → {b}"));
+                }
+            }
+            "audit_enabled" => {
+                if let Ok(b) = value.parse::<bool>() {
+                    self.app_config.security.audit_enabled = b;
+                    ok(self, format!("Audit → {b}"));
+                }
+            }
+            "theme" => {
+                self.app_config.display.theme = value.to_string();
+                ok(self, format!("Theme → {value}"));
+            }
+            _ => {
+                self.toasts
+                    .push(Toast::new(format!("Unknown: {key}"), ToastLevel::Warning));
+            }
         }
     }
 

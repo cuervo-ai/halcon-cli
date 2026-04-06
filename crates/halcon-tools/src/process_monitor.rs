@@ -220,7 +220,7 @@ impl Tool for ProcessMonitorTool {
         })
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let args = &input.arguments;
         let operation = args["operation"]
             .as_str()

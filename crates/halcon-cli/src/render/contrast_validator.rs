@@ -4,13 +4,9 @@
 //! (contrast ratio ≥ 4.5:1 for normal text, ≥ 3:1 for large text).
 
 #[cfg(feature = "color-science")]
-use momoto_core::Color;
-#[cfg(feature = "color-science")]
 use momoto_intelligence::context::RecommendationContext;
 #[cfg(feature = "color-science")]
 use momoto_intelligence::scoring::QualityScorer;
-#[cfg(feature = "color-science")]
-use momoto_intelligence::QualityScore;
 
 use super::theme::Palette;
 

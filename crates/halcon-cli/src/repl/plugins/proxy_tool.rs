@@ -76,7 +76,7 @@ impl Tool for PluginProxyTool {
         })
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let result = self
             .runtime
             .invoke(

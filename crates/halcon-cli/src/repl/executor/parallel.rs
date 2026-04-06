@@ -8,16 +8,17 @@ use std::time::Duration;
 use chrono::Utc;
 use futures::stream::StreamExt as _;
 
-use halcon_core::types::{ContentBlock, DomainEvent, EventPayload, PermissionLevel};
+use halcon_core::types::{ContentBlock, DomainEvent, EventPayload, PermissionLevel, ToolInput};
 use halcon_core::EventSender;
 use halcon_storage::{AsyncDatabase, ToolExecutionMetric, TraceStep, TraceStepType};
 use halcon_tools::ToolRegistry;
 
 use super::{
-    canonicalize_name, execute_one_tool, make_error_result, resolve_tool_from_registry,
-    CompletedToolUse, ToolExecResult, ToolExecutionConfig,
+    execute_one_tool, make_error_result, resolve_tool_from_registry, CompletedToolUse,
+    ToolExecResult, ToolExecutionConfig,
 };
 use crate::render::sink::RenderSink;
+use crate::repl::security::permission_pipeline::PipelineDecision;
 
 /// Execute the parallel batch concurrently with a concurrency cap.
 #[allow(clippy::too_many_arguments)]
@@ -34,6 +35,12 @@ pub async fn execute_parallel_batch(
     exec_config: &ToolExecutionConfig<'_>,
     render_sink: &dyn RenderSink,
     plugin_registry: Option<&std::sync::Mutex<crate::repl::plugins::PluginRegistry>>,
+    permission_pipeline: Option<
+        &mut crate::repl::security::permission_pipeline::PermissionPipeline,
+    >,
+    permissions: Option<
+        &mut crate::repl::security::conversational::ConversationalPermissionHandler,
+    >,
 ) -> Vec<ToolExecResult> {
     if batch.is_empty() {
         return Vec::new();
@@ -93,9 +100,71 @@ pub async fn execute_parallel_batch(
         })
         .collect();
 
-    // Launch all safe tools concurrently.
+    // ── Pre-authorization gate for ReadOnly tools ────────────────────────
+    // Even ReadOnly tools must pass through TBAC, blacklist, and safety-sensitive
+    // checks before execution. This runs sequentially (fast, no I/O) before
+    // launching parallel futures.
+    let authorized_batch: Vec<&CompletedToolUse> = if let (Some(pipeline), Some(perms)) =
+        (permission_pipeline, permissions)
+    {
+        safe_batch
+                .into_iter()
+                .filter(|tool_call| {
+                    let tool_input = ToolInput {
+                        tool_use_id: tool_call.id.clone(),
+                        arguments: tool_call.input.clone(),
+                        working_directory: working_dir.to_string(),
+                    };
+                    match pipeline.pre_authorize_readonly(&tool_call.name, &tool_input, perms) {
+                        None => true, // Allowed
+                        Some(PipelineDecision::Deny { reason, gate }) => {
+                            tracing::info!(
+                                tool = %tool_call.name,
+                                gate = gate,
+                                "Parallel tool denied by pre-authorization: {reason}"
+                            );
+                            halcon_core::emit_event(event_tx, DomainEvent::new(
+                                EventPayload::PermissionDenied {
+                                    tool: tool_call.name.clone(),
+                                    level: PermissionLevel::ReadOnly,
+                                },
+                            ));
+                            early_errors.push(make_error_result(
+                                tool_call,
+                                format!(
+                                    "Permission denied ({}): {}",
+                                    gate, reason
+                                ),
+                            ));
+                            false
+                        }
+                        Some(_) => {
+                            // Ask or other variants — shouldn't happen for ReadOnly,
+                            // but fail-closed by routing to sequential.
+                            tracing::warn!(
+                                tool = %tool_call.name,
+                                "Unexpected pipeline decision for ReadOnly tool — denying in parallel path"
+                            );
+                            early_errors.push(make_error_result(
+                                tool_call,
+                                format!(
+                                    "Error: tool '{}' requires interactive authorization — cannot run in parallel batch",
+                                    tool_call.name
+                                ),
+                            ));
+                            false
+                        }
+                    }
+                })
+                .collect()
+    } else {
+        // No pipeline available (legacy/test path) — allow all ReadOnly tools through.
+        safe_batch
+    };
+
+    // Launch all authorized tools concurrently.
     let dry_run_mode = exec_config.dry_run_mode;
-    let futures: Vec<_> = safe_batch
+    let futures: Vec<_> = authorized_batch
         .iter()
         .map(|tool_call| {
             let name = tool_call.name.clone();
@@ -136,12 +205,15 @@ pub async fn execute_parallel_batch(
         let is_error = matches!(&result.content_block,
             ContentBlock::ToolResult { is_error, .. } if *is_error);
 
-        let _ = event_tx.send(DomainEvent::new(EventPayload::ToolExecuted {
-            tool: result.tool_name.clone(),
-            permission: perm_level,
-            duration_ms: result.duration_ms,
-            success: !is_error,
-        }));
+        halcon_core::emit_event(
+            event_tx,
+            DomainEvent::new(EventPayload::ToolExecuted {
+                tool: result.tool_name.clone(),
+                permission: perm_level,
+                duration_ms: result.duration_ms,
+                success: !is_error,
+            }),
+        );
 
         // Individual trace step per tool result.
         if let Some(db) = trace_db {

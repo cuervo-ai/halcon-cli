@@ -39,7 +39,7 @@ impl Tool for FileEditTool {
         PermissionLevel::Destructive
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         let path_str = input.arguments["path"]
             .as_str()
             .ok_or_else(|| HalconError::InvalidInput("file_edit requires 'path' string".into()))?;

@@ -622,36 +622,61 @@ impl ToolLoopGuard {
     /// Returns `(synthesis_threshold, force_threshold)`.
     fn compute_dynamic_thresholds(&self) -> (usize, usize) {
         if let Some(progress) = self.plan_progress {
-            let progress_ratio = progress.completed as f64 / progress.total as f64;
-            let plan_size = progress.total;
+            let total = progress.total.max(1);
+            let progress_ratio = progress.completed as f64 / total as f64;
+            let remaining_steps = total.saturating_sub(progress.completed);
 
-            // Base thresholds
-            let mut synth = self.synthesis_threshold; // 3
-            let mut force = self.force_threshold; // 4
+            // B5 remediation: Plan-aware dynamic thresholds.
+            //
+            // Strategy: the synthesis threshold should give the agent enough rounds
+            // to complete remaining plan steps. A plan with 12 steps and 50% done
+            // needs at least 6 more rounds, not the default 6 synthesis threshold.
+            //
+            // Formula:
+            //   synthesis = max(base, remaining_steps + 2)   — headroom of 2
+            //   force     = synthesis + 3                     — always 3 rounds after synthesis hint
+            //
+            // Guards:
+            //   - synth never below min_synthesis (from PolicyConfig)
+            //   - force never below min_force (from PolicyConfig)
+            //   - Stalled plans (0% after 3+ rounds) reduce thresholds to accelerate exit
+            //   - Absolute cap: synth <= 20, force <= 25 (prevent infinite loops)
 
-            // Adjustment 1: Large plans get +2 rounds
-            if plan_size >= 8 {
-                synth += 2; // 3 → 5
-                force += 2; // 4 → 6
+            let mut synth = self.synthesis_threshold; // base: 6
+            let mut force = self.force_threshold; // base: 10
+
+            // Adjustment 1: Extend thresholds based on remaining plan steps.
+            // If there are 8 remaining steps, synthesis should be at least 10.
+            let plan_aware_synth = remaining_steps + 2;
+            if plan_aware_synth > synth {
+                synth = plan_aware_synth;
+                force = synth + 3;
             }
 
-            // Adjustment 2: Good progress (>50%) gets +1 round
-            if progress_ratio > 0.5 {
-                force += 1; // 4 → 5 (or 6 → 7 if large plan)
+            // Adjustment 2: Good progress (>70%) — agent is converging, give more room.
+            if progress_ratio > 0.7 {
+                force += 2;
             }
 
-            // Adjustment 3: Stalled (0% after 3 rounds) gets -1 round
+            // Adjustment 3: Stalled (0% after 3+ rounds) — tighten to exit earlier.
             if self.consecutive_rounds >= 3 && progress.completed == 0 {
-                synth = synth.saturating_sub(1); // Trigger synthesis earlier
-                force = force.saturating_sub(1);
+                synth = self.synthesis_threshold.saturating_sub(1);
+                force = self.force_threshold.saturating_sub(1);
             }
+
+            // Absolute caps to prevent runaway loops.
+            synth = synth.min(20).max(self.min_synthesis);
+            force = force.min(25).max(self.min_force);
 
             tracing::debug!(
                 synth,
                 force,
-                plan_size,
+                plan_total = total,
+                plan_completed = progress.completed,
+                remaining_steps,
                 progress_ratio,
-                "Dynamic thresholds computed"
+                consecutive_rounds = self.consecutive_rounds,
+                "B5: dynamic thresholds computed"
             );
 
             (synth, force)
@@ -763,54 +788,23 @@ mod tests {
     #[test]
     fn large_plan_gets_extended_thresholds() {
         let mut guard = ToolLoopGuard::new();
-        guard.update_plan_progress(2, 10, 5000); // 10-step plan (large), 20% progress
+        guard.update_plan_progress(2, 10, 5000); // 10-step plan, 20% progress
 
-        // Expected: synth = 6 + 2 = 8, force = 10 + 2 = 12
+        // B5: remaining_steps = 8, plan_aware_synth = 8+2 = 10, force = 10+3 = 13
+        // progress_ratio = 0.2 (no >0.7 bonus), not stalled (completed=2>0)
 
-        // Rounds 1-7: Continue (consecutive_rounds < synthesis threshold 8)
-        for i in 1..=7 {
+        // Rounds 1-9: Continue (consecutive_rounds < synthesis threshold 10)
+        for i in 1..=9 {
             let action = guard.record_round(&[(format!("tool{i}"), i as u64)]);
             assert_eq!(action, LoopAction::Continue, "Round {i} should continue");
         }
 
-        // Round 8: InjectSynthesis (consecutive_rounds 8 >= synthesis threshold 8)
-        let action = guard.record_round(&[("tool8".into(), 8)]);
+        // Round 10: InjectSynthesis (consecutive_rounds 10 >= synthesis threshold 10)
+        let action = guard.record_round(&[("tool10".into(), 10)]);
         assert_eq!(action, LoopAction::InjectSynthesis);
 
-        // Rounds 9-11: Still InjectSynthesis (>= 8 synth, < 12 force)
-        for i in 9..=11 {
-            let action = guard.record_round(&[(format!("tool{i}"), i as u64)]);
-            assert_eq!(
-                action,
-                LoopAction::InjectSynthesis,
-                "Round {i} should inject synthesis"
-            );
-        }
-
-        // Round 12: ForceNoTools (force threshold 12)
-        let action = guard.record_round(&[("tool12".into(), 12)]);
-        assert_eq!(action, LoopAction::ForceNoTools);
-    }
-
-    #[test]
-    fn good_progress_delays_force() {
-        let mut guard = ToolLoopGuard::new();
-        guard.update_plan_progress(6, 9, 10000); // 66% done (>50%), 9 steps (>= 8, so +2)
-
-        // Expected thresholds: synth = 6 + 2 = 8, force = 10 + 2 + 1 = 13
-
-        // Rounds 1-7: Continue
-        for i in 1..=7 {
-            let action = guard.record_round(&[(format!("tool{i}"), i as u64)]);
-            assert_eq!(action, LoopAction::Continue);
-        }
-
-        // Round 8: InjectSynthesis (synthesis threshold 8)
-        let action = guard.record_round(&[("tool8".into(), 8)]);
-        assert_eq!(action, LoopAction::InjectSynthesis);
-
-        // Rounds 9-12: Still InjectSynthesis (>= 8 synth, < 13 force)
-        for i in 9..=12 {
+        // Rounds 11-12: Still InjectSynthesis (>= 10 synth, < 13 force)
+        for i in 11..=12 {
             let action = guard.record_round(&[(format!("tool{i}"), i as u64)]);
             assert_eq!(
                 action,
@@ -821,6 +815,39 @@ mod tests {
 
         // Round 13: ForceNoTools (force threshold 13)
         let action = guard.record_round(&[("tool13".into(), 13)]);
+        assert_eq!(action, LoopAction::ForceNoTools);
+    }
+
+    #[test]
+    fn good_progress_delays_force() {
+        let mut guard = ToolLoopGuard::new();
+        guard.update_plan_progress(6, 9, 10000); // 67% done, 9 steps
+
+        // B5: remaining_steps = 3, plan_aware_synth = 3+2 = 5 < base 6 -> synth stays 6
+        // force stays 10. progress_ratio = 0.67 (not >0.7), no extra bonus.
+
+        // Rounds 1-5: Continue
+        for i in 1..=5 {
+            let action = guard.record_round(&[(format!("tool{i}"), i as u64)]);
+            assert_eq!(action, LoopAction::Continue, "Round {i} should continue");
+        }
+
+        // Round 6: InjectSynthesis (synthesis threshold 6)
+        let action = guard.record_round(&[("tool6".into(), 6)]);
+        assert_eq!(action, LoopAction::InjectSynthesis);
+
+        // Rounds 7-9: Still InjectSynthesis (>= 6 synth, < 10 force)
+        for i in 7..=9 {
+            let action = guard.record_round(&[(format!("tool{i}"), i as u64)]);
+            assert_eq!(
+                action,
+                LoopAction::InjectSynthesis,
+                "Round {i} should inject synthesis"
+            );
+        }
+
+        // Round 10: ForceNoTools (force threshold 10)
+        let action = guard.record_round(&[("tool10".into(), 10)]);
         assert_eq!(action, LoopAction::ForceNoTools);
     }
 

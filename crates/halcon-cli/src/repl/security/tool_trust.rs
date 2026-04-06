@@ -107,6 +107,15 @@ pub(crate) enum TrustDecision {
     Hide,
 }
 
+impl Default for ToolTrustScorer {
+    fn default() -> Self {
+        Self {
+            metrics: HashMap::new(),
+            policy: Arc::new(PolicyConfig::default()),
+        }
+    }
+}
+
 impl ToolTrustScorer {
     pub fn new(policy: Arc<PolicyConfig>) -> Self {
         Self {

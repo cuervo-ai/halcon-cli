@@ -8,7 +8,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use std::time::Duration;
 
 use crate::render::theme;
 use crate::tui::events::{CircuitBreakerState, PlanStepDisplayStatus, PlanStepStatus};

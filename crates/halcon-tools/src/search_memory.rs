@@ -85,7 +85,7 @@ impl Tool for SearchMemoryTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput, HalconError> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput, HalconError> {
         let args = &input.arguments;
         let tool_use_id = input.tool_use_id.clone();
 

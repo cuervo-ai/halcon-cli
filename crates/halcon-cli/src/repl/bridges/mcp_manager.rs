@@ -126,7 +126,7 @@ impl Tool for PoolBackedBridge {
             .unwrap_or_else(|| self.infer_permission())
     }
 
-    async fn execute(&self, input: ToolInput) -> HalconResult<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> HalconResult<ToolOutput> {
         let call_result = self
             .pool
             .call_tool(&self.server, &self.definition.name, input.arguments.clone())

@@ -108,6 +108,21 @@ pub enum InputAction {
     /// Open the model selector overlay (Ctrl+M).
     OpenModelSelector,
 
+    /// Open the settings overlay (F7).
+    OpenSettings,
+
+    /// Open the LSP status overlay (F8).
+    OpenLspStatus,
+
+    /// Copy selected activity line or prompt selection to clipboard (Ctrl+Shift+C).
+    CopyToClipboard,
+
+    /// Cut prompt selection to clipboard (Ctrl+X).
+    CutToClipboard,
+
+    /// Select all text in the prompt (Ctrl+A).
+    SelectAll,
+
     /// Pass the key to the currently focused widget (e.g. tui-textarea).
     ForwardToWidget(KeyEvent),
 }
@@ -179,6 +194,20 @@ pub fn dispatch_key(key: KeyEvent) -> InputAction {
         (m, KeyCode::Char('m')) if m.contains(KeyModifiers::CONTROL) => {
             InputAction::OpenModelSelector
         }
+        // Ctrl+Shift+C: copy to clipboard (activity line or prompt text)
+        (m, KeyCode::Char('C'))
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            InputAction::CopyToClipboard
+        }
+        // Ctrl+X: cut selection to clipboard
+        (m, KeyCode::Char('x')) if m.contains(KeyModifiers::CONTROL) => InputAction::CutToClipboard,
+        // Ctrl+A: select all in prompt
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => InputAction::SelectAll,
+        // F7: settings overlay
+        (_, KeyCode::F(7)) => InputAction::OpenSettings,
+        // F8: LSP status overlay
+        (_, KeyCode::F(8)) => InputAction::OpenLspStatus,
         // Tab: cycle focus
         (_, KeyCode::Tab) => InputAction::CycleFocus,
         // Shift+Up / PageUp: scroll activity up

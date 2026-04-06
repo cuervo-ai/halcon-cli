@@ -12,9 +12,7 @@ members = [
     "crates/halcon-files",
     "crates/halcon-runtime",
     "crates/halcon-api",
-    "crates/halcon-client",
-    "crates/halcon-desktop",
-    "crates/halcon-search", "crates/halcon-integrations",
+    "crates/halcon-search",
     "crates/halcon-multimodal",
     "crates/halcon-agent-core",
     "crates/halcon-sandbox",
@@ -52,6 +50,8 @@ anyhow = "1"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "multipart"], default-features = false }
 eventsource-stream = "0.2"
 bytes = "1"
+prometheus = "0.13"
+lazy_static = "1.4"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -141,6 +141,18 @@ momoto-core = { path = "vendor/momoto-core" }
 momoto-metrics = { path = "vendor/momoto-metrics" }
 momoto-intelligence = { path = "vendor/momoto-intelligence" }
 
+# Paloma Frontier Fabric Router (formally verified routing engine)
+paloma-types = { path = "../Zuclubit/paloma/crates/paloma-types" }
+paloma-policy = { path = "../Zuclubit/paloma/crates/paloma-policy" }
+paloma-registry = { path = "../Zuclubit/paloma/crates/paloma-registry" }
+paloma-scoring = { path = "../Zuclubit/paloma/crates/paloma-scoring" }
+paloma-planner = { path = "../Zuclubit/paloma/crates/paloma-planner" }
+paloma-budget = { path = "../Zuclubit/paloma/crates/paloma-budget" }
+paloma-health = { path = "../Zuclubit/paloma/crates/paloma-health" }
+paloma-pipeline = { path = "../Zuclubit/paloma/crates/paloma-pipeline" }
+paloma-trace = { path = "../Zuclubit/paloma/crates/paloma-trace" }
+paloma-ledger = { path = "../Zuclubit/paloma/crates/paloma-ledger" }
+
 # TUI
 ratatui = "0.29"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
@@ -151,7 +163,7 @@ eframe = { version = "0.29", default-features = false, features = ["default_font
 axum = { version = "0.7", features = ["ws"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 http = "1"
@@ -168,7 +180,6 @@ halcon-mcp = { path = "crates/halcon-mcp" }
 halcon-files = { path = "crates/halcon-files", features = ["pdf", "csv", "xml", "yaml", "markdown"] }
 halcon-runtime = { path = "crates/halcon-runtime" }
 halcon-api = { path = "crates/halcon-api", default-features = false }
-halcon-client = { path = "crates/halcon-client" }
 halcon-multimodal = { path = "crates/halcon-multimodal" }
 halcon-agent-core = { path = "crates/halcon-agent-core" }
 halcon-sandbox = { path = "crates/halcon-sandbox" }

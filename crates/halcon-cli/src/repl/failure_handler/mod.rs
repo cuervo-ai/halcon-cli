@@ -11,3 +11,4 @@
 //! These operate independently and should NOT be unified into a single function.
 
 pub mod classifier;
+pub mod typed_errors;

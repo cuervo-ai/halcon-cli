@@ -4,7 +4,9 @@
 //! effects without harsh RGB flashing.
 
 use crate::render::theme::ThemeColor;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 /// Pulsing highlight effect with sine-wave modulation.
 ///

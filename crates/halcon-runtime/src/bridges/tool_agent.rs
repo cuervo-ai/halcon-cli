@@ -153,7 +153,10 @@ mod tests {
             PermissionLevel::ReadOnly
         }
 
-        async fn execute(&self, input: ToolInput) -> CoreResult<halcon_core::types::ToolOutput> {
+        async fn execute_inner(
+            &self,
+            input: ToolInput,
+        ) -> CoreResult<halcon_core::types::ToolOutput> {
             Ok(halcon_core::types::ToolOutput {
                 tool_use_id: input.tool_use_id,
                 content: format!("mock executed with: {}", input.arguments),
@@ -183,7 +186,10 @@ mod tests {
             PermissionLevel::ReadOnly
         }
 
-        async fn execute(&self, _input: ToolInput) -> CoreResult<halcon_core::types::ToolOutput> {
+        async fn execute_inner(
+            &self,
+            _input: ToolInput,
+        ) -> CoreResult<halcon_core::types::ToolOutput> {
             Err(halcon_core::error::HalconError::ToolExecutionFailed {
                 tool: "fail_tool".to_string(),
                 message: "always fails".to_string(),

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 halcon-core = { workspace = true }
+halcon-storage = { workspace = true }
 
 async-trait = { workspace = true }
 tokio = { workspace = true }

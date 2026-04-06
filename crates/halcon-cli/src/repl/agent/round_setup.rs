@@ -93,6 +93,7 @@ pub(super) async fn run(
     security_config: &halcon_core::types::SecurityConfig,
     exec_clock: &halcon_core::types::ExecutionClock,
     round: usize,
+    paloma_router: Option<&halcon_providers::PalomaRouter>,
 ) -> Result<RoundSetupOutcome> {
     // FASE F / Phase 136: Consume model_downgrade_advisory_active and force fast routing.
     // When AdaptivePolicy signals low trajectory (consecutive low-reward rounds), we
@@ -358,10 +359,44 @@ pub(super) async fn run(
     state.context_pipeline.set_round(round as u32);
     let built_messages = state.context_pipeline.build_messages();
 
+    // ── Paloma Routing (formally-verified decision) ──────────────────────────
+    // When PalomaRouter is available, consult it first for model/provider selection.
+    // Paloma enforces policy, capability, budget, and scoring constraints.
+    // If Paloma returns a decision, use it. Otherwise, fall through to ModelSelector.
+    let paloma_decision = paloma_router.map(|router| {
+        let routing_req = halcon_providers::router::RoutingRequest {
+            messages: &built_messages,
+            tenant_tier: "standard",
+            force_provider: None,
+            force_model: None,
+            latency_sla_ms: None,
+            cost_budget_remaining: Some(session.estimated_cost_usd.max(0.0) as f64)
+                .filter(|&c| c > 0.0),
+        };
+        router.route(&routing_req)
+    });
+
     // Optional: context-aware model selection with mid-session re-evaluation.
     // Uses the pipeline's context-managed state.messages for accurate complexity scoring,
     // not the original request (which only has the first user message).
-    let (mut selected_model, effective_provider) = if let Some(selector) = model_selector {
+    let (mut selected_model, effective_provider) = if let Some(ref decision) = paloma_decision {
+        // Paloma decision takes priority — formally verified routing.
+        tracing::info!(
+            model = %decision.model,
+            provider = %decision.provider,
+            tier = ?decision.tier,
+            reason = %decision.reason,
+            "Paloma routing decision"
+        );
+        if !state.silent {
+            render_sink.model_selected(&decision.model, &decision.provider, &decision.reason);
+        }
+        let resolved_provider = registry
+            .and_then(|r| r.get(&decision.provider))
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(provider));
+        (decision.model.clone(), resolved_provider)
+    } else if let Some(selector) = model_selector {
         let spend = session.estimated_cost_usd;
         // Reuse built_messages (already constructed above) for complexity scoring.
         let round_context_request = ModelRequest {
@@ -589,14 +624,37 @@ pub(super) async fn run(
         use super::super::plugins::capability_orchestrator::{RoundContext, SuppressReason};
 
         // Pre-compute model capability from provider registry.
-        // Fail-open for unknown models: assume tools supported to avoid breaking
-        // custom or newly-added models not yet listed in supported_models().
+        //
+        // B3 remediation: When the model is not in the provider's known list,
+        // use the provider's tool_format() as a secondary signal instead of
+        // blindly assuming true. Providers with a known tool format (Anthropic,
+        // OpenAI-compat, Gemini) can safely assume unknown models support tools.
+        // Providers with Unknown format should NOT assume tool support.
         let model_supports_tools = effective_provider
             .supported_models()
             .iter()
             .find(|m| m.id == selected_model)
             .map(|m| m.supports_tools)
-            .unwrap_or(true);
+            .unwrap_or_else(|| {
+                let format = effective_provider.tool_format();
+                let assumed = format != halcon_core::types::ToolFormat::Unknown;
+                if !assumed {
+                    tracing::warn!(
+                        model = %selected_model,
+                        provider = %effective_provider.name(),
+                        tool_format = %format.label(),
+                        "B3: unknown model + Unknown tool format — assuming no tool support"
+                    );
+                } else {
+                    tracing::debug!(
+                        model = %selected_model,
+                        provider = %effective_provider.name(),
+                        tool_format = %format.label(),
+                        "B3: unknown model but known tool format — assuming tool support"
+                    );
+                }
+                assumed
+            });
 
         let orch_ctx = RoundContext {
             force_no_tools_next_round: state.synthesis.tool_decision.is_active(),
@@ -786,6 +844,10 @@ pub(super) async fn run(
     }
 
     // Sprint 2: ProviderNormalizationAdapter — log wire format + validate schema compat.
+    //
+    // Phase 2 escalation: MissingTypeField and RequiredFieldMissing are structural
+    // defects that cause provider-side 400 errors. Strip the offending tool from the
+    // request rather than sending a malformed definition that will fail silently.
     {
         let norm_adapter =
             super::super::provider_normalization::ProviderNormalizationAdapter::for_provider(
@@ -793,6 +855,47 @@ pub(super) async fn run(
             );
         let norm_result = norm_adapter.validate(&round_request.tools);
         norm_adapter.trace_result(&norm_result, round as u32);
+
+        // Escalate critical warnings: collect names of structurally broken tools.
+        let mut tools_to_strip: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for warning in &norm_result.warnings {
+            match warning {
+                super::super::provider_normalization::NormalizationWarning::MissingTypeField {
+                    tool,
+                } => {
+                    tracing::warn!(
+                        tool = %tool,
+                        "Phase2: stripping tool with missing 'type' field — would cause provider error"
+                    );
+                    tools_to_strip.insert(tool.clone());
+                }
+                super::super::provider_normalization::NormalizationWarning::RequiredFieldMissing {
+                    tool,
+                    field,
+                } => {
+                    tracing::warn!(
+                        tool = %tool,
+                        field = %field,
+                        "Phase2: stripping tool with missing required field — would cause provider error"
+                    );
+                    tools_to_strip.insert(tool.clone());
+                }
+                _ => {} // UnsupportedSchemaType and OllamaEmulationMode remain warnings
+            }
+        }
+        if !tools_to_strip.is_empty() {
+            let before = round_request.tools.len();
+            round_request
+                .tools
+                .retain(|t| !tools_to_strip.contains(&t.name));
+            tracing::info!(
+                stripped = tools_to_strip.len(),
+                before,
+                after = round_request.tools.len(),
+                "Phase2: stripped malformed tools from request"
+            );
+        }
     }
 
     // Pre-invoke validation: ensure model is supported by the effective provider.
@@ -819,15 +922,18 @@ pub(super) async fn run(
             );
         }
         // P3 FIX: Emit AgentCompleted on early return so listeners always see the event.
-        let _ = event_tx.send(DomainEvent::new(EventPayload::AgentCompleted {
-            agent_type: AgentType::Chat,
-            result: AgentResult {
-                success: false,
-                summary: format!("ProviderError: model validation failed at round {round}"),
-                files_modified: vec![],
-                tools_used: vec![],
-            },
-        }));
+        halcon_core::emit_event(
+            event_tx,
+            DomainEvent::new(EventPayload::AgentCompleted {
+                agent_type: AgentType::Chat,
+                result: AgentResult {
+                    success: false,
+                    summary: format!("ProviderError: model validation failed at round {round}"),
+                    files_modified: vec![],
+                    tools_used: vec![],
+                },
+            }),
+        );
         // Return EarlyReturnData; caller assembles AgentLoopResult with its own ctrl_rx + plugin_registry.
         let data = EarlyReturnData {
             full_text: state.full_text.clone(),
@@ -950,11 +1056,14 @@ pub(super) async fn run(
                 "Guardrail triggered: {}",
                 v.reason
             );
-            let _ = event_tx.send(DomainEvent::new(EventPayload::GuardrailTriggered {
-                guardrail: v.guardrail.clone(),
-                checkpoint: "pre".into(),
-                action: format!("{:?}", v.action),
-            }));
+            halcon_core::emit_event(
+                event_tx,
+                DomainEvent::new(EventPayload::GuardrailTriggered {
+                    guardrail: v.guardrail.clone(),
+                    checkpoint: "pre".into(),
+                    action: format!("{:?}", v.action),
+                }),
+            );
         }
         if halcon_security::has_blocking_violation(&violations) {
             if !state.silent {

@@ -355,6 +355,72 @@ impl TuiApp {
                 }
             }
 
+            // Copy: Activity focused → copy selected line; Prompt focused → copy all text
+            input::InputAction::CopyToClipboard => {
+                let text = if self.state.focus == FocusZone::Activity {
+                    self.activity_navigator
+                        .selected()
+                        .and_then(|idx| self.activity_model.get(idx))
+                        .map(|line| line.text_content())
+                } else {
+                    let t = self.prompt.text();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
+                };
+                if let Some(text) = text {
+                    match super::super::clipboard::copy_to_clipboard(&text) {
+                        Ok(()) => {
+                            self.toasts
+                                .push(Toast::new("Copied to clipboard", ToastLevel::Success));
+                        }
+                        Err(e) => {
+                            self.toasts
+                                .push(Toast::new(format!("Copy failed: {e}"), ToastLevel::Error));
+                        }
+                    }
+                }
+            }
+
+            // Cut: only works on prompt — copies text and clears prompt
+            input::InputAction::CutToClipboard => {
+                if self.state.focus == FocusZone::Prompt {
+                    let text = self.prompt.text();
+                    if !text.is_empty() {
+                        match super::super::clipboard::copy_to_clipboard(&text) {
+                            Ok(()) => {
+                                self.prompt.clear();
+                                self.toasts
+                                    .push(Toast::new("Cut to clipboard", ToastLevel::Success));
+                            }
+                            Err(e) => {
+                                self.toasts.push(Toast::new(
+                                    format!("Cut failed: {e}"),
+                                    ToastLevel::Error,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Select all: Prompt focused → select all text (via clear + re-insert pattern)
+            input::InputAction::SelectAll => {
+                if self.state.focus == FocusZone::Prompt {
+                    self.prompt.select_all();
+                }
+            }
+
+            input::InputAction::OpenSettings => {
+                self.state.overlay.open(OverlayKind::Settings);
+            }
+
+            input::InputAction::OpenLspStatus => {
+                self.state.overlay.open(OverlayKind::LspStatus);
+            }
+
             input::InputAction::OpenModelSelector => {
                 let current_model = self.status.current_model().to_string();
                 let current_provider = self.status.current_provider().to_string();

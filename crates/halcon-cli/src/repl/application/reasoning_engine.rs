@@ -505,6 +505,7 @@ mod tests {
             synthesis_trigger: None,
             routing_escalation_count: 0,
             response_trust: halcon_core::types::ResponseTrust::Unverified,
+            decision_log: Vec::new(),
         };
 
         let eval = engine.post_loop(&analysis, &result);

@@ -57,7 +57,6 @@ pub(crate) fn spanish_to_english(word: &str) -> Option<&'static str> {
         "general" => Some("overview"),
         "tipo" | "tipos" => Some("type"),
         "variable" | "variables" => Some("variable"),
-        "módulos" => Some("modules"),
         "cargo" => Some("cargo"),
         "crate" | "crates" => Some("crate"),
         "dependencia" | "dependencias" => Some("dependency"),

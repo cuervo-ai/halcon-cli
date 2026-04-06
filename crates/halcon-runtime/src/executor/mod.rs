@@ -1,6 +1,8 @@
 //! DAG-based task orchestration over RuntimeAgents.
 
 pub mod budget;
+pub mod coordinator;
+pub mod mutable_dag;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;

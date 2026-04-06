@@ -310,7 +310,7 @@ impl Tool for PatchApplyTool {
         !input.arguments["dry_run"].as_bool().unwrap_or(false)
     }
 
-    async fn execute(
+    async fn execute_inner(
         &self,
         input: ToolInput,
     ) -> Result<ToolOutput, halcon_core::error::HalconError> {

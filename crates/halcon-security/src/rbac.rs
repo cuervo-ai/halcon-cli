@@ -203,7 +203,7 @@ impl RbacPolicy {
 
         // Developer: standard execution with path restrictions (enforced elsewhere).
         p.grant(Role::Developer, Permission::execute(Resource::Bash));
-        p.grant(Role::Developer, Permission::read(Resource::FileRead));
+        p.grant(Role::Developer, Permission::all(Resource::FileRead)); // Read + Execute for all file tools
         p.grant(Role::Developer, Permission::write(Resource::FileWrite));
         p.grant(Role::Developer, Permission::read(Resource::Network));
         p.grant(Role::Developer, Permission::all(Resource::Git));

@@ -32,7 +32,7 @@ harness = false
 
 [dependencies]
 halcon-core = { workspace = true }
-halcon-providers = { workspace = true }
+halcon-providers = { workspace = true, features = ["paloma"] }
 halcon-tools = { workspace = true }
 halcon-auth = { workspace = true }
 halcon-storage = { workspace = true }
@@ -115,6 +115,10 @@ vendored-openssl = ["openssl/vendored"]
 ## When enabled, a semantic completion check is logged after convergence.
 ## No existing return path is altered.
 completion-validator = []
+## DEPRECATED: simplified-loop was removed in v0.3.15 (dead code elimination).
+## Flag retained as no-op for backward compatibility.
+simplified-loop = []
+
 ## Enables GDEM as the primary agent loop (experimental).
 ## When enabled, agent_bridge uses halcon-agent-core's loop_driver instead of
 ## the REPL loop.

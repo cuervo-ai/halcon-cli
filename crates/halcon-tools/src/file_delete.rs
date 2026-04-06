@@ -44,7 +44,7 @@ impl Tool for FileDeleteTool {
         true
     }
 
-    async fn execute(&self, input: ToolInput) -> Result<ToolOutput> {
+    async fn execute_inner(&self, input: ToolInput) -> Result<ToolOutput> {
         use halcon_core::error::HalconError;
 
         let path_str = input.arguments["path"].as_str().ok_or_else(|| {

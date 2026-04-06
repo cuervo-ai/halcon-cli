@@ -143,9 +143,7 @@ pub trait RenderSink: Send + Sync {
     /// Used by the orchestrator to create sub-agent sinks that can route
     /// PermissionAwaiting events to the main TUI overlay.
     #[cfg(feature = "tui")]
-    fn tui_event_sender(
-        &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::tui::events::UiEvent>> {
+    fn tui_event_sender(&self) -> Option<crate::tui::events::BoundedUiSender> {
         None
     }
 
@@ -1057,11 +1055,15 @@ impl RenderSink for SilentSink {
 /// The TUI render loop receives these events and updates the 3-zone layout.
 /// Text accumulation is tracked locally for `stream_full_text()`.
 ///
-/// Uses an UNBOUNDED channel so that critical events like `PermissionAwaiting` are
-/// never dropped when the LLM generates large outputs (bounded try_send would silently
-/// drop them, causing the modal to never show and tools to auto-deny after 60s).
+/// Priority-aware TUI sink backed by a bounded channel.
+///
+/// Uses [`BoundedUiSender`] which guarantees delivery of critical events
+/// (permissions, agent lifecycle) while shedding non-critical events
+/// (stream chunks, metrics) under backpressure. This prevents OOM from
+/// unbounded channel growth while avoiding the old try_send bug where
+/// `PermissionAwaiting` events were silently dropped.
 pub struct TuiSink {
-    tx: tokio::sync::mpsc::UnboundedSender<crate::tui::events::UiEvent>,
+    tx: crate::tui::events::BoundedUiSender,
     text: Mutex<String>,
     thinking_chars: Mutex<usize>,
     thinking_preview: Mutex<String>,
@@ -1070,7 +1072,7 @@ pub struct TuiSink {
 
 #[cfg(feature = "tui")]
 impl TuiSink {
-    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<crate::tui::events::UiEvent>) -> Self {
+    pub fn new(tx: crate::tui::events::BoundedUiSender) -> Self {
         Self {
             tx,
             text: Mutex::new(String::new()),
@@ -1081,10 +1083,7 @@ impl TuiSink {
     }
 
     fn send(&self, event: crate::tui::events::UiEvent) {
-        // Unbounded send never blocks or drops — critical for PermissionAwaiting events.
-        if let Err(_) = self.tx.send(event) {
-            tracing::error!("TUI event channel closed, receiver terminated");
-        }
+        self.tx.send(event);
     }
 }
 
@@ -1344,9 +1343,7 @@ impl RenderSink for TuiSink {
         });
     }
 
-    fn tui_event_sender(
-        &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::tui::events::UiEvent>> {
+    fn tui_event_sender(&self) -> Option<crate::tui::events::BoundedUiSender> {
         Some(self.tx.clone())
     }
 
@@ -1838,7 +1835,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_stream_chunks() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.stream_text("hello ");
         sink.stream_text("world");
         assert_eq!(sink.stream_full_text(), "hello world");
@@ -1852,7 +1849,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_warning() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.warning("test", Some("hint"));
         let ev = rx.try_recv().unwrap();
         assert!(
@@ -1864,7 +1861,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_spinner_events() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.spinner_start("Thinking...");
         sink.spinner_stop();
         let ev1 = rx.try_recv().unwrap();
@@ -1878,14 +1875,14 @@ mod tests {
     #[test]
     fn tui_sink_is_not_silent() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         assert!(!sink.is_silent());
     }
 
     #[test]
     fn tui_sink_stream_reset() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.stream_text("data");
         assert_eq!(sink.stream_full_text(), "data");
         sink.stream_reset();
@@ -1895,7 +1892,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_info() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.info("round separator");
         let ev = rx.try_recv().unwrap();
         assert!(matches!(ev, crate::tui::events::UiEvent::Info(ref s) if s == "round separator"));
@@ -1904,7 +1901,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_tool_denied() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.tool_denied("bash");
         let ev = rx.try_recv().unwrap();
         assert!(matches!(ev, crate::tui::events::UiEvent::ToolDenied(ref s) if s == "bash"));
@@ -1931,7 +1928,7 @@ mod tests {
     fn tui_sink_sends_plan_progress() {
         use halcon_core::traits::PlanStep;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         let steps = vec![PlanStep {
             step_id: uuid::Uuid::new_v4(),
             description: "Read file".into(),
@@ -2048,7 +2045,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_round_started() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.round_started(1, "deepseek", "deepseek-chat");
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2060,7 +2057,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_round_ended() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.round_ended(2, 800, 300, 0.004, 2500);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2279,7 +2276,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_dry_run_active() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.dry_run_active(true);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2291,7 +2288,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_token_budget_update() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.token_budget_update(500, 1000, 120.5);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2307,7 +2304,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_provider_health_update() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.provider_health_update("anthropic", "degraded", 0.3, 5000);
         let ev = rx.try_recv().unwrap();
         assert!(
@@ -2321,7 +2318,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_circuit_breaker_update() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.circuit_breaker_update("openai", "open", 5);
         let ev = rx.try_recv().unwrap();
         assert!(
@@ -2336,7 +2333,7 @@ mod tests {
     #[test]
     fn tui_sink_sends_agent_state_transition() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.agent_state_transition("idle", "executing", "start");
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2352,7 +2349,7 @@ mod tests {
     #[test]
     fn tui_sink_provider_health_healthy() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.provider_health_update("test", "healthy", 0.0, 0);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2367,7 +2364,7 @@ mod tests {
     #[test]
     fn tui_sink_provider_health_unhealthy() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.provider_health_update("test", "down: connection refused", 1.0, 0);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2382,7 +2379,7 @@ mod tests {
     #[test]
     fn tui_sink_circuit_breaker_closed() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.circuit_breaker_update("test", "closed", 0);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2397,7 +2394,7 @@ mod tests {
     #[test]
     fn tui_sink_circuit_breaker_half_open() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         sink.circuit_breaker_update("test", "half_open", 2);
         let ev = rx.try_recv().unwrap();
         assert!(matches!(
@@ -2413,7 +2410,7 @@ mod tests {
     #[test]
     fn tui_sink_agent_state_all_transitions() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = TuiSink::new(tx);
+        let sink = TuiSink::new(crate::tui::events::BoundedUiSender::new(tx));
         let transitions = [
             ("idle", "planning"),
             ("planning", "executing"),

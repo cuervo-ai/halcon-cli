@@ -222,6 +222,61 @@ pub struct TokenCost {
     pub estimated_cost_usd: f64,
 }
 
+/// Look up the context window size (in tokens) for a model by name.
+///
+/// Returns the well-known context window for common models, or a default
+/// for unknown models. This is the single source of truth for context window
+/// sizes — avoids the 200K hardcoding scattered across the codebase.
+///
+/// The returned value represents the TOTAL context window (input + output).
+/// Pipeline budget should derive from this (e.g., 80% for input headroom).
+pub fn model_context_window(model: &str) -> u32 {
+    let m = model.to_lowercase();
+
+    // Anthropic Claude family
+    if m.contains("claude-opus") || m.contains("claude-sonnet") || m.contains("claude-4") {
+        return 200_000;
+    }
+    if m.contains("claude-haiku") {
+        return 200_000;
+    }
+    if m.contains("claude-3") {
+        return 200_000;
+    }
+
+    // OpenAI
+    if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
+        return 128_000;
+    }
+    if m.contains("gpt-4") && !m.contains("turbo") {
+        return 8_192;
+    }
+    if m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        return 200_000;
+    }
+
+    // DeepSeek
+    if m.contains("deepseek") {
+        return 64_000;
+    }
+
+    // Google Gemini
+    if m.contains("gemini-2") || m.contains("gemini-1.5-pro") {
+        return 1_000_000;
+    }
+    if m.contains("gemini") {
+        return 128_000;
+    }
+
+    // Ollama / local models — conservative default
+    if m.contains("llama") || m.contains("mistral") || m.contains("qwen") || m.contains("phi") {
+        return 32_000;
+    }
+
+    // Default: conservative value for unknown models
+    128_000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -110,6 +110,15 @@ pub enum OverlayKind {
         /// Optional error context shown at top (e.g. previous model failed).
         error_context: Option<String>,
     },
+    /// Settings viewer/editor overlay (F7).
+    ///
+    /// Displays the current configuration grouped by section.
+    /// Allows editing key settings inline (provider, model, temperature, max_tokens).
+    Settings,
+    /// LSP status overlay (F8).
+    ///
+    /// Shows LSP connection status, open buffers, and symbol count.
+    LspStatus,
 }
 
 /// State for the overlay system.
@@ -366,6 +375,27 @@ pub fn default_commands() -> Vec<OverlayItem> {
             description: "Show reasoning engine and UCB1 strategy status".into(),
             action: "reasoning".into(),
         },
+        OverlayItem {
+            label: "/settings".into(),
+            description: "Open settings viewer/editor (F7)".into(),
+            action: "settings".into(),
+        },
+        OverlayItem {
+            label: "/lsp".into(),
+            description: "Show LSP connection status (F8)".into(),
+            action: "lsp".into(),
+        },
+        // --- Remote Control ---
+        OverlayItem {
+            label: "/remote-control".into(),
+            description: "Show remote-control session status (REST+WS)".into(),
+            action: "remote-control".into(),
+        },
+        OverlayItem {
+            label: "/remote-control attach".into(),
+            description: "Attach to a remote-controlled session (live events)".into(),
+            action: "remote-control-attach".into(),
+        },
     ]
 }
 
@@ -500,7 +530,7 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
 /// Render the permission approval overlay.
 pub fn render_permission_prompt(frame: &mut Frame, area: Rect, tool: &str) {
     let p = &theme::active().palette;
-    let c_border = p.border_ratatui();
+    let _c_border = p.border_ratatui();
     let c_warning = p.warning_ratatui();
     let c_text = p.text_ratatui();
     let c_accent = p.accent_ratatui();
@@ -1371,7 +1401,7 @@ pub fn render_update_available(
     size_bytes: u64,
 ) {
     let p = &theme::active().palette;
-    let c_border = p.border_ratatui();
+    let _c_border = p.border_ratatui();
     let c_accent = p.accent_ratatui();
     let c_text = p.text_ratatui();
     let c_muted = p.muted_ratatui();
@@ -1632,6 +1662,306 @@ pub fn render_model_selector(
         Span::styled(" Confirmar  ", Style::default().fg(c_muted)),
         Span::styled("[Esc]", Style::default().fg(c_accent)),
         Span::styled(" Cancelar", Style::default().fg(c_muted)),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+// ── Settings overlay ─────────────────────────────────────────────────────────
+
+/// Setting item for the settings viewer.
+#[derive(Debug, Clone)]
+pub struct SettingEntry {
+    pub key: String,
+    pub value: String,
+    pub editable: bool,
+}
+
+/// Build settings entries from the current AppConfig.
+pub fn build_settings_entries(
+    config: &halcon_core::types::AppConfig,
+) -> Vec<(String, Vec<SettingEntry>)> {
+    vec![
+        (
+            "General".into(),
+            vec![
+                SettingEntry {
+                    key: "provider".into(),
+                    value: config.general.default_provider.clone(),
+                    editable: true,
+                },
+                SettingEntry {
+                    key: "model".into(),
+                    value: config.general.default_model.clone(),
+                    editable: true,
+                },
+                SettingEntry {
+                    key: "temperature".into(),
+                    value: format!("{:.2}", config.general.temperature),
+                    editable: true,
+                },
+                SettingEntry {
+                    key: "max_tokens".into(),
+                    value: config.general.max_tokens.to_string(),
+                    editable: true,
+                },
+            ],
+        ),
+        (
+            "Agent Limits".into(),
+            vec![
+                SettingEntry {
+                    key: "max_rounds".into(),
+                    value: config.agent.limits.max_rounds.to_string(),
+                    editable: true,
+                },
+                SettingEntry {
+                    key: "tool_timeout_secs".into(),
+                    value: config.agent.limits.tool_timeout_secs.to_string(),
+                    editable: true,
+                },
+            ],
+        ),
+        (
+            "Security".into(),
+            vec![
+                SettingEntry {
+                    key: "pii_detection".into(),
+                    value: config.security.pii_detection.to_string(),
+                    editable: true,
+                },
+                SettingEntry {
+                    key: "audit_enabled".into(),
+                    value: config.security.audit_enabled.to_string(),
+                    editable: true,
+                },
+            ],
+        ),
+        (
+            "Tools".into(),
+            vec![
+                SettingEntry {
+                    key: "confirm_destructive".into(),
+                    value: config.tools.confirm_destructive.to_string(),
+                    editable: true,
+                },
+                SettingEntry {
+                    key: "timeout_secs".into(),
+                    value: config.tools.timeout_secs.to_string(),
+                    editable: true,
+                },
+            ],
+        ),
+        (
+            "Display".into(),
+            vec![SettingEntry {
+                key: "theme".into(),
+                value: config.display.theme.clone(),
+                editable: true,
+            }],
+        ),
+    ]
+}
+
+/// Render the settings viewer/editor overlay.
+pub fn render_settings(
+    frame: &mut Frame,
+    area: Rect,
+    sections: &[(String, Vec<SettingEntry>)],
+    selected: usize,
+    editing: bool,
+    edit_buffer: &str,
+) {
+    let p = &theme::active().palette;
+    let c_accent = p.accent_ratatui();
+    let c_text = p.text_ratatui();
+    let c_muted = p.muted_ratatui();
+    let c_bg = p.bg_panel_ratatui();
+    let c_success = p.success_ratatui();
+
+    let dialog = centered_rect(area, 65, 75);
+    frame.render_widget(Clear, dialog);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Settings (F7) ")
+        .title_alignment(Alignment::Center)
+        .border_style(Style::default().fg(c_accent))
+        .style(Style::default().bg(c_bg));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    let mut lines: Vec<Line> = vec![];
+    let mut flat_idx = 0usize;
+
+    for (section_name, entries) in sections {
+        lines.push(Line::from(Span::styled(
+            format!("  {section_name}"),
+            Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+
+        for entry in entries {
+            let is_selected = flat_idx == selected;
+            let key_style = if is_selected {
+                Style::default().fg(c_success).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(c_text)
+            };
+
+            let value_display = if is_selected && editing {
+                format!("{edit_buffer}█")
+            } else {
+                entry.value.clone()
+            };
+
+            let indicator = if is_selected { " ▸ " } else { "   " };
+            let editable_marker = if entry.editable { "" } else { " [ro]" };
+
+            lines.push(Line::from(vec![
+                Span::styled(indicator.to_string(), Style::default().fg(c_accent)),
+                Span::styled(pad_display(&entry.key, 22), key_style),
+                Span::styled(value_display, Style::default().fg(c_muted)),
+                Span::styled(editable_marker.to_string(), Style::default().fg(c_muted)),
+            ]));
+            flat_idx += 1;
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [↑↓] Navigate  ", Style::default().fg(c_muted)),
+        Span::styled(
+            "[Enter]",
+            Style::default().fg(c_success).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Edit  ", Style::default().fg(c_muted)),
+        Span::styled("[Esc]", Style::default().fg(c_accent)),
+        Span::styled(" Close", Style::default().fg(c_muted)),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+// ── LSP Status overlay ───────────────────────────────────────────────────────
+
+/// LSP connection info for display.
+#[derive(Debug, Clone)]
+pub struct LspConnectionInfo {
+    pub connected: bool,
+    pub server_pid: Option<u32>,
+    pub open_buffers: usize,
+    pub symbol_count: usize,
+    pub last_event: Option<String>,
+}
+
+impl Default for LspConnectionInfo {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            server_pid: None,
+            open_buffers: 0,
+            symbol_count: 0,
+            last_event: None,
+        }
+    }
+}
+
+/// Render the LSP status overlay.
+pub fn render_lsp_status(frame: &mut Frame, area: Rect, info: &LspConnectionInfo) {
+    let p = &theme::active().palette;
+    let c_accent = p.accent_ratatui();
+    let c_text = p.text_ratatui();
+    let c_muted = p.muted_ratatui();
+    let c_bg = p.bg_panel_ratatui();
+    let c_success = p.success_ratatui();
+    let c_warning = p.warning_ratatui();
+
+    let dialog = centered_rect(area, 55, 45);
+    frame.render_widget(Clear, dialog);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" LSP Status (F8) ")
+        .title_alignment(Alignment::Center)
+        .border_style(Style::default().fg(c_accent))
+        .style(Style::default().bg(c_bg));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    let status_color = if info.connected { c_success } else { c_warning };
+    let status_text = if info.connected {
+        "Connected"
+    } else {
+        "Disconnected"
+    };
+
+    let mut lines: Vec<Line> = vec![];
+
+    lines.push(Line::from(Span::styled(
+        "  Connection",
+        Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("    Status:       ", Style::default().fg(c_text)),
+        Span::styled(
+            status_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if let Some(pid) = info.server_pid {
+        lines.push(Line::from(vec![
+            Span::styled("    Server PID:   ", Style::default().fg(c_text)),
+            Span::styled(pid.to_string(), Style::default().fg(c_muted)),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::styled(
+        "  Workspace",
+        Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("    Open Buffers: ", Style::default().fg(c_text)),
+        Span::styled(info.open_buffers.to_string(), Style::default().fg(c_muted)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    Symbols:      ", Style::default().fg(c_text)),
+        Span::styled(info.symbol_count.to_string(), Style::default().fg(c_muted)),
+    ]));
+
+    if let Some(ref event) = info.last_event {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Last Event",
+            Style::default().fg(c_accent).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled(event.as_str(), Style::default().fg(c_muted)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    if !info.connected {
+        lines.push(Line::from(Span::styled(
+            "  Run `halcon lsp` in your IDE to connect",
+            Style::default().fg(c_muted),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("  [Esc]", Style::default().fg(c_accent)),
+        Span::styled(" Close", Style::default().fg(c_muted)),
     ]));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);

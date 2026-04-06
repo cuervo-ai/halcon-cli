@@ -179,12 +179,17 @@ fn test_ctx<'a>(
     resilience: &'a mut ResilienceManager,
     routing_config: &'a RoutingConfig,
 ) -> AgentContext<'a> {
+    // Phase 1: Stress tests get fresh permission pipeline
+    let pipeline = Box::leak(Box::new(
+        crate::repl::security::permission_pipeline::PermissionPipeline::new(),
+    ));
     AgentContext {
         provider,
         session,
         request,
         tool_registry,
         permissions,
+        permission_pipeline: pipeline,
         working_dir: "/tmp",
         event_tx,
         limits,
@@ -219,6 +224,7 @@ fn test_ctx<'a>(
         is_sub_agent: false,
         requested_provider: None,
         policy: std::sync::Arc::new(halcon_core::types::PolicyConfig::default()),
+        paloma_router: None,
     }
 }
 
@@ -318,6 +324,8 @@ async fn parallel_tool_batch_10_concurrent() {
         &exec_config,
         &batch_sink,
         None,
+        None, // permission_pipeline
+        None, // permissions
     )
     .await;
 
@@ -381,6 +389,8 @@ async fn large_tool_output_truncation() {
         &exec_config,
         &batch_sink,
         None,
+        None, // permission_pipeline
+        None, // permissions
     )
     .await;
 
@@ -565,6 +575,7 @@ fn compaction_protocol_integrity() {
         threshold_fraction: 0.8,
         keep_recent: 4,
         max_context_tokens: 200_000,
+        ..Default::default()
     });
 
     // Build 20 messages with alternating tool_use/tool_result pairs.
@@ -811,6 +822,8 @@ async fn empty_malformed_tool_results() {
         &exec_config,
         &batch_sink,
         None,
+        None, // permission_pipeline
+        None, // permissions
     )
     .await;
 

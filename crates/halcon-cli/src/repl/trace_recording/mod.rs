@@ -6,4 +6,4 @@
 
 pub mod recorder;
 
-pub use recorder::{TraceEvent, TraceRecorder};
+pub use recorder::TraceRecorder;
