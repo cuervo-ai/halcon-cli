@@ -142,16 +142,18 @@ momoto-metrics = { path = "vendor/momoto-metrics" }
 momoto-intelligence = { path = "vendor/momoto-intelligence" }
 
 # Paloma Frontier Fabric Router (formally verified routing engine)
-paloma-types = { path = "../Zuclubit/paloma/crates/paloma-types" }
-paloma-policy = { path = "../Zuclubit/paloma/crates/paloma-policy" }
-paloma-registry = { path = "../Zuclubit/paloma/crates/paloma-registry" }
-paloma-scoring = { path = "../Zuclubit/paloma/crates/paloma-scoring" }
-paloma-planner = { path = "../Zuclubit/paloma/crates/paloma-planner" }
-paloma-budget = { path = "../Zuclubit/paloma/crates/paloma-budget" }
-paloma-health = { path = "../Zuclubit/paloma/crates/paloma-health" }
-paloma-pipeline = { path = "../Zuclubit/paloma/crates/paloma-pipeline" }
-paloma-trace = { path = "../Zuclubit/paloma/crates/paloma-trace" }
-paloma-ledger = { path = "../Zuclubit/paloma/crates/paloma-ledger" }
+# Pinned to git tag v0.1.0 — update by bumping the tag after coordinated testing.
+# Previous: path = "../Zuclubit/paloma/crates/paloma-*" (audit finding G5).
+paloma-types = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-policy = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-registry = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-scoring = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-planner = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-budget = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-health = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-pipeline = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-trace = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
+paloma-ledger = { git = "https://github.com/cuervo-ai/paloma", tag = "v0.1.0" }
 
 # TUI
 ratatui = "0.29"
